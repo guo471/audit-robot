@@ -1,0 +1,10 @@
+paddlepaddle>=3.0
+paddleocr>=3.0
+opencv-python>=4.8
+numpy>=1.24
+pillow>=10.0
+piexif>=1.1
+fastapi>=0.110
+uvicorn>=0.27
+pytest>=8.0
+httpx>=0.27
