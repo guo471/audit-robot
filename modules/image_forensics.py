@@ -96,8 +96,8 @@ class ImageForensics:
             except Exception:
                 pass
 
-        except Exception as e:
-            flags.append(f"EXIF 读取异常: {e}")
+        except Exception:
+            flags.append("EXIF 读取异常")
 
         info["flags"] = flags
         info["flag_count"] = len(flags)
@@ -412,6 +412,20 @@ class ImageForensics:
         if uniform_result.get("is_screen_rephoto"):
             issues.append(f"翻拍特征: 边缘CV={uniform_result['uniform_score']}")
 
+        detector_errors = [
+            label
+            for label, result in (
+                ("摩尔纹检测", moire_result),
+                ("ELA分析", ela_result),
+                ("噪点分析", noise_result),
+                ("清晰度检测", blur_result),
+                ("翻拍检测", uniform_result),
+            )
+            if result.get("error")
+        ]
+        if detector_errors:
+            issues.append("鉴伪检测异常: " + "、".join(detector_errors))
+
         # 仅有 EXIF/模糊 异常而其他指标无异常 → 不判定为可疑
         # EXIF：用户上传的图片几乎都会丢失（微信/网页上传清空元数据）
         # 模糊：产品照片背景虚化很常见，不单独触发
@@ -423,7 +437,10 @@ class ImageForensics:
             uniform_result.get("is_screen_rephoto"),
         ])
 
-        if has_non_exif_issue:
+        if detector_errors:
+            status = "suspicious"
+            message = "; ".join(issues)
+        elif has_non_exif_issue:
             status = "suspicious"
             message = "; ".join(issues)
         else:

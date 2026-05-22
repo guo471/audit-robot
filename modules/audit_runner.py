@@ -3,7 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from .audit_models import AuditRequest, AuditResponse
+from .audit_models import AuditRequest, AuditResponse, resolve_order_no
 from .address_checker import AddressChecker
 from .category_classifier import classify_audit_category
 from .code_extractor import CodeExtractor
@@ -43,10 +43,11 @@ def audit_request(
     def timed_out() -> bool:
         return elapsed() >= timeout_sec
 
-    def evidence(sn_match: bool = False) -> dict:
+    def evidence(sn_match: bool = False, image_roles_ok: bool = True) -> dict:
         return {
             "sn_match": sn_match,
-            "image_roles_ok": True,
+            "sn_checked_image": "last",
+            "image_roles_ok": image_roles_ok,
             "real_photo_pass": True,
             "id_name_match": None,
             "id_number_match": None,
@@ -82,14 +83,9 @@ def audit_request(
                 return str(value).strip().upper().replace(" ", "")
         return ""
 
-    def safe_evidence(**updates) -> dict:
-        result = evidence(False)
-        result.update(updates)
-        return result
-
     def manual(scene: str, path: str, reason: str, extra_evidence: Optional[dict] = None):
         return AuditResponse.manual(
-            jl_order_no=request.jl_order_no,
+            jl_order_no=order_no,
             scene=scene,
             path=path,
             elapsed_sec=timeout_sec if reason == "\u5355\u5355\u8d85\u65f6" else elapsed(),
@@ -97,17 +93,22 @@ def audit_request(
             evidence=extra_evidence,
         )
 
+    order_no = resolve_order_no(request.jl_order_no, request.channel_order_no, request.fields)
     category = classify_audit_category(request.scene_hint, request.fields)
     scene = category.scene
+    grouped = group_images_by_role(request.images)
+    image_roles_ok = required_roles_present(grouped, scene)
+
+    def safe_evidence(**updates) -> dict:
+        result = evidence(False, image_roles_ok)
+        result.update(updates)
+        return result
+
     if not category.supported:
         return manual(scene, "precheck", category.reason or "\u5ba1\u6838\u54c1\u7c7b\u6682\u4e0d\u652f\u6301")
 
-    if not request.jl_order_no:
+    if not order_no:
         return manual(scene, "precheck", "\u5409\u8054\u8ba2\u5355\u53f7\u4e3a\u7a7a")
-
-    grouped = group_images_by_role(request.images)
-    if not required_roles_present(grouped, scene):
-        return manual(scene, "precheck", "\u56fe\u7247\u89d2\u8272\u4e0d\u5b8c\u6574\u6216\u65e0\u6cd5\u8bc6\u522b")
 
     if category.category == "home_appliance":
         address = system_address()
@@ -128,25 +129,25 @@ def audit_request(
     if not system_sn:
         return manual(scene, "precheck", "\u9875\u9762SN\u4e3a\u7a7a")
 
+    if not request.images:
+        return manual(scene, "precheck", "图片为空")
+
     paths = [image.path for image in request.images]
+    forensics_paths = [request.images[-1].path] if scene == "no_coupon" else paths
     forensics = deps.get_forensics()
-    for path in paths:
+    for path in forensics_paths:
         if timed_out():
             return manual(scene, "precheck", "\u5355\u5355\u8d85\u65f6")
         result = forensics.full_analysis(path)
         if timed_out():
             return manual(scene, "precheck", "\u5355\u5355\u8d85\u65f6")
         if result.get("status") != "pass":
-            return manual(scene, "precheck", "\u56fe\u7247\u98ce\u9669\u672a\u901a\u8fc7", {"forensics": result})
+            return manual(scene, "precheck", "\u56fe\u7247\u98ce\u9669\u672a\u901a\u8fc7", safe_evidence(real_photo_pass=False))
 
     ocr = deps.get_ocr()
     enhanced_ocr_by_path = {}
-    sn_images = (
-        grouped.get("product_photo", [])
-        + grouped.get("unboxing_photo", [])
-        + grouped.get("activation_photo", [])
-    )
-    sn_paths = [image.path for image in sn_images]
+    last_image_path = request.images[-1].path if request.images else ""
+    id_number_match = None
 
     if scene == "no_coupon":
         expected_name = system_name()
@@ -154,14 +155,17 @@ def audit_request(
             return manual(scene, "precheck", "\u7cfb\u7edf\u59d3\u540d\u4e3a\u7a7a", safe_evidence(id_name_match=False, id_valid=False))
 
         parsed_cards = []
-        for image in grouped.get("id_front", []) + grouped.get("id_back", []):
+        for image in request.images[:-1]:
             if timed_out():
                 return manual(scene, "fast", "\u5355\u5355\u8d85\u65f6")
-            ocr_texts = ocr.extract_text_enhanced(image.path)
-            enhanced_ocr_by_path[image.path] = ocr_texts
+            try:
+                ocr_texts = ocr.extract_text_enhanced(image.path)
+                enhanced_ocr_by_path[image.path] = ocr_texts
+                parsed_cards.append(IDCardParser.parse(ocr_texts) or {})
+            except Exception:
+                return manual(scene, "fast", "\u8eab\u4efd\u8bc1OCR\u5f02\u5e38", safe_evidence(id_name_match=False, id_valid=False))
             if timed_out():
                 return manual(scene, "fast", "\u5355\u5355\u8d85\u65f6")
-            parsed_cards.append(IDCardParser.parse(ocr_texts) or {})
 
         parsed_name = next((str(card.get("name")).strip() for card in parsed_cards if card.get("name")), "")
         parsed_id_number = next(
@@ -175,7 +179,6 @@ def audit_request(
         id_valid = any(bool(card.get("is_valid")) for card in parsed_cards)
         names_match = bool(parsed_name) and parsed_name.replace(" ", "") == expected_name.replace(" ", "")
         expected_id_number = system_id_number()
-        id_number_match = None
         if expected_id_number:
             id_number_match = bool(parsed_id_number) and parsed_id_number == expected_id_number
 
@@ -188,18 +191,24 @@ def audit_request(
         if not id_valid:
             return manual(scene, "precheck", "\u8eab\u4efd\u8bc1\u6709\u6548\u671f\u65e0\u6548", safe_evidence(id_name_match=True, id_number_match=id_number_match, id_valid=False))
 
-    for path in sn_paths:
+    if last_image_path:
         if timed_out():
             return manual(scene, "fast", "\u5355\u5355\u8d85\u65f6")
-        ocr_texts = enhanced_ocr_by_path.get(path)
+        ocr_texts = enhanced_ocr_by_path.get(last_image_path)
         if ocr_texts is None:
-            ocr_texts = ocr.extract_text_enhanced(path)
-            enhanced_ocr_by_path[path] = ocr_texts
+            try:
+                ocr_texts = ocr.extract_text_enhanced(last_image_path)
+                enhanced_ocr_by_path[last_image_path] = ocr_texts
+            except Exception:
+                return manual(scene, "fast", "SN\u56feOCR\u5f02\u5e38", safe_evidence(sn_match=False))
         if timed_out():
             return manual(scene, "fast", "\u5355\u5355\u8d85\u65f6")
-        match = CodeExtractor.match_system_sn(ocr_texts, system_sn)
+        try:
+            match = CodeExtractor.match_system_sn(ocr_texts, system_sn)
+        except Exception:
+            return manual(scene, "fast", "SN\u5339\u914d\u5f02\u5e38", safe_evidence(sn_match=False))
         if match.get("sn_match"):
-            pass_evidence = evidence(True)
+            pass_evidence = evidence(True, image_roles_ok)
             if scene == "no_coupon":
                 pass_evidence["id_name_match"] = True
                 pass_evidence["id_number_match"] = id_number_match
@@ -207,22 +216,28 @@ def audit_request(
             if category.category == "home_appliance":
                 pass_evidence["address_detail_ok"] = True
             return AuditResponse.pass_(
-                jl_order_no=request.jl_order_no,
+                jl_order_no=order_no,
                 scene=scene,
                 path="fast",
                 elapsed_sec=elapsed(),
                 evidence=pass_evidence,
             )
 
-    for path in sn_paths:
+    if last_image_path:
         if timed_out():
             return manual(scene, "slow", "\u5355\u5355\u8d85\u65f6")
-        ocr_texts = ocr.extract_text_tiled(path)
+        try:
+            ocr_texts = ocr.extract_text_tiled(last_image_path)
+        except Exception:
+            return manual(scene, "slow", "SN\u56feOCR\u5f02\u5e38", safe_evidence(sn_match=False))
         if timed_out():
             return manual(scene, "slow", "\u5355\u5355\u8d85\u65f6")
-        match = CodeExtractor.match_system_sn(ocr_texts, system_sn)
+        try:
+            match = CodeExtractor.match_system_sn(ocr_texts, system_sn)
+        except Exception:
+            return manual(scene, "slow", "SN\u5339\u914d\u5f02\u5e38", safe_evidence(sn_match=False))
         if match.get("sn_match"):
-            pass_evidence = evidence(True)
+            pass_evidence = evidence(True, image_roles_ok)
             if scene == "no_coupon":
                 pass_evidence["id_name_match"] = True
                 pass_evidence["id_number_match"] = id_number_match
@@ -230,14 +245,14 @@ def audit_request(
             if category.category == "home_appliance":
                 pass_evidence["address_detail_ok"] = True
             return AuditResponse.pass_(
-                jl_order_no=request.jl_order_no,
+                jl_order_no=order_no,
                 scene=scene,
                 path="slow",
                 elapsed_sec=elapsed(),
                 evidence=pass_evidence,
             )
 
-    miss_evidence = evidence(False)
+    miss_evidence = evidence(False, image_roles_ok)
     if scene == "no_coupon":
         miss_evidence["id_name_match"] = True
         miss_evidence["id_number_match"] = id_number_match

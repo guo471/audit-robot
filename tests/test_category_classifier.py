@@ -19,6 +19,14 @@ def test_classifies_guobu_3c():
     assert result.supported is True
 
 
+def test_classifies_guobu_enum_3c():
+    result = classify_audit_category("guobu", {"product_type": "3C", "product_name": "笔记本电脑"})
+
+    assert result.scene == "guobu"
+    assert result.category == "3c"
+    assert result.supported is True
+
+
 def test_classifies_guobu_home_appliance():
     result = classify_audit_category("家电数码3C（国补2026）", {"product_type": "家电", "product_name": "海尔冰箱"})
 

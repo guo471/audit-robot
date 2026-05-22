@@ -3,6 +3,7 @@ import os
 import time
 import logging
 import json
+from dataclasses import replace
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
@@ -16,8 +17,9 @@ from config import (
     AUDIT_SERVICE_PORT,
     AUDIT_SERVICE_TOKEN_ENV,
 )
-from modules.audit_models import AuditRequest, AuditResponse
+from modules.audit_models import AuditRequest, AuditResponse, resolve_channel_order_no, resolve_order_no
 from modules.audit_runner import AuditDependencies, audit_request
+from modules.page_parser import merge_page_text_fields
 from modules.privacy import redact_text
 
 
@@ -70,16 +72,25 @@ def audit(payload: dict, x_audit_token: str | None = Header(default=None)) -> di
     request = AuditRequest(jl_order_no="")
     try:
         request = AuditRequest.from_dict(payload)
+        if request.page_text:
+            fields = merge_page_text_fields(request.page_text, request.fields)
+            channel_order_no = resolve_channel_order_no(request.channel_order_no, fields)
+            request = replace(
+                request,
+                fields=fields,
+                channel_order_no=channel_order_no,
+                jl_order_no=resolve_order_no(request.jl_order_no, channel_order_no, fields),
+            )
         response = audit_request(request, deps=DEPS, timeout_sec=AUDIT_ORDER_TIMEOUT_SEC)
     except Exception:
         elapsed = time.monotonic() - started
         logger.error("Audit service failed: %s", redact_text(request.jl_order_no))
-        response = AuditResponse.error(
+        response = AuditResponse.manual(
             jl_order_no=request.jl_order_no,
             scene=request.scene_hint or "unknown",
             path="error",
             elapsed_sec=elapsed,
-            manual_reason="服务异常",
+            manual_reason="服务异常，转人工",
         )
     return response.to_dict()
 

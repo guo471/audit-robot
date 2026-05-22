@@ -35,7 +35,12 @@ def classify_audit_category(scene_hint, fields):
     if any(keyword in text for keyword in CAR_KEYWORDS):
         return CategoryResult("unsupported", "unsupported", False)
 
-    is_guobu = "国补" in text or "家电数码3c" in text
+    is_guobu = (
+        "国补" in text
+        or "家电数码3c" in text
+        or "guobu" in text
+        or "national_subsidy" in text
+    )
     scene = "guobu" if is_guobu else "no_coupon"
 
     category_text = product_text or text

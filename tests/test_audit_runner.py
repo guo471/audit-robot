@@ -28,6 +28,21 @@ class FakeOCR:
         return [{"text": text, "confidence": 0.99, "box": None} for text in texts]
 
 
+class RaisingOCR:
+    def __init__(self, fail_on="enhanced"):
+        self.fail_on = fail_on
+
+    def extract_text_enhanced(self, path):
+        if self.fail_on == "enhanced":
+            raise RuntimeError(f"OCR failed for {path}")
+        return [{"text": "NOISE", "confidence": 0.99, "box": None}]
+
+    def extract_text_tiled(self, path):
+        if self.fail_on == "tiled":
+            raise RuntimeError(f"OCR failed for {path}")
+        return [{"text": "NOISE", "confidence": 0.99, "box": None}]
+
+
 class FakeForensics:
     def __init__(self, status="pass"):
         self.status = status
@@ -35,7 +50,8 @@ class FakeForensics:
 
     def full_analysis(self, path):
         self.calls.append(path)
-        return {"status": self.status, "message": self.status}
+        status = self.status.get(path, "pass") if isinstance(self.status, dict) else self.status
+        return {"status": status, "message": status}
 
 
 def guobu_request(images=None, sn="SN001234"):
@@ -81,19 +97,68 @@ def no_coupon_request(images=None, sn="SN001234", fields=None):
 
 
 def test_fast_path_passes_when_sn_and_roles_match():
-    deps = AuditDependencies(ocr=FakeOCR(["SN001234"]), forensics=FakeForensics())
+    ocr = FakeOCR(
+        {
+            "C:/tmp/product.jpg": ["NOISE"],
+            "C:/tmp/unbox.jpg": ["NOISE"],
+            "C:/tmp/sn.jpg": ["SN001234"],
+        }
+    )
+    deps = AuditDependencies(ocr=ocr, forensics=FakeForensics())
 
     response = audit_request(guobu_request(), deps=deps)
 
     assert response.decision == "pass"
     assert response.path == "fast"
     assert response.evidence["sn_match"] is True
+    assert response.evidence["sn_checked_image"] == "last"
+    assert ocr.enhanced_calls == 1
     assert "found_sns" not in response.evidence
     assert "match_details" not in response.evidence
 
 
+def test_channel_order_no_fallback_reaches_later_precheck():
+    request = AuditRequest(
+        jl_order_no="",
+        channel_order_no="CH-FALLBACK-001",
+        scene_hint="家电数码3C（国补2026）",
+        fields={"product_type": "3c", "sn": "SN001234"},
+        images=[],
+    )
+
+    response = audit_request(request, deps=AuditDependencies(ocr=FakeOCR([]), forensics=FakeForensics()))
+
+    assert response.jl_order_no == "CH-FALLBACK-001"
+    assert response.manual_reason == "图片为空"
+
+
+def test_sn_match_on_non_last_image_still_goes_manual_when_last_misses():
+    deps = AuditDependencies(
+        ocr=FakeOCR(
+            {
+                "C:/tmp/product.jpg": ["SN001234"],
+                "C:/tmp/unbox.jpg": ["SN001234"],
+                "C:/tmp/sn.jpg": ["NOISE"],
+            },
+            {
+                "C:/tmp/sn.jpg": ["NOISE"],
+            },
+        ),
+        forensics=FakeForensics(),
+    )
+
+    response = audit_request(guobu_request(), deps=deps)
+
+    assert response.decision == "manual"
+    assert response.evidence["sn_match"] is False
+    assert response.evidence["sn_checked_image"] == "last"
+
+
 def test_slow_path_uses_tiled_ocr_when_fast_sn_misses():
-    ocr = FakeOCR(["NOISE"], ["SN001234"])
+    ocr = FakeOCR(
+        {"C:/tmp/sn.jpg": ["NOISE"]},
+        {"C:/tmp/sn.jpg": ["SN001234"]},
+    )
     deps = AuditDependencies(ocr=ocr, forensics=FakeForensics())
 
     response = audit_request(guobu_request(), deps=deps)
@@ -103,16 +168,17 @@ def test_slow_path_uses_tiled_ocr_when_fast_sn_misses():
     assert ocr.tiled_calls >= 1
 
 
-def test_unknown_image_role_goes_manual():
-    deps = AuditDependencies(ocr=FakeOCR(["SN001234"]), forensics=FakeForensics())
+def test_unknown_image_role_does_not_go_manual_when_last_sn_matches():
+    deps = AuditDependencies(ocr=FakeOCR({"C:/tmp/other.jpg": ["SN001234"]}), forensics=FakeForensics())
 
     response = audit_request(
         guobu_request(images=[AuditImage(title="其他材料", path="C:/tmp/other.jpg")]),
         deps=deps,
     )
 
-    assert response.decision == "manual"
-    assert "图片角色" in response.manual_reason
+    assert response.decision == "pass"
+    assert response.evidence["sn_match"] is True
+    assert response.evidence["image_roles_ok"] is False
 
 
 def test_forensics_risk_goes_manual():
@@ -122,6 +188,7 @@ def test_forensics_risk_goes_manual():
 
     assert response.decision == "manual"
     assert "图片风险" in response.manual_reason
+    assert response.evidence["real_photo_pass"] is False
 
 
 def test_timeout_after_expensive_ocr_returns_manual_not_pass():
@@ -138,6 +205,17 @@ def test_timeout_after_expensive_ocr_returns_manual_not_pass():
     assert response.manual_reason == "单单超时"
 
 
+def test_sn_ocr_exception_goes_manual_not_error():
+    deps = AuditDependencies(ocr=RaisingOCR("enhanced"), forensics=FakeForensics())
+
+    response = audit_request(guobu_request(), deps=deps)
+
+    assert response.decision == "manual"
+    assert response.action == "next"
+    assert response.evidence["sn_match"] is False
+    assert "C:/tmp" not in response.manual_reason
+
+
 def test_no_coupon_missing_id_parse_goes_manual(monkeypatch):
     monkeypatch.setattr(
         "modules.audit_runner.IDCardParser.parse",
@@ -151,6 +229,17 @@ def test_no_coupon_missing_id_parse_goes_manual(monkeypatch):
     assert response.evidence["id_name_match"] is False
     assert response.evidence["id_valid"] is False
     assert "id_number" not in response.evidence
+
+
+def test_no_coupon_id_ocr_exception_goes_manual_not_error():
+    deps = AuditDependencies(ocr=RaisingOCR("enhanced"), forensics=FakeForensics())
+
+    response = audit_request(no_coupon_request(), deps=deps)
+
+    assert response.decision == "manual"
+    assert response.action == "next"
+    assert response.evidence["id_name_match"] is False
+    assert response.evidence["id_valid"] is False
 
 
 def test_no_coupon_id_name_mismatch_goes_manual(monkeypatch):
@@ -228,6 +317,68 @@ def test_no_coupon_valid_id_allows_sn_pass_and_ignores_sn_on_id_images(monkeypat
     assert response.evidence["id_number_match"] is None
     assert response.evidence["id_valid"] is True
     assert parsed_batches == [["姓名张三 SN001234"], ["有效期限2020.01.01-2040.01.01"]]
+
+
+def test_no_coupon_ignores_id_image_forensics_when_sn_image_passes(monkeypatch):
+    monkeypatch.setattr(
+        "modules.audit_runner.IDCardParser.parse",
+        lambda texts: {"name": "张三", "id_number": "440101199001011234", "is_valid": True},
+    )
+    forensics = FakeForensics(
+        {
+            "C:/tmp/id-front.jpg": "suspicious",
+            "C:/tmp/id-back.jpg": "suspicious",
+            "C:/tmp/sn.jpg": "pass",
+        }
+    )
+    deps = AuditDependencies(
+        ocr=FakeOCR(
+            {
+                "C:/tmp/id-front.jpg": ["姓名张三"],
+                "C:/tmp/id-back.jpg": ["有效期限2020.01.01-2040.01.01"],
+                "C:/tmp/sn.jpg": ["SN001234"],
+            }
+        ),
+        forensics=forensics,
+    )
+
+    response = audit_request(no_coupon_request(), deps=deps)
+
+    assert response.decision == "pass"
+    assert response.evidence["id_name_match"] is True
+    assert response.evidence["id_valid"] is True
+    assert forensics.calls == ["C:/tmp/sn.jpg"]
+
+
+def test_no_coupon_sn_image_forensics_risk_goes_manual(monkeypatch):
+    monkeypatch.setattr(
+        "modules.audit_runner.IDCardParser.parse",
+        lambda texts: {"name": "张三", "id_number": "440101199001011234", "is_valid": True},
+    )
+    forensics = FakeForensics(
+        {
+            "C:/tmp/id-front.jpg": "pass",
+            "C:/tmp/id-back.jpg": "pass",
+            "C:/tmp/sn.jpg": "suspicious",
+        }
+    )
+    deps = AuditDependencies(
+        ocr=FakeOCR(
+            {
+                "C:/tmp/id-front.jpg": ["姓名张三"],
+                "C:/tmp/id-back.jpg": ["有效期限2020.01.01-2040.01.01"],
+                "C:/tmp/sn.jpg": ["SN001234"],
+            }
+        ),
+        forensics=forensics,
+    )
+
+    response = audit_request(no_coupon_request(), deps=deps)
+
+    assert response.decision == "manual"
+    assert response.action == "next"
+    assert response.evidence["real_photo_pass"] is False
+    assert forensics.calls == ["C:/tmp/sn.jpg"]
 
 
 def test_guobu_home_appliance_coarse_city_address_goes_manual():
