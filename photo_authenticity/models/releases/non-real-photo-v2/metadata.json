@@ -1,0 +1,61 @@
+{
+  "artifact_version": "fft-rescue-threshold-only-v2",
+  "extractor_version": "fft-v1-512-ycbcr-5x53",
+  "candidate": "fft",
+  "feature_dimension": 795,
+  "C": 10.0,
+  "class_weight": "balanced",
+  "threshold": 0.995,
+  "selection_seed": 917,
+  "model_random_seed": 17,
+  "selection_method": "grouped-4-fold-one-standard-error",
+  "max_total_real_intervention": 0.06,
+  "dev_row_count": 200,
+  "dev_manifest_sha256": "0fa1fc081309c0bc7a3ba28cf5d7439b19e9d80780bac989ff5ddee069ef6634",
+  "dev_rows_sha256": "90fb710f91a81ecfa6282a5ca4c3d7bb8bd9d7f961bcc767b43def03f822994f",
+  "v4_version": "non-real-photo-agent-v4/full-only-clean",
+  "v4_results_sha256": "7cd037e598ee56188868b1139553bd3309092e7e82a94405d6f8ac4e527ead9c",
+  "code_sha256": "b781d9c6f7dab7c4d9e12ab55003e51fa467ebdd998f7fbac63cea9c3bab1e15",
+  "model_sha256": "49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65b96aa512b",
+  "route_policy": {
+    "allowed_transition": "no_evidence->manual_review"
+  },
+  "failure_policy": {
+    "retry_owner": "validation_runner",
+    "max_attempts": 2,
+    "after_retries": "manual_review"
+  },
+  "feature_policy": {
+    "source": "decoded_rgb_pixels_only",
+    "forbidden": [
+      "filename",
+      "path",
+      "dimensions",
+      "format",
+      "watermark_text",
+      "order_metadata",
+      "embedding"
+    ]
+  },
+  "selection_audit": {
+    "rescued_nonreal": 24,
+    "added_real_manual": 1,
+    "mean_nonreal_rate": 1.0,
+    "se_nonreal_rate": 0.0,
+    "one_se_best_mean": 1.0,
+    "one_se_best_se": 0.0,
+    "one_se_cutoff": 1.0
+  },
+  "parent_artifact_version": "fft-rescue-freeze-v1",
+  "parent_model_sha256": "49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65b96aa512b",
+  "parent_metadata_sha256": "106272cce0d8a5f62fa9839d3b9213ce776aba407a1f93e59e35fe75a2c4e27d",
+  "diagnosis_sha256": "f203f2d156de074aac68cb6000a66d302599fc4d90443d623bd45d6d3e72e678",
+  "diagnosis_filename": "metrics.json",
+  "derivation": {
+    "kind": "threshold_only",
+    "retrained": false,
+    "post_hoc": true,
+    "reason": "validation100-v1 exceeded real intervention budget; conservative rounded threshold retained >=90 nonreal on dev OOF and v1 diagnosis",
+    "requires_fresh_100_plus_100_validation": true
+  }
+}
