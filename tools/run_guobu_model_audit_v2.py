@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -459,10 +459,19 @@ CSV_COLUMNS = [
     ("photo_authenticity_fft_count", "图片真实性FFT命中图片数"),
     ("photo_authenticity_service_failure", "图片真实性服务是否异常"),
     ("photo_authenticity_fallback_calls", "图片真实性兜底调用数"),
-    ("photo_authenticity_elapsed_sec", "图片真实性新增耗时秒"),
-    ("photo_authenticity_tokens", "图片真实性阶段token"),
+    ("photo_authenticity_elapsed_sec", "图片真实性后处理耗时秒（兼容列）"),
+    ("photo_authenticity_tokens", "图片真实性后处理token（兼容列）"),
     ("photo_authenticity_image_results", "图片真实性逐图结果JSON"),
     ("photo_authenticity_error", "图片真实性异常"),
+    ("merged_compliance_total_tokens", "合并后整次图片合规token"),
+    ("merged_compliance_total_elapsed_sec", "合并后整次图片合规耗时秒"),
+    ("photo_authenticity_postprocess_tokens", "真实性后处理token"),
+    ("photo_authenticity_postprocess_elapsed_sec", "真实性后处理耗时秒"),
+    ("baseline_compliance_tokens", "历史同类合规基线token"),
+    ("baseline_compliance_elapsed_sec", "历史同类合规基线耗时秒"),
+    ("photo_authenticity_incremental_tokens", "真实性可计算增量token"),
+    ("photo_authenticity_incremental_elapsed_sec", "真实性可计算增量耗时秒"),
+    ("photo_authenticity_incremental_available", "真实性增量是否可计算"),
 ]
 
 
@@ -478,6 +487,15 @@ PHOTO_AUTHENTICITY_REPORT_DEFAULTS = {
     "photo_authenticity_tokens": 0,
     "photo_authenticity_image_results": "",
     "photo_authenticity_error": "",
+    "merged_compliance_total_tokens": "",
+    "merged_compliance_total_elapsed_sec": "",
+    "photo_authenticity_postprocess_tokens": 0,
+    "photo_authenticity_postprocess_elapsed_sec": 0.0,
+    "baseline_compliance_tokens": "",
+    "baseline_compliance_elapsed_sec": "",
+    "photo_authenticity_incremental_tokens": "",
+    "photo_authenticity_incremental_elapsed_sec": "",
+    "photo_authenticity_incremental_available": False,
 }
 
 
@@ -497,7 +515,35 @@ def prepare_photo_authenticity_report_fields(row: dict[str, Any]) -> dict[str, A
         row["photo_authenticity_image_results"] = json.dumps(
             image_results, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         )
+    row["photo_authenticity_tokens"] = int(row.get("photo_authenticity_postprocess_tokens") or 0)
+    row["photo_authenticity_elapsed_sec"] = float(row.get("photo_authenticity_postprocess_elapsed_sec") or 0)
+    has_baseline = row.get("baseline_compliance_tokens") != "" and row.get("baseline_compliance_elapsed_sec") != ""
+    has_merged = row.get("merged_compliance_total_tokens") != "" and row.get("merged_compliance_total_elapsed_sec") != ""
+    if has_baseline and has_merged:
+        row["photo_authenticity_incremental_tokens"] = (
+            int(row["merged_compliance_total_tokens"]) - int(row["baseline_compliance_tokens"])
+            + int(row["photo_authenticity_postprocess_tokens"] or 0)
+        )
+        row["photo_authenticity_incremental_elapsed_sec"] = round(
+            float(row["merged_compliance_total_elapsed_sec"]) - float(row["baseline_compliance_elapsed_sec"])
+            + float(row["photo_authenticity_postprocess_elapsed_sec"] or 0), 4,
+        )
+        row["photo_authenticity_incremental_available"] = True
     return row
+
+
+def apply_optional_compliance_baseline(row: dict[str, Any], env: Mapping[str, str]) -> None:
+    path_text = str(env.get("PHOTO_AUTHENTICITY_BASELINE_PATH") or "").strip()
+    if not path_text:
+        return
+    mapping = json.loads(Path(path_text).read_text(encoding="utf-8-sig"))
+    item = mapping.get(str(row.get("id") or "")) if isinstance(mapping, dict) else None
+    if item is None:
+        return
+    if not isinstance(item, dict) or "tokens" not in item or "elapsed_sec" not in item:
+        raise ValueError("photo authenticity baseline entry requires tokens and elapsed_sec")
+    row["baseline_compliance_tokens"] = int(item["tokens"])
+    row["baseline_compliance_elapsed_sec"] = float(item["elapsed_sec"])
 
 
 def finalize_photo_authenticity_report_fields(
@@ -505,6 +551,7 @@ def finalize_photo_authenticity_report_fields(
 ) -> dict[str, Any]:
     """Record the configured mode even when the authenticity stage was skipped."""
     row["photo_authenticity_mode"] = config.mode
+    apply_optional_compliance_baseline(row, os.environ)
     return prepare_photo_authenticity_report_fields(row)
 
 
@@ -513,6 +560,7 @@ def summarize_photo_authenticity(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for row in rows:
         mode = str(row.get("photo_authenticity_mode") or "off")
         mode_counts[mode] = mode_counts.get(mode, 0) + 1
+    baseline_orders = sum(bool(row.get("photo_authenticity_incremental_available")) for row in rows)
     return {
         "mode_counts": mode_counts,
         "would_manual_orders": sum(bool(row.get("photo_authenticity_would_manual")) for row in rows),
@@ -523,6 +571,16 @@ def summarize_photo_authenticity(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "fallback_calls": sum(int(row.get("photo_authenticity_fallback_calls") or 0) for row in rows),
         "latency_sec": round(sum(float(row.get("photo_authenticity_elapsed_sec") or 0) for row in rows), 2),
         "tokens": sum(int(row.get("photo_authenticity_tokens") or 0) for row in rows),
+        "merged_compliance_total_tokens": sum(int(row.get("merged_compliance_total_tokens") or 0) for row in rows),
+        "merged_compliance_total_elapsed_sec": round(sum(float(row.get("merged_compliance_total_elapsed_sec") or 0) for row in rows), 2),
+        "postprocess_tokens": sum(int(row.get("photo_authenticity_postprocess_tokens") or 0) for row in rows),
+        "postprocess_elapsed_sec": round(sum(float(row.get("photo_authenticity_postprocess_elapsed_sec") or 0) for row in rows), 2),
+        "available_incremental_tokens": sum(int(row.get("photo_authenticity_incremental_tokens") or 0) for row in rows if row.get("photo_authenticity_incremental_available")),
+        "available_incremental_elapsed_sec": round(sum(float(row.get("photo_authenticity_incremental_elapsed_sec") or 0) for row in rows if row.get("photo_authenticity_incremental_available")), 2),
+        "baseline_coverage": {
+            "orders_with_baseline": baseline_orders, "total_orders": len(rows),
+            "rate": round(baseline_orders / len(rows), 4) if rows else 0.0,
+        },
     }
 
 MODEL_TIMEOUT_SEC = 60
@@ -2463,14 +2521,17 @@ def audit_task_hybrid(
     compliance = enforce_photo_noncompliance_manual(compliance, address_ok=precheck["address_ok"])
 
     row = _final_row(task, compliance, normalized_sn, compliance, time.time() - started, pre_elapsed, sn_elapsed, compliance_elapsed)
-    authenticity_tokens = _usage_total(compliance_usage) if authenticity_config.mode != "off" else 0
+    authenticity_postprocess_tokens = 0
+    if authenticity_config.mode != "off":
+        row["merged_compliance_total_tokens"] = _usage_total(compliance_usage)
+        row["merged_compliance_total_elapsed_sec"] = round(compliance_elapsed, 4)
     fallback_raw: dict[str, Any] = {}
     fallback_usage: dict[str, Any] = {}
     fallback_cached = False
     fallback_elapsed = 0.0
 
     def authenticity_fallback(image: dict[str, Any]) -> Any:
-        nonlocal model_calls, total_tokens, authenticity_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
+        nonlocal model_calls, total_tokens, authenticity_postprocess_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
         fallback_prompt = load_approved_v4_prompt(
             PROJECT_ROOT / "photo_authenticity" / "prompts" / "non_real_photo_auditor_v4.txt"
         )
@@ -2490,7 +2551,7 @@ def audit_task_hybrid(
         fallback_raw, fallback_usage, fallback_cached, fallback_elapsed = {"content": raw_text}, usage, cached, elapsed
         model_calls += 0 if cached else 1
         total_tokens += _usage_total(usage)
-        authenticity_tokens += _usage_total(usage)
+        authenticity_postprocess_tokens += _usage_total(usage)
         compliance_elapsed += elapsed
         return parsed
 
@@ -2506,8 +2567,8 @@ def audit_task_hybrid(
         )
         row["elapsed_sec"] = round(time.time() - started, 2)
         row["compliance_elapsed_sec"] = round(compliance_elapsed, 2)
-        row["photo_authenticity_elapsed_sec"] = round(time.time() - authenticity_started, 4)
-    row["photo_authenticity_tokens"] = authenticity_tokens
+        row["photo_authenticity_postprocess_elapsed_sec"] = round(time.time() - authenticity_started, 4)
+    row["photo_authenticity_postprocess_tokens"] = authenticity_postprocess_tokens
     row["strategy"] = "hybrid_sn_then_compliance"
     row["model_calls"] = model_calls
     row["total_tokens"] = total_tokens
@@ -2760,6 +2821,11 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("PHOTO_AUTHENTICITY_ARTIFACT_DIR"),
         help="可覆盖FFT模型目录；阈值仍强制读取并校验冻结metadata中的0.995",
     )
+    parser.add_argument(
+        "--photo-authenticity-baseline-path",
+        default=os.environ.get("PHOTO_AUTHENTICITY_BASELINE_PATH"),
+        help="可选历史同类订单基线JSON，用于计算合并后的真实增量；缺失时增量标记不可用",
+    )
     return parser.parse_args(argv)
 
 
@@ -2769,6 +2835,8 @@ def main() -> None:
     os.environ["PHOTO_AUTHENTICITY_MODE"] = args.photo_authenticity_mode
     if args.photo_authenticity_artifact_dir:
         os.environ["PHOTO_AUTHENTICITY_ARTIFACT_DIR"] = args.photo_authenticity_artifact_dir
+    if args.photo_authenticity_baseline_path:
+        os.environ["PHOTO_AUTHENTICITY_BASELINE_PATH"] = args.photo_authenticity_baseline_path
 
     base_url = os.environ["VISION_API_BASE_URL"]
     api_key = os.environ["VISION_API_KEY"]

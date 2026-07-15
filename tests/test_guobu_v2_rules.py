@@ -2424,6 +2424,10 @@ def test_photo_authenticity_summary_counts_routes_and_resources():
         "mode_counts": {"shadow": 2}, "would_manual_orders": 1, "strong_images": 1,
         "manual_images": 2, "fft_images": 1, "failure_orders": 1, "fallback_calls": 1,
         "latency_sec": 4.0, "tokens": 130,
+        "merged_compliance_total_tokens": 0, "merged_compliance_total_elapsed_sec": 0,
+        "postprocess_tokens": 0, "postprocess_elapsed_sec": 0,
+        "available_incremental_tokens": 0, "available_incremental_elapsed_sec": 0,
+        "baseline_coverage": {"orders_with_baseline": 0, "total_orders": 2, "rate": 0.0},
     }
 
 
@@ -2480,7 +2484,9 @@ def test_photo_authenticity_mode_is_preserved_when_legacy_compliance_is_already_
     assert result["manual_reason_code"] == "PRODUCT_PHOTO_INVALID"
     assert result["photo_authenticity_mode"] == configured_mode
     assert result["photo_authenticity_would_manual"] is False
-    assert result["photo_authenticity_tokens"] == 5
+    assert result["photo_authenticity_tokens"] == 0
+    assert result["merged_compliance_total_tokens"] == 5
+    assert result["photo_authenticity_incremental_tokens"] == ""
     assert v2.summarize_photo_authenticity([result])["mode_counts"] == {configured_mode: 1}
 
 
@@ -2505,3 +2511,75 @@ def test_audit_task_path_exception_preserves_photo_authenticity_mode(
     assert result["photo_authenticity_mode"] == configured_mode
     assert result["photo_authenticity_would_manual"] is False
     assert v2.summarize_photo_authenticity([result])["mode_counts"] == {configured_mode: 1}
+
+
+def test_photo_authenticity_cost_fields_do_not_treat_merged_usage_as_incremental_without_baseline():
+    row = {
+        "photo_authenticity_mode": "shadow",
+        "merged_compliance_total_tokens": 900,
+        "merged_compliance_total_elapsed_sec": 8.0,
+        "photo_authenticity_postprocess_tokens": 25,
+        "photo_authenticity_postprocess_elapsed_sec": 1.5,
+    }
+    v2.prepare_photo_authenticity_report_fields(row)
+    assert row["photo_authenticity_tokens"] == 25
+    assert row["photo_authenticity_elapsed_sec"] == 1.5
+    assert row["baseline_compliance_tokens"] == ""
+    assert row["photo_authenticity_incremental_tokens"] == ""
+    assert row["photo_authenticity_incremental_available"] is False
+
+
+def test_photo_authenticity_cost_fields_calculate_increment_only_with_baseline():
+    row = {
+        "photo_authenticity_mode": "shadow",
+        "merged_compliance_total_tokens": 900,
+        "merged_compliance_total_elapsed_sec": 8.0,
+        "photo_authenticity_postprocess_tokens": 25,
+        "photo_authenticity_postprocess_elapsed_sec": 1.5,
+        "baseline_compliance_tokens": 700,
+        "baseline_compliance_elapsed_sec": 6.0,
+    }
+    v2.prepare_photo_authenticity_report_fields(row)
+    assert row["photo_authenticity_incremental_tokens"] == 225
+    assert row["photo_authenticity_incremental_elapsed_sec"] == 3.5
+    assert row["photo_authenticity_incremental_available"] is True
+
+
+def test_optional_compliance_baseline_is_injected_by_order_id(tmp_path):
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps({"order-1": {"tokens": 700, "elapsed_sec": 6.0}}), encoding="utf-8",
+    )
+    row = {"id": "order-1"}
+    v2.apply_optional_compliance_baseline(
+        row, {"PHOTO_AUTHENTICITY_BASELINE_PATH": str(baseline_path)},
+    )
+    assert row["baseline_compliance_tokens"] == 700
+    assert row["baseline_compliance_elapsed_sec"] == 6.0
+
+
+def test_photo_authenticity_summary_separates_merged_postprocess_and_available_delta():
+    rows = [
+        {
+            "photo_authenticity_mode": "shadow", "merged_compliance_total_tokens": 900,
+            "merged_compliance_total_elapsed_sec": 8.0, "photo_authenticity_postprocess_tokens": 25,
+            "photo_authenticity_postprocess_elapsed_sec": 1.5, "baseline_compliance_tokens": 700,
+            "baseline_compliance_elapsed_sec": 6.0, "photo_authenticity_incremental_tokens": 225,
+            "photo_authenticity_incremental_elapsed_sec": 3.5,
+            "photo_authenticity_incremental_available": True,
+        },
+        {
+            "photo_authenticity_mode": "shadow", "merged_compliance_total_tokens": 800,
+            "merged_compliance_total_elapsed_sec": 7.0, "photo_authenticity_postprocess_tokens": 0,
+            "photo_authenticity_postprocess_elapsed_sec": 0.2,
+            "photo_authenticity_incremental_available": False,
+        },
+    ]
+    summary = v2.summarize_photo_authenticity(rows)
+    assert summary["merged_compliance_total_tokens"] == 1700
+    assert summary["merged_compliance_total_elapsed_sec"] == 15.0
+    assert summary["postprocess_tokens"] == 25
+    assert summary["postprocess_elapsed_sec"] == 1.7
+    assert summary["available_incremental_tokens"] == 225
+    assert summary["available_incremental_elapsed_sec"] == 3.5
+    assert summary["baseline_coverage"] == {"orders_with_baseline": 1, "total_orders": 2, "rate": 0.5}

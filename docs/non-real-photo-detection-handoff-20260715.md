@@ -239,4 +239,8 @@ python tools/run_guobu_model_audit_v2.py --tasks-dir <任务目录> --out-dir <�
 
 输出增加模式、建议转人工、强证据图片数、人工复核图片数、FFT命中图片数、异常订单数、兜底次数、耗时、token和逐图结果。逐图结果按图片ID稳定排序后保存为JSON，便于重复运行和对账。真实性阶段token同时计入订单总token。
 
+成本字段必须按以下口径理解：`merged_compliance_total_*` 是合并后整次图片合规调用；`photo_authenticity_postprocess_*` 只包含独立兜底模型调用和本地后处理，其中FFT本地执行没有模型token；`baseline_compliance_*` 来自可选的历史同类订单基线；`photo_authenticity_incremental_*` 只有基线存在时才计算。一次模型调用无法在内部准确区分旧合规规则和新真实性规则各用了多少token，因此没有基线时增量必须写“不可用”，不能写0，也不能把整次合规用量叫作真实性新增成本。正式成本验收应使用历史同类基线差值。
+
+基线可通过 `--photo-authenticity-baseline-path <JSON文件>` 注入。JSON以订单号为键，例如 `{"订单号":{"tokens":700,"elapsed_sec":6.0}}`；找不到同订单基线时保持不可用。
+
 范围说明：本次只修改审核脚本、报表和说明文档，没有调用审核后台的通过/驳回接口，也没有改变任何后台订单状态。
