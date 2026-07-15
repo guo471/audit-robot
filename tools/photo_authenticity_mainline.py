@@ -186,6 +186,18 @@ def derive_v4_result(observation: ImageObservation) -> tuple[str, str]:
         return "high_risk_non_real", "R2"
     if product_ui_exempt and not effective_strong and not weak and all(value == "scene_continues" for value in observation.edges.values()):
         return "no_evidence", "R3"
+    local_moire = weak.get("LOCAL_MOIRE")
+    product_screen_local_moire_exempt = (
+        observation.screen_owner == "product_screen"
+        and not effective_strong
+        and set(weak) == {"LOCAL_MOIRE"}
+        and local_moire is not None
+        and bool(local_moire.regions)
+        and set(local_moire.regions) == {"product_screen"}
+        and all(value == "scene_continues" for value in observation.edges.values())
+    )
+    if product_screen_local_moire_exempt:
+        return "no_evidence", "R10_PRODUCT_SCREEN_LOCAL_MOIRE_EXEMPT"
     if effective_strong & {"PRINTED_PHOTO_CARRIER", "NESTED_IMAGE_BOUNDARY"}:
         return "high_risk_non_real", "R4"
     moire = strong.get("CROSS_OBJECT_MOIRE")

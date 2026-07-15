@@ -402,10 +402,10 @@ PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM = r'''
 }]
 枚举必须严格使用：
 - edges: scene_continues | carrier_boundary | abrupt_cutoff | not_visible | uncertain
-- screen_owner: product_screen | external_screen | none | uncertain
+- screen_owner: product_screen | external_screen | none | uncertain。只有能看到真实设备边框/机身关系，且屏幕内容属于该设备自身设置页、身份页或激活页时，才使用product_screen；相册、查看器、截图展示或归属不清时使用external_screen或uncertain。
 - regions: product_body | product_screen | package | hand | background | image_edge | unknown
 strong仅在明确看到时使用：EXTERNAL_PHOTO_CARRIER=外部手机/显示器等照片载体；PHOTO_VIEWER_UI=外部屏幕的相册/查看器界面；PRINTED_PHOTO_CARRIER=纸张、相纸或印刷载体；NESTED_IMAGE_BOUNDARY=画面内另一张图片的完整边界；CROSS_OBJECT_MOIRE=同一图片的同类摩尔纹跨至少2个不同的非商品屏物理区域，regions列出区域。商品自身屏幕内UI不记PHOTO_VIEWER_UI。
-weak按含义使用：EDGE_CUTOFF=边缘视觉突然缺块、异常截断或不连续，不限于笔直黑边；OUTER_PLANE_OPTICS=疑似外层平面的反光/光学痕迹；PLANAR_APPEARANCE=整体缺乏景深、疑似平面二次成像；LOCAL_MOIRE=单一区域摩尔纹；UI_CANDIDATE=疑似但不明确的外部界面。局部摩尔纹只记LOCAL_MOIRE。
+weak按含义使用：EDGE_CUTOFF=边缘视觉突然缺块、异常截断或不连续，不限于笔直黑边；OUTER_PLANE_OPTICS=疑似外层平面的反光/光学痕迹；PLANAR_APPEARANCE=整体缺乏景深、疑似平面二次成像；LOCAL_MOIRE=单一区域摩尔纹；UI_CANDIDATE=疑似但不明确的外部界面。局部摩尔纹只记LOCAL_MOIRE。真实商品自身屏幕内、仅限product_screen区域的正常拍屏摩尔纹仍可如实记录LOCAL_MOIRE，程序会在无其他证据且四边连续时豁免；摩尔纹延伸到机身、包装、手部或背景时必须列出全部区域，不得错误标成仅product_screen。
 普通反射、模糊、滤镜、常规裁切、局部纹理或单一弱证据不得记为strong。
 无证据时对应 evidence 数组必须为 []；不要虚构证据，不要增加字段。
 '''

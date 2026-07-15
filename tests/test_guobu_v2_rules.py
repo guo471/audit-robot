@@ -152,6 +152,33 @@ def test_hybrid_enforce_routes_structured_weak_evidence_manual_even_when_reason_
     assert result["photo_authenticity_fft_count"] == 0
 
 
+def test_hybrid_enforce_exempts_only_product_screen_local_moire(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+
+    def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        observations = [_auth_observation(image_id) for image_id in ("i1", "i2", "i3")]
+        observations[2]["screen_owner"] = "product_screen"
+        observations[2]["weak_evidence"] = [{"code": "LOCAL_MOIRE", "regions": ["product_screen"]}]
+        observations[2]["reason"] = "真实设备屏幕拍摄产生的正常局部摩尔纹"
+        decision["photo_authenticity_by_image"] = observations
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    task = _base_task()
+    for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
+        image["image_id"] = image_id
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
+
+    assert result["manual_flag"] == "否"
+    assert result["photo_authenticity_would_manual"] is False
+    assert result["photo_authenticity_manual_count"] == 0
+
+
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])
 def test_hybrid_prompt_asset_failure_never_starts_fallback_model_or_touches_cache(monkeypatch, tmp_path, mode):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", mode)

@@ -156,6 +156,32 @@ def test_bare_abrupt_cutoff_without_structured_evidence_is_normal_crop():
     assert derive_v4_result(observation) == ("no_evidence", "R9")
 
 
+def test_product_screen_local_moire_only_is_exempt_when_scene_is_continuous():
+    observation = validate_image_observations([
+        raw(
+            screen_owner="product_screen",
+            weak_evidence=[evidence("LOCAL_MOIRE", "product_screen")],
+            reason="真实设备屏幕近拍产生的正常摩尔纹",
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("no_evidence", "R10_PRODUCT_SCREEN_LOCAL_MOIRE_EXEMPT")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"screen_owner": "external_screen", "weak_evidence": [evidence("LOCAL_MOIRE", "product_screen")]},
+        {"screen_owner": "product_screen", "weak_evidence": [evidence("LOCAL_MOIRE", "product_screen", "background")]},
+        {"screen_owner": "product_screen", "weak_evidence": [evidence("LOCAL_MOIRE", "product_screen"), evidence("PLANAR_APPEARANCE", "product_body")]},
+        {"screen_owner": "product_screen", "weak_evidence": [evidence("LOCAL_MOIRE", "product_screen")],
+         "edges": {"top": "scene_continues", "right": "abrupt_cutoff", "bottom": "scene_continues", "left": "scene_continues"}},
+    ],
+)
+def test_product_screen_local_moire_exemption_is_withheld_when_any_guard_fails(overrides):
+    observation = validate_image_observations([raw(**overrides)], ["i1"])["i1"]
+    assert derive_v4_result(observation)[0] == "manual_review"
+
+
 def test_edge_rules_cover_two_one_and_abrupt_plus_optics():
     two = {side: "scene_continues" for side in SIDES} | {"top": "carrier_boundary", "bottom": "carrier_boundary"}
     one = {side: "scene_continues" for side in SIDES} | {"left": "carrier_boundary"}
