@@ -2687,6 +2687,7 @@ def audit_task_path(
 ) -> tuple[int, dict[str, Any]]:
     task = json.loads(task_path.read_text(encoding="utf-8-sig"))
     task_started = time.time()
+    authenticity_config = PhotoAuthenticityConfig.from_env(os.environ)
     try:
         if mode == "fast":
             result = audit_task_fast(
@@ -2733,6 +2734,7 @@ def audit_task_path(
         result["model_calls"] = 1
         result["total_tokens"] = 0
         result["_error"] = traceback.format_exc()
+        result = finalize_photo_authenticity_report_fields(result, authenticity_config)
     return index, {"task": task, "result": result, "total": total}
 
 

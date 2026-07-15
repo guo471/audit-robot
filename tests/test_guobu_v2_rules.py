@@ -2482,3 +2482,26 @@ def test_photo_authenticity_mode_is_preserved_when_legacy_compliance_is_already_
     assert result["photo_authenticity_would_manual"] is False
     assert result["photo_authenticity_tokens"] == 5
     assert v2.summarize_photo_authenticity([result])["mode_counts"] == {configured_mode: 1}
+
+
+@pytest.mark.parametrize("configured_mode", ["shadow", "enforce"])
+def test_audit_task_path_exception_preserves_photo_authenticity_mode(
+    monkeypatch, tmp_path, configured_mode,
+):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", configured_mode)
+    monkeypatch.setattr(v2, "audit_task_hybrid", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad model json")))
+    task_path = tmp_path / "task.json"
+    task_path.write_text(json.dumps(_base_task(), ensure_ascii=False), encoding="utf-8")
+
+    _, payload = v2.audit_task_path(
+        1, 1, task_path, base_url="https://unused", api_key="key", model="model",
+        mode="hybrid", cache_dir=tmp_path / "cache", allow_review=False,
+        allow_targeted_review=False,
+    )
+
+    result = payload["result"]
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "MODEL_UNCERTAIN"
+    assert result["photo_authenticity_mode"] == configured_mode
+    assert result["photo_authenticity_would_manual"] is False
+    assert v2.summarize_photo_authenticity([result])["mode_counts"] == {configured_mode: 1}
