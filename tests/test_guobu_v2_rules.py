@@ -90,7 +90,7 @@ def test_normalize_photo_authenticity_rejects_invalid_or_inexact_observations(ra
         v2._normalize_photo_authenticity_observations(compliance, ("a", "b"))
 
 
-def test_hybrid_enforce_uses_merged_compliance_and_fails_closed_after_one_fallback(monkeypatch):
+def test_hybrid_enforce_uses_merged_compliance_and_accepts_valid_no_evidence_fallback_with_fft_off(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
     calls = []
 
@@ -120,9 +120,36 @@ def test_hybrid_enforce_uses_merged_compliance_and_fails_closed_after_one_fallba
     approved_prompt = (v2.PROJECT_ROOT / "photo_authenticity/prompts/non_real_photo_auditor_v4.txt").read_text(encoding="utf-8")
     assert calls[2][1] == approved_prompt
     assert calls[2][2]["retry_timeout_sec"] == 0
-    assert result["manual_flag"] == "是"
-    assert result["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
+    assert result["manual_flag"] == "否"
+    assert result["manual_reason_code"] == ""
     assert result["photo_authenticity_fallback_calls"] == 1
+
+
+def test_hybrid_enforce_routes_structured_weak_evidence_manual_even_when_reason_says_real(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+
+    def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        observations = [_auth_observation(image_id) for image_id in ("i1", "i2", "i3")]
+        observations[2]["weak_evidence"] = [{"code": "LOCAL_MOIRE", "regions": ["package"]}]
+        observations[2]["reason"] = "正常微距拍摄，属于实拍"
+        decision["photo_authenticity_by_image"] = observations
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    task = _base_task()
+    for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
+        image["image_id"] = image_id
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "NON_REAL_PHOTO_REVIEW"
+    assert result["photo_authenticity_manual_count"] == 1
+    assert result["photo_authenticity_fft_count"] == 0
 
 
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])

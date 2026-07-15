@@ -54,6 +54,14 @@ def test_mode_defaults_off_and_rejects_unknown_value():
         PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "maybe"})
 
 
+def test_fft_enabled_config_defaults_false_and_parses_strict_boolean():
+    assert PhotoAuthenticityConfig.from_env({}).fft_enabled is False
+    assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "true"}).fft_enabled is True
+    assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "0"}).fft_enabled is False
+    with pytest.raises(ValueError, match="PHOTO_AUTHENTICITY_FFT_ENABLED"):
+        PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "sometimes"})
+
+
 @pytest.mark.parametrize(
     "items, expected, affected",
     [
@@ -132,6 +140,20 @@ def test_off_mode_does_not_load_artifact_or_images(monkeypatch, tmp_path):
 def test_frozen_v4_rules(overrides, expected):
     observation = validate_image_observations([raw(**overrides)], ["i1"])["i1"]
     assert derive_v4_result(observation) == expected
+
+
+@pytest.mark.parametrize("code", sorted({"EDGE_CUTOFF", "OUTER_PLANE_OPTICS", "PLANAR_APPEARANCE", "LOCAL_MOIRE", "UI_CANDIDATE"}))
+def test_all_structured_weak_evidence_routes_manual_even_when_reason_says_real(code):
+    observation = validate_image_observations([
+        raw(weak_evidence=[evidence(code, "background")], reason="正常实拍，不是翻拍")
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("manual_review", "R9")
+
+
+def test_bare_abrupt_cutoff_without_structured_evidence_is_normal_crop():
+    edges = {side: "scene_continues" for side in SIDES} | {"right": "abrupt_cutoff"}
+    observation = validate_image_observations([raw(edges=edges, reason="标签没有完全拍到")], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("no_evidence", "R9")
 
 
 def test_edge_rules_cover_two_one_and_abrupt_plus_optics():
@@ -220,7 +242,9 @@ def test_fft_only_rescues_no_evidence_and_retries_twice(monkeypatch, tmp_path):
             return 0.999, {"feature_dimension": 795}
 
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce", "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+        }),
         raw_observations=[raw(item.image_id, edges=item.edges, screen_owner=item.screen_owner,
                               strong_evidence=[evidence(x.code, *x.regions) for x in item.strong_evidence],
                               weak_evidence=[evidence(x.code, *x.regions) for x in item.weak_evidence])
@@ -238,6 +262,20 @@ def test_fft_only_rescues_no_evidence_and_retries_twice(monkeypatch, tmp_path):
     assert attempts == {"n0": 1, "failure": 2}
 
 
+def test_fft_disabled_by_default_keeps_no_evidence_and_performs_zero_io(monkeypatch, tmp_path):
+    monkeypatch.setattr(FrozenFFTRescue, "load", lambda *_: pytest.fail("FFT artifact must not load"))
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        raw_observations=[raw("i1")],
+        expected_image_ids=["i1"],
+        image_paths={"i1": tmp_path / "missing.jpg"},
+    )
+    assert result.would_manual is False
+    assert result.service_failure is False
+    assert result.image_results["i1"].result == "no_evidence"
+    assert result.image_results["i1"].score is None
+
+
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])
 def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monkeypatch, tmp_path, mode):
     calls = []
@@ -249,7 +287,9 @@ def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monk
     monkeypatch.setattr(FrozenFFTRescue, "load", fail_load)
     (tmp_path / "unused.png").write_bytes(b"present")
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": mode}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": mode, "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+        }),
         raw_observations=[raw("n0")],
         expected_image_ids=["n0"],
         image_paths={"n0": tmp_path / "unused.png"},
@@ -290,7 +330,9 @@ def test_gate_never_overwrites_or_runs_for_legacy_manual():
     legacy = {"manual_flag": "是", "manual_reason_code": "SN_MISMATCH", "manual_reason": "old"}
     result = apply_photo_authenticity_gate(
         legacy_row=legacy, compliance={}, images=[],
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce", "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+        }),
         fallback=lambda: pytest.fail("fallback called"), evaluator=lambda **_: pytest.fail("evaluator called"),
     )
     assert result is legacy
@@ -303,7 +345,9 @@ def test_gate_does_not_fallback_when_more_than_one_image_is_invalid():
     result = apply_photo_authenticity_gate(
         legacy_row=legacy, compliance={},
         images=[{"image_id": "i1", "local_path": "a.jpg"}, {"image_id": "i2", "local_path": "b.jpg"}],
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce", "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+        }),
         fallback=lambda _image: calls.append(1) or None,
     )
     assert calls == []
@@ -330,7 +374,9 @@ def test_fft_does_not_start_when_order_budget_is_exhausted(tmp_path):
             calls.append(1)
             return 0.1, {}
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce", "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+        }),
         raw_observations=[raw("i1")], expected_image_ids=["i1"],
         image_paths={"i1": tmp_path / "x.jpg"}, rescue=Rescue(), budget_available=lambda: False,
     )
@@ -347,7 +393,9 @@ def test_missing_local_file_fails_once_without_fft_decode_retry(tmp_path):
             calls.append(1)
             raise AssertionError("score must not run")
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce", "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+        }),
         raw_observations=[raw("i1")], expected_image_ids=["i1"],
         image_paths={"i1": tmp_path / "missing.jpg"}, rescue=Rescue(),
     )

@@ -47,6 +47,7 @@ def load_approved_v4_prompt(path: Path) -> str:
 class PhotoAuthenticityConfig:
     mode: str
     artifact_dir: Path
+    fft_enabled: bool = False
     max_fft_attempts: int = 2
 
     @classmethod
@@ -54,8 +55,15 @@ class PhotoAuthenticityConfig:
         mode = str(env.get("PHOTO_AUTHENTICITY_MODE", "off")).strip().lower()
         if mode not in {"off", "shadow", "enforce"}:
             raise ValueError("PHOTO_AUTHENTICITY_MODE must be off, shadow, or enforce")
+        fft_raw = str(env.get("PHOTO_AUTHENTICITY_FFT_ENABLED", "false")).strip().lower()
+        if fft_raw in {"true", "1", "yes", "on"}:
+            fft_enabled = True
+        elif fft_raw in {"false", "0", "no", "off", ""}:
+            fft_enabled = False
+        else:
+            raise ValueError("PHOTO_AUTHENTICITY_FFT_ENABLED must be true or false")
         artifact_dir = Path(env.get("PHOTO_AUTHENTICITY_ARTIFACT_DIR", str(DEFAULT_ARTIFACT_DIR)))
-        return cls(mode=mode, artifact_dir=artifact_dir)
+        return cls(mode=mode, artifact_dir=artifact_dir, fft_enabled=fft_enabled)
 
 
 @dataclass(frozen=True)
@@ -191,7 +199,7 @@ def derive_v4_result(observation: ImageObservation) -> tuple[str, str]:
         return "manual_review", "R7"
     if "abrupt_cutoff" in observation.edges.values() and "OUTER_PLANE_OPTICS" in weak:
         return "high_risk_non_real", "R8"
-    if effective_strong or weak or "abrupt_cutoff" in observation.edges.values():
+    if effective_strong or weak:
         return "manual_review", "R9"
     return "no_evidence", "R9"
 
@@ -324,6 +332,9 @@ def evaluate_authenticity_images(
         result, rule = derive_v4_result(observation)
         if result != "no_evidence":
             results[image_id] = AuthenticityImageResult(image_id, result, rule)
+            continue
+        if not config.fft_enabled:
+            results[image_id] = AuthenticityImageResult(image_id, "no_evidence", rule)
             continue
         if not budget_available():
             service_failure = True
