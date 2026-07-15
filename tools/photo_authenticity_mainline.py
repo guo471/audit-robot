@@ -5,7 +5,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import joblib
 import numpy as np
@@ -352,3 +352,78 @@ def evaluate_authenticity_images(
         image_results=results,
         service_failure=service_failure,
     )
+
+
+def _order_reason(result: AuthenticityOrderResult) -> str:
+    if result.service_failure:
+        return "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
+    values = tuple(result.image_results.values())
+    if any(item.result == "high_risk_non_real" for item in values):
+        return "NON_REAL_PHOTO_STRONG_RISK"
+    if any(item.rescued_by_fft for item in values):
+        return "NON_REAL_PHOTO_FFT_RESCUE"
+    return "NON_REAL_PHOTO_REVIEW"
+
+
+def apply_photo_authenticity_gate(
+    *,
+    legacy_row: dict[str, Any],
+    compliance: Mapping[str, Any],
+    images: Sequence[Mapping[str, Any]],
+    config: PhotoAuthenticityConfig,
+    fallback: Callable[[], Any] | None = None,
+    evaluator: Callable[..., AuthenticityOrderResult] = evaluate_authenticity_images,
+) -> dict[str, Any]:
+    """Apply authenticity only after the legacy order decision is final."""
+    if config.mode == "off" or str(legacy_row.get("manual_flag")) == "是":
+        return legacy_row
+
+    image_ids = [str(item.get("image_id") or "") for item in images]
+    image_paths = {str(item.get("image_id") or ""): Path(str(item.get("local_path") or "")) for item in images}
+    raw = compliance.get("photo_authenticity_by_image")
+    fallback_calls = 0
+    try:
+        result = evaluator(
+            config=config, raw_observations=raw, expected_image_ids=image_ids, image_paths=image_paths,
+        )
+    except Exception as first_error:
+        if fallback is not None:
+            fallback_calls = 1
+            try:
+                raw = fallback()
+                if isinstance(raw, Mapping):
+                    raw = raw.get("photo_authenticity_by_image")
+                result = evaluator(
+                    config=config, raw_observations=raw, expected_image_ids=image_ids, image_paths=image_paths,
+                )
+            except Exception as final_error:
+                result = AuthenticityOrderResult(
+                    mode=config.mode, would_manual=True, image_results={}, service_failure=True,
+                )
+                legacy_row["photo_authenticity_error"] = (
+                    f"{type(first_error).__name__}: {first_error}; fallback: "
+                    f"{type(final_error).__name__}: {final_error}"
+                )
+        else:
+            result = AuthenticityOrderResult(mode=config.mode, would_manual=True, image_results={}, service_failure=True)
+            legacy_row["photo_authenticity_error"] = f"{type(first_error).__name__}: {first_error}"
+
+    legacy_row["photo_authenticity_mode"] = config.mode
+    legacy_row["photo_authenticity_would_manual"] = result.would_manual
+    legacy_row["photo_authenticity_service_failure"] = result.service_failure
+    legacy_row["photo_authenticity_fallback_calls"] = fallback_calls
+    legacy_row["photo_authenticity_image_results"] = {
+        key: {
+            "result": value.result, "rule": value.rule, "status": value.status,
+            "score": value.score, "rescued_by_fft": value.rescued_by_fft,
+            "evidence_summary": value.evidence_summary,
+        }
+        for key, value in result.image_results.items()
+    }
+    if config.mode == "enforce" and result.would_manual:
+        code = _order_reason(result)
+        legacy_row["manual_flag"] = "是"
+        legacy_row["manual_reason_code"] = code
+        legacy_row["manual_reason_cn"] = "图片真实性需要人工复核"
+        legacy_row["manual_reason"] = code + ": 图片真实性检测命中或检测服务异常"
+    return legacy_row

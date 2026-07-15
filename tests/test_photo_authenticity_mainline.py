@@ -14,10 +14,13 @@ from tools.photo_authenticity_mainline import (
     EXPECTED_MODEL_SHA256,
     EXPECTED_THRESHOLD,
     FrozenFFTRescue,
+    AuthenticityImageResult,
+    AuthenticityOrderResult,
     PhotoAuthenticityConfig,
     PhotoAuthenticitySchemaError,
     derive_v4_result,
     evaluate_authenticity_images,
+    apply_photo_authenticity_gate,
     validate_image_observations,
 )
 
@@ -252,3 +255,63 @@ def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monk
     assert result.image_results["n0"].result == "manual_review"
     assert result.image_results["n0"].status == "artifact_load_failure"
     assert "hash mismatch" in result.image_results["n0"].evidence_summary["error"]
+
+
+def test_gate_off_is_exact_noop_and_does_not_touch_dependencies():
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "sentinel": [1, 2]}
+    result = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={}, images=[], config=PhotoAuthenticityConfig.from_env({}),
+        fallback=lambda: pytest.fail("fallback called"), evaluator=lambda **_: pytest.fail("evaluator called"),
+    )
+    assert result is legacy
+
+
+@pytest.mark.parametrize("mode, expected_flag", [("shadow", "否"), ("enforce", "是")])
+def test_gate_shadow_records_candidate_but_only_enforce_changes_legacy_pass(mode, expected_flag):
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
+    evaluated = AuthenticityOrderResult(mode, True, {"i1": AuthenticityImageResult("i1", "high_risk_non_real", "R1")})
+    result = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={"photo_authenticity_by_image": [raw("i1")]},
+        images=[{"image_id": "i1", "local_path": "unused.jpg"}],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": mode}), evaluator=lambda **_: evaluated,
+    )
+    assert result["manual_flag"] == expected_flag
+    assert result["photo_authenticity_would_manual"] is True
+    if mode == "enforce":
+        assert result["manual_reason_code"] == "NON_REAL_PHOTO_STRONG_RISK"
+
+
+def test_gate_never_overwrites_or_runs_for_legacy_manual():
+    legacy = {"manual_flag": "是", "manual_reason_code": "SN_MISMATCH", "manual_reason": "old"}
+    result = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={}, images=[],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        fallback=lambda: pytest.fail("fallback called"), evaluator=lambda **_: pytest.fail("evaluator called"),
+    )
+    assert result is legacy
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+
+
+def test_gate_uses_fallback_once_then_enforce_fails_closed_on_invalid_schema():
+    calls = []
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
+    result = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={},
+        images=[{"image_id": "i1", "local_path": "a.jpg"}, {"image_id": "i2", "local_path": "b.jpg"}],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        fallback=lambda: calls.append(1) or None,
+    )
+    assert calls == [1]
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
+
+
+def test_gate_shadow_schema_failure_preserves_legacy_result():
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
+    result = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={}, images=[{"image_id": "i1", "local_path": "a.jpg"}],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "shadow"}), fallback=lambda: None,
+    )
+    assert result["manual_flag"] == "否"
+    assert result["photo_authenticity_would_manual"] is True
+    assert result["photo_authenticity_service_failure"] is True

@@ -90,6 +90,62 @@ def test_normalize_photo_authenticity_rejects_invalid_or_inexact_observations(ra
         v2._normalize_photo_authenticity_observations(compliance, ("a", "b"))
 
 
+def test_hybrid_enforce_uses_merged_compliance_and_fails_closed_after_one_fallback(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    calls = []
+
+    def fake_call(_base, _key, _model, prompt, payload, images, *, stage, **kwargs):
+        calls.append((stage, prompt, kwargs))
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        if stage == "hybrid_compliance":
+            return (_screen_sn_compliance_pass(), "compliance", 0.1, {}, False)
+        assert stage == "hybrid_photo_authenticity_fallback"
+        return ({}, "fallback", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task())
+    assert [stage for stage, _, _ in calls] == ["hybrid_sn", "hybrid_compliance", "hybrid_photo_authenticity_fallback"]
+    assert v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM in calls[1][1]
+    assert calls[2][2]["retry_timeout_sec"] == 0
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
+    assert result["photo_authenticity_fallback_calls"] == 1
+
+
+def test_hybrid_off_keeps_original_prompt_stage_and_never_calls_gate(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    calls = []
+
+    def fake_call(_base, _key, _model, prompt, payload, images, *, stage, **kwargs):
+        calls.append((stage, prompt))
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        return (_screen_sn_compliance_pass(), "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "apply_photo_authenticity_gate", lambda **_: pytest.fail("gate called in off mode"), raising=False)
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task())
+    assert calls[1] == ("hybrid_compliance", v2.compliance_prompt_for_category("ordinary_3c"))
+    assert result["manual_flag"] == "否"
+
+
+def test_merged_authenticity_unknown_schema_is_not_cacheable():
+    images = [{"image_id": "a"}, {"image_id": "b"}]
+    assert v2._is_cacheable_model_result(
+        "hybrid_compliance", v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM,
+        {"photo_authenticity_by_image": [_auth_observation("a"), _auth_observation("b")]}, images,
+    ) is True
+    assert v2._is_cacheable_model_result(
+        "hybrid_compliance", v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM, {}, images,
+    ) is False
+    assert v2._is_cacheable_model_result(
+        "hybrid_photo_authenticity_fallback", v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM, {}, images,
+    ) is False
+    assert v2._is_cacheable_model_result("hybrid_compliance", "legacy", {}, images) is True
+
+
 def _base_task():
     return {
         "channel_order_no": "1",

@@ -31,8 +31,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from modules.category_classifier import classify_audit_category
 from tools.photo_authenticity_mainline import (
+    PhotoAuthenticityConfig,
     ImageObservation,
     PhotoAuthenticitySchemaError,
+    apply_photo_authenticity_gate,
     validate_image_observations,
 )
 
@@ -909,6 +911,19 @@ def _cache_key(model: str, stage: str, prompt: str, payload: dict[str, Any], ima
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _is_cacheable_model_result(stage: str, prompt: str, parsed: dict[str, Any], images: list[dict[str, Any]]) -> bool:
+    if stage not in {"hybrid_compliance", "hybrid_photo_authenticity_fallback"} or PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM not in prompt:
+        return True
+    try:
+        validate_image_observations(
+            parsed.get("photo_authenticity_by_image"),
+            [str(image.get("image_id") or "") for image in images],
+        )
+        return True
+    except PhotoAuthenticitySchemaError:
+        return False
+
+
 def _should_disable_qwen_thinking(model: str, stage: str) -> bool:
     normalized = (model or "").strip().lower()
     return normalized.startswith("qwen3.") or normalized.startswith("qwen-")
@@ -1102,7 +1117,9 @@ def call_model(
         cache_path = cache_dir / f"{_cache_key(model, stage, prompt, payload, images)}.json"
         if cache_path.exists():
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            return cached["parsed"], cached["content_text"], 0.0, cached.get("usage") or {}, True
+            if _is_cacheable_model_result(stage, prompt, cached["parsed"], images):
+                return cached["parsed"], cached["content_text"], 0.0, cached.get("usage") or {}, True
+            cache_path.unlink(missing_ok=True)
 
     content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}]
     for image in images:
@@ -1130,7 +1147,7 @@ def call_model(
     if not isinstance(parsed, dict):
         raise ValueError("model JSON is not an object")
     usage = response_data.get("usage") or {}
-    if cache_dir is not None:
+    if cache_dir is not None and _is_cacheable_model_result(stage, prompt, parsed, images):
         cache_path.write_text(
             json.dumps(
                 {
@@ -2127,6 +2144,7 @@ def audit_task_hybrid(
     allow_targeted_review: bool = True,
 ) -> dict[str, Any]:
     started = time.time()
+    authenticity_config = PhotoAuthenticityConfig.from_env(os.environ)
     pre_started = time.time()
     precheck = precheck_task(task)
     pre_elapsed = time.time() - pre_started
@@ -2329,7 +2347,10 @@ def audit_task_hybrid(
         },
     }
     compliance_images = _all_grouped_images(precheck["groups"], activation_detail="high", other_detail="low")
-    compliance_prompt = compliance_prompt_for_category(precheck["effective_category"])
+    compliance_prompt = compliance_prompt_for_category(
+        precheck["effective_category"],
+        include_photo_authenticity=authenticity_config.mode != "off",
+    )
     compliance, compliance_raw, compliance_elapsed, compliance_usage, compliance_cached = call_model_with_retry(
         base_url,
         api_key,
@@ -2358,6 +2379,46 @@ def audit_task_hybrid(
     compliance = enforce_photo_noncompliance_manual(compliance, address_ok=precheck["address_ok"])
 
     row = _final_row(task, compliance, normalized_sn, compliance, time.time() - started, pre_elapsed, sn_elapsed, compliance_elapsed)
+    fallback_raw: dict[str, Any] = {}
+    fallback_usage: dict[str, Any] = {}
+    fallback_cached = False
+    fallback_elapsed = 0.0
+
+    def authenticity_fallback() -> Any:
+        nonlocal model_calls, total_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
+        if cache_dir is not None:
+            invalid_cache = cache_dir / f"{_cache_key(model, 'hybrid_compliance', compliance_prompt, compliance_payload, compliance_images)}.json"
+            invalid_cache.unlink(missing_ok=True)
+        fallback_prompt = (
+            "你是独立图片真实性复核员，只输出严格JSON。不得裁决订单，只按每个输入image_id逐图报告观察。"
+            + PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
+        )
+        parsed, raw_text, elapsed, usage, cached = call_model_with_retry(
+            base_url, api_key, model, fallback_prompt,
+            {"id": task["channel_order_no"], "image_ids": [image.get("image_id") for image in compliance_images]},
+            compliance_images,
+            stage="hybrid_photo_authenticity_fallback",
+            cache_dir=cache_dir,
+            detail="low",
+            timeout_sec=min(20, _stage_timeout_from_budget(started)),
+            retry_timeout_sec=0,
+        )
+        fallback_raw, fallback_usage, fallback_cached, fallback_elapsed = {"content": raw_text}, usage, cached, elapsed
+        model_calls += 0 if cached else 1
+        total_tokens += _usage_total(usage)
+        compliance_elapsed += elapsed
+        return parsed
+
+    if authenticity_config.mode != "off" and row.get("manual_flag") == "否":
+        row = apply_photo_authenticity_gate(
+            legacy_row=row,
+            compliance=compliance,
+            images=compliance_images,
+            config=authenticity_config,
+            fallback=authenticity_fallback,
+        )
+        row["elapsed_sec"] = round(time.time() - started, 2)
+        row["compliance_elapsed_sec"] = round(compliance_elapsed, 2)
     row["strategy"] = "hybrid_sn_then_compliance"
     row["model_calls"] = model_calls
     row["total_tokens"] = total_tokens
@@ -2369,6 +2430,12 @@ def audit_task_hybrid(
         "compliance_usage": compliance_usage,
         "compliance_cached": compliance_cached,
     }
+    if authenticity_config.mode != "off":
+        row["_raw"].update({
+            "photo_authenticity_fallback_raw": fallback_raw,
+            "photo_authenticity_fallback_usage": fallback_usage,
+            "photo_authenticity_fallback_cached": fallback_cached,
+        })
     return row
 
 
