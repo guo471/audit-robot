@@ -126,7 +126,7 @@ def test_hybrid_enforce_uses_merged_compliance_and_fails_closed_after_one_fallba
 
 
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])
-def test_hybrid_prompt_asset_failure_never_starts_fallback_model(monkeypatch, mode):
+def test_hybrid_prompt_asset_failure_never_starts_fallback_model_or_touches_cache(monkeypatch, tmp_path, mode):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", mode)
     stages = []
     def fake_call(_base, _key, _model, prompt, payload, images, *, stage, **kwargs):
@@ -139,11 +139,18 @@ def test_hybrid_prompt_asset_failure_never_starts_fallback_model(monkeypatch, mo
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
     monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
     monkeypatch.setattr(v2, "load_approved_v4_prompt", lambda _path: (_ for _ in ()).throw(ValueError("prompt hash mismatch")), raising=False)
+    monkeypatch.setattr(v2, "_cache_key", lambda *_args, **_kwargs: "invalid")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    sentinel = cache_dir / "invalid.json"
+    sentinel.write_text("must remain byte-for-byte", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in cache_dir.iterdir()}
     task = _base_task()
     for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
         image["image_id"] = image_id
-    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task, cache_dir=cache_dir)
     assert stages == ["hybrid_sn", "hybrid_compliance"]
+    assert {path.name: path.read_bytes() for path in cache_dir.iterdir()} == before
     assert result["photo_authenticity_service_failure"] is True
     assert result["manual_flag"] == ("是" if mode == "enforce" else "否")
 

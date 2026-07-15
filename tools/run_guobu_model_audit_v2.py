@@ -2398,12 +2398,12 @@ def audit_task_hybrid(
 
     def authenticity_fallback(image: dict[str, Any]) -> Any:
         nonlocal model_calls, total_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
-        if cache_dir is not None:
-            invalid_cache = cache_dir / f"{_cache_key(model, 'hybrid_compliance', compliance_prompt, compliance_payload, compliance_images)}.json"
-            invalid_cache.unlink(missing_ok=True)
         fallback_prompt = load_approved_v4_prompt(
             PROJECT_ROOT / "photo_authenticity" / "prompts" / "non_real_photo_auditor_v4.txt"
         )
+        if cache_dir is not None:
+            invalid_cache = cache_dir / f"{_cache_key(model, 'hybrid_compliance', compliance_prompt, compliance_payload, compliance_images)}.json"
+            invalid_cache.unlink(missing_ok=True)
         parsed, raw_text, elapsed, usage, cached = call_model_with_retry(
             base_url, api_key, model, fallback_prompt,
             {"id": task["channel_order_no"], "image_id": image.get("image_id")},
