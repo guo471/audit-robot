@@ -99,15 +99,26 @@ def test_hybrid_enforce_uses_merged_compliance_and_fails_closed_after_one_fallba
         if stage == "hybrid_sn":
             return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
         if stage == "hybrid_compliance":
-            return (_screen_sn_compliance_pass(), "compliance", 0.1, {}, False)
+            decision = _screen_sn_compliance_pass()
+            decision["photo_authenticity_by_image"] = [_auth_observation("i1"), _auth_observation("i2")]
+            return (decision, "compliance", 0.1, {}, False)
         assert stage == "hybrid_photo_authenticity_fallback"
-        return ({}, "fallback", 0.1, {}, False)
+        assert len(images) == 1 and images[0]["image_id"] == "i3"
+        approved = _auth_observation("i3")
+        approved.pop("image_id")
+        approved["result"] = "no_evidence"
+        return (approved, "fallback", 0.1, {}, False)
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
     monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
-    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task())
+    task = _base_task()
+    for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
+        image["image_id"] = image_id
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
     assert [stage for stage, _, _ in calls] == ["hybrid_sn", "hybrid_compliance", "hybrid_photo_authenticity_fallback"]
     assert v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM in calls[1][1]
+    approved_prompt = (v2.PROJECT_ROOT / "photo_authenticity/prompts/non_real_photo_auditor_v4.txt").read_text(encoding="utf-8")
+    assert calls[2][1] == approved_prompt
     assert calls[2][2]["retry_timeout_sec"] == 0
     assert result["manual_flag"] == "是"
     assert result["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
@@ -142,6 +153,15 @@ def test_merged_authenticity_unknown_schema_is_not_cacheable():
     ) is False
     assert v2._is_cacheable_model_result(
         "hybrid_photo_authenticity_fallback", v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM, {}, images,
+    ) is False
+    single = _auth_observation("a")
+    single.pop("image_id")
+    single["result"] = "no_evidence"
+    assert v2._is_cacheable_model_result(
+        "hybrid_photo_authenticity_fallback", "approved v4", single, [{"image_id": "a"}],
+    ) is True
+    assert v2._is_cacheable_model_result(
+        "hybrid_photo_authenticity_fallback", "approved v4", {}, [{"image_id": "a"}],
     ) is False
     assert v2._is_cacheable_model_result("hybrid_compliance", "legacy", {}, images) is True
 

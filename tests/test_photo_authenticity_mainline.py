@@ -204,6 +204,8 @@ def test_fft_only_rescues_no_evidence_and_retries_twice(monkeypatch, tmp_path):
         raw("n0"), raw("failure"),
     ], ["high", "manual", "n0", "failure"])
     attempts = {"n0": 0, "failure": 0}
+    for key in observations:
+        (tmp_path / f"{key}.png").write_bytes(b"present")
 
     class FakeRescue:
         threshold = 0.995
@@ -243,6 +245,7 @@ def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monk
         raise ValueError("frozen model hash mismatch")
 
     monkeypatch.setattr(FrozenFFTRescue, "load", fail_load)
+    (tmp_path / "unused.png").write_bytes(b"present")
     result = evaluate_authenticity_images(
         config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": mode}),
         raw_observations=[raw("n0")],
@@ -292,16 +295,16 @@ def test_gate_never_overwrites_or_runs_for_legacy_manual():
     assert result["manual_reason_code"] == "SN_MISMATCH"
 
 
-def test_gate_uses_fallback_once_then_enforce_fails_closed_on_invalid_schema():
+def test_gate_does_not_fallback_when_more_than_one_image_is_invalid():
     calls = []
     legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
     result = apply_photo_authenticity_gate(
         legacy_row=legacy, compliance={},
         images=[{"image_id": "i1", "local_path": "a.jpg"}, {"image_id": "i2", "local_path": "b.jpg"}],
         config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
-        fallback=lambda: calls.append(1) or None,
+        fallback=lambda _image: calls.append(1) or None,
     )
-    assert calls == [1]
+    assert calls == []
     assert result["manual_flag"] == "是"
     assert result["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
 
@@ -310,8 +313,97 @@ def test_gate_shadow_schema_failure_preserves_legacy_result():
     legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
     result = apply_photo_authenticity_gate(
         legacy_row=legacy, compliance={}, images=[{"image_id": "i1", "local_path": "a.jpg"}],
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "shadow"}), fallback=lambda: None,
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "shadow"}), fallback=lambda _image: None,
     )
     assert result["manual_flag"] == "否"
     assert result["photo_authenticity_would_manual"] is True
     assert result["photo_authenticity_service_failure"] is True
+
+
+def test_fft_does_not_start_when_order_budget_is_exhausted(tmp_path):
+    calls = []
+    class Rescue:
+        threshold = 0.995
+        def score(self, _path):
+            calls.append(1)
+            return 0.1, {}
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        raw_observations=[raw("i1")], expected_image_ids=["i1"],
+        image_paths={"i1": tmp_path / "x.jpg"}, rescue=Rescue(), budget_available=lambda: False,
+    )
+    assert calls == []
+    assert result.service_failure is True
+    assert result.image_results["i1"].status == "order_budget_exhausted"
+
+
+def test_missing_local_file_fails_once_without_fft_decode_retry(tmp_path):
+    calls = []
+    class Rescue:
+        threshold = 0.995
+        def score(self, _path):
+            calls.append(1)
+            raise AssertionError("score must not run")
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        raw_observations=[raw("i1")], expected_image_ids=["i1"],
+        image_paths={"i1": tmp_path / "missing.jpg"}, rescue=Rescue(),
+    )
+    assert calls == []
+    assert result.image_results["i1"].status == "image_file_missing"
+
+
+def test_gate_does_not_start_fallback_when_budget_is_exhausted():
+    calls = []
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
+    result = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={}, images=[{"image_id": "i1", "local_path": "a.jpg"}],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        fallback=lambda _image: calls.append(1), budget_available=lambda: False,
+    )
+    assert calls == []
+    assert result["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
+
+
+def test_gate_single_invalid_image_uses_one_single_image_fallback():
+    calls = []
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
+    fallback_observation = raw("i2", strong_evidence=[evidence("EXTERNAL_PHOTO_CARRIER", "background")])
+    evaluated = AuthenticityOrderResult(
+        "enforce", True, {"i1": AuthenticityImageResult("i1", "no_evidence", "R9"),
+                           "i2": AuthenticityImageResult("i2", "high_risk_non_real", "R1")},
+    )
+    def fallback(image):
+        calls.append(image["image_id"])
+        return fallback_observation
+    evaluations = []
+    def evaluator(**_kwargs):
+        evaluations.append(1)
+        if len(evaluations) == 1:
+            raise PhotoAuthenticitySchemaError("missing i2")
+        return evaluated
+    result = apply_photo_authenticity_gate(
+        legacy_row=legacy,
+        compliance={"photo_authenticity_by_image": [raw("i1")]},
+        images=[{"image_id": "i1", "local_path": "a.jpg"}, {"image_id": "i2", "local_path": "b.jpg"}],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        fallback=fallback, evaluator=evaluator,
+    )
+    assert calls == ["i2"]
+    assert result["manual_reason_code"] == "NON_REAL_PHOTO_STRONG_RISK"
+
+
+def test_strong_reason_wins_over_service_failure():
+    result = AuthenticityOrderResult(
+        "enforce", True,
+        {"strong": AuthenticityImageResult("strong", "high_risk_non_real", "R1"),
+         "failed": AuthenticityImageResult("failed", "manual_review", "FFT_FAILURE", status="failed_after_retries")},
+        service_failure=True,
+    )
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
+    row = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={"photo_authenticity_by_image": [raw("strong"), raw("failed")]},
+        images=[{"image_id": "strong"}, {"image_id": "failed"}],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}), evaluator=lambda **_: result,
+    )
+    assert row["manual_reason_code"] == "NON_REAL_PHOTO_STRONG_RISK"

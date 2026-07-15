@@ -303,6 +303,7 @@ def evaluate_authenticity_images(
     expected_image_ids: Sequence[str],
     image_paths: Mapping[str, Path],
     rescue: FrozenFFTRescue | None = None,
+    budget_available: Callable[[], bool] = lambda: True,
 ) -> AuthenticityOrderResult:
     if config.mode == "off":
         return AuthenticityOrderResult(mode="off", would_manual=False, image_results={})
@@ -315,6 +316,19 @@ def evaluate_authenticity_images(
         result, rule = derive_v4_result(observation)
         if result != "no_evidence":
             results[image_id] = AuthenticityImageResult(image_id, result, rule)
+            continue
+        if not budget_available():
+            service_failure = True
+            results[image_id] = AuthenticityImageResult(
+                image_id, "manual_review", "ORDER_BUDGET_EXHAUSTED", status="order_budget_exhausted",
+            )
+            continue
+        image_path = Path(image_paths.get(image_id, Path()))
+        if not image_path.is_file():
+            service_failure = True
+            results[image_id] = AuthenticityImageResult(
+                image_id, "manual_review", "IMAGE_FILE_MISSING", status="image_file_missing",
+            )
             continue
         if loaded_rescue is None and artifact_error is None:
             try:
@@ -331,7 +345,9 @@ def evaluate_authenticity_images(
         last_error: Exception | None = None
         for _ in range(config.max_fft_attempts):
             try:
-                score, summary = loaded_rescue.score(Path(image_paths[image_id]))
+                if not budget_available():
+                    raise TimeoutError("order budget exhausted before FFT")
+                score, summary = loaded_rescue.score(image_path)
                 routed = "manual_review" if score >= loaded_rescue.threshold else "no_evidence"
                 results[image_id] = AuthenticityImageResult(
                     image_id, routed, "FFT_RESCUE" if routed == "manual_review" else rule,
@@ -355,14 +371,33 @@ def evaluate_authenticity_images(
 
 
 def _order_reason(result: AuthenticityOrderResult) -> str:
-    if result.service_failure:
-        return "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
     values = tuple(result.image_results.values())
     if any(item.result == "high_risk_non_real" for item in values):
         return "NON_REAL_PHOTO_STRONG_RISK"
     if any(item.rescued_by_fft for item in values):
         return "NON_REAL_PHOTO_FFT_RESCUE"
+    if result.service_failure:
+        return "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
     return "NON_REAL_PHOTO_REVIEW"
+
+
+def _single_fallback_candidate(raw: Any, image_ids: Sequence[str]) -> tuple[str | None, list[dict[str, Any]]]:
+    if not isinstance(raw, list):
+        return (image_ids[0], []) if len(image_ids) == 1 else (None, [])
+    valid: dict[str, dict[str, Any]] = {}
+    invalid_ids: set[str] = set()
+    for item in raw:
+        image_id = str(item.get("image_id") or "") if isinstance(item, dict) else ""
+        if image_id not in image_ids or image_id in valid:
+            return None, []
+        try:
+            validate_image_observations([item], [image_id])
+            valid[image_id] = item
+        except PhotoAuthenticitySchemaError:
+            invalid_ids.add(image_id)
+    affected = [image_id for image_id in image_ids if image_id not in valid] + [x for x in invalid_ids if x in valid]
+    affected = list(dict.fromkeys(affected))
+    return (affected[0], list(valid.values())) if len(affected) == 1 else (None, list(valid.values()))
 
 
 def apply_photo_authenticity_gate(
@@ -371,8 +406,9 @@ def apply_photo_authenticity_gate(
     compliance: Mapping[str, Any],
     images: Sequence[Mapping[str, Any]],
     config: PhotoAuthenticityConfig,
-    fallback: Callable[[], Any] | None = None,
+    fallback: Callable[[Mapping[str, Any]], Any] | None = None,
     evaluator: Callable[..., AuthenticityOrderResult] = evaluate_authenticity_images,
+    budget_available: Callable[[], bool] = lambda: True,
 ) -> dict[str, Any]:
     """Apply authenticity only after the legacy order decision is final."""
     if config.mode == "off" or str(legacy_row.get("manual_flag")) == "是":
@@ -385,16 +421,23 @@ def apply_photo_authenticity_gate(
     try:
         result = evaluator(
             config=config, raw_observations=raw, expected_image_ids=image_ids, image_paths=image_paths,
+            budget_available=budget_available,
         )
     except Exception as first_error:
-        if fallback is not None:
+        candidate_id, valid_raw = _single_fallback_candidate(raw, image_ids)
+        image_by_id = {str(item.get("image_id") or ""): item for item in images}
+        if fallback is not None and candidate_id is not None and budget_available():
             fallback_calls = 1
             try:
-                raw = fallback()
+                raw = fallback(image_by_id[candidate_id])
                 if isinstance(raw, Mapping):
-                    raw = raw.get("photo_authenticity_by_image")
+                    raw = dict(raw)
+                    raw.pop("result", None)
+                    raw["image_id"] = candidate_id
+                raw = valid_raw + [raw]
                 result = evaluator(
                     config=config, raw_observations=raw, expected_image_ids=image_ids, image_paths=image_paths,
+                    budget_available=budget_available,
                 )
             except Exception as final_error:
                 result = AuthenticityOrderResult(

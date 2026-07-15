@@ -912,7 +912,18 @@ def _cache_key(model: str, stage: str, prompt: str, payload: dict[str, Any], ima
 
 
 def _is_cacheable_model_result(stage: str, prompt: str, parsed: dict[str, Any], images: list[dict[str, Any]]) -> bool:
-    if stage not in {"hybrid_compliance", "hybrid_photo_authenticity_fallback"} or PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM not in prompt:
+    if stage == "hybrid_photo_authenticity_fallback":
+        if len(images) != 1:
+            return False
+        observation = dict(parsed)
+        observation.pop("result", None)
+        observation["image_id"] = str(images[0].get("image_id") or "")
+        try:
+            validate_image_observations([observation], [observation["image_id"]])
+            return True
+        except PhotoAuthenticitySchemaError:
+            return False
+    if stage != "hybrid_compliance" or PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM not in prompt:
         return True
     try:
         validate_image_observations(
@@ -2384,19 +2395,16 @@ def audit_task_hybrid(
     fallback_cached = False
     fallback_elapsed = 0.0
 
-    def authenticity_fallback() -> Any:
+    def authenticity_fallback(image: dict[str, Any]) -> Any:
         nonlocal model_calls, total_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
         if cache_dir is not None:
             invalid_cache = cache_dir / f"{_cache_key(model, 'hybrid_compliance', compliance_prompt, compliance_payload, compliance_images)}.json"
             invalid_cache.unlink(missing_ok=True)
-        fallback_prompt = (
-            "你是独立图片真实性复核员，只输出严格JSON。不得裁决订单，只按每个输入image_id逐图报告观察。"
-            + PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
-        )
+        fallback_prompt = (PROJECT_ROOT / "photo_authenticity" / "prompts" / "non_real_photo_auditor_v4.txt").read_text(encoding="utf-8")
         parsed, raw_text, elapsed, usage, cached = call_model_with_retry(
             base_url, api_key, model, fallback_prompt,
-            {"id": task["channel_order_no"], "image_ids": [image.get("image_id") for image in compliance_images]},
-            compliance_images,
+            {"id": task["channel_order_no"], "image_id": image.get("image_id")},
+            [image],
             stage="hybrid_photo_authenticity_fallback",
             cache_dir=cache_dir,
             detail="low",
@@ -2416,6 +2424,7 @@ def audit_task_hybrid(
             images=compliance_images,
             config=authenticity_config,
             fallback=authenticity_fallback,
+            budget_available=lambda: not _order_budget_exhausted(started),
         )
         row["elapsed_sec"] = round(time.time() - started, 2)
         row["compliance_elapsed_sec"] = round(compliance_elapsed, 2)
