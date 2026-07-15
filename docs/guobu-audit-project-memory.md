@@ -165,3 +165,25 @@
 5. 所有照片进入合规阶段，不抽样、不省略商品照片。
 6. 只补跑网络、超时和 HTTP 500 服务异常单。
 7. 最终汇报自动放行、转人工、服务异常、原因分布、耗时、token和Excel路径。
+
+## 图片真实性并入主线（2026-07-15）
+
+用户已确认直接把图片真实性检查并入主线的第二次“图片合规检查”调用。正式链路仍然只有一次图片合规模型调用，不增加常规模型调用次数。此次不再运行新旧提示词双路对比，原因是原提示词已经反复测试，直接复用历史结果；如果新能力表现不理想，使用开关立即退回原链路。
+
+运行规则：
+
+- 默认关闭：`--photo-authenticity-mode off`。
+- 只观察不改结果：`--photo-authenticity-mode shadow`。
+- 正式拦截：`--photo-authenticity-mode enforce`。模型字段缺失、格式错误、FFT文件损坏或最终兜底失败时，订单交给人工，不能因为程序看不懂而自动放行。
+- 千问全部调用固定 `enable_thinking=false`，不启用深度思考。
+- FFT阈值锁定为 `0.995`。即使通过 `--photo-authenticity-artifact-dir` 更换模型目录，也必须通过冻结metadata校验，不能从命令行改阈值。
+- FFT模型SHA-256：`49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65b96aa512b`。
+- metadata SHA-256：`e8c4ba687b702535231d91e001c55f4e0750b07ab79e3cd4829ae1dea5f708cf`。
+
+一键回退命令（保留其他原有启动参数）：
+
+```powershell
+python tools/run_guobu_model_audit_v2.py --tasks-dir <任务目录> --out-dir <输出目录> --mode hybrid --photo-authenticity-mode off
+```
+
+报表会追加真实性模式、建议转人工、强证据数、人工复核数、FFT命中数、服务异常、兜底次数、新增耗时、真实性阶段token和逐图JSON字段。真实性token已经包含在订单总token内，不能再次相加。本项目仍是影子审核工具，只生成审核文件，没有修改审核后台的订单状态。

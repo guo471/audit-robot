@@ -451,7 +451,70 @@ CSV_COLUMNS = [
     ("activation_evidence_type", "activation_evidence_type"),
     ("image_risk", "image_risk"),
     ("confidence", "confidence"),
+    ("photo_authenticity_mode", "图片真实性模式"),
+    ("photo_authenticity_would_manual", "图片真实性是否建议转人工"),
+    ("photo_authenticity_strong_count", "图片真实性强证据图片数"),
+    ("photo_authenticity_manual_count", "图片真实性人工复核图片数"),
+    ("photo_authenticity_fft_count", "图片真实性FFT命中图片数"),
+    ("photo_authenticity_service_failure", "图片真实性服务是否异常"),
+    ("photo_authenticity_fallback_calls", "图片真实性兜底调用数"),
+    ("photo_authenticity_elapsed_sec", "图片真实性新增耗时秒"),
+    ("photo_authenticity_tokens", "图片真实性阶段token"),
+    ("photo_authenticity_image_results", "图片真实性逐图结果JSON"),
+    ("photo_authenticity_error", "图片真实性异常"),
 ]
+
+
+PHOTO_AUTHENTICITY_REPORT_DEFAULTS = {
+    "photo_authenticity_mode": "off",
+    "photo_authenticity_would_manual": False,
+    "photo_authenticity_strong_count": 0,
+    "photo_authenticity_manual_count": 0,
+    "photo_authenticity_fft_count": 0,
+    "photo_authenticity_service_failure": False,
+    "photo_authenticity_fallback_calls": 0,
+    "photo_authenticity_elapsed_sec": 0.0,
+    "photo_authenticity_tokens": 0,
+    "photo_authenticity_image_results": "",
+    "photo_authenticity_error": "",
+}
+
+
+def prepare_photo_authenticity_report_fields(row: dict[str, Any]) -> dict[str, Any]:
+    for key, value in PHOTO_AUTHENTICITY_REPORT_DEFAULTS.items():
+        row.setdefault(key, value)
+    image_results = row.get("photo_authenticity_image_results")
+    if isinstance(image_results, dict):
+        values = tuple(image_results.values())
+        row["photo_authenticity_strong_count"] = sum(
+            item.get("result") == "high_risk_non_real" for item in values
+        )
+        row["photo_authenticity_manual_count"] = sum(
+            item.get("result") == "manual_review" for item in values
+        )
+        row["photo_authenticity_fft_count"] = sum(bool(item.get("rescued_by_fft")) for item in values)
+        row["photo_authenticity_image_results"] = json.dumps(
+            image_results, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+    return row
+
+
+def summarize_photo_authenticity(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    mode_counts: dict[str, int] = {}
+    for row in rows:
+        mode = str(row.get("photo_authenticity_mode") or "off")
+        mode_counts[mode] = mode_counts.get(mode, 0) + 1
+    return {
+        "mode_counts": mode_counts,
+        "would_manual_orders": sum(bool(row.get("photo_authenticity_would_manual")) for row in rows),
+        "strong_images": sum(int(row.get("photo_authenticity_strong_count") or 0) for row in rows),
+        "manual_images": sum(int(row.get("photo_authenticity_manual_count") or 0) for row in rows),
+        "fft_images": sum(int(row.get("photo_authenticity_fft_count") or 0) for row in rows),
+        "failure_orders": sum(bool(row.get("photo_authenticity_service_failure")) for row in rows),
+        "fallback_calls": sum(int(row.get("photo_authenticity_fallback_calls") or 0) for row in rows),
+        "latency_sec": round(sum(float(row.get("photo_authenticity_elapsed_sec") or 0) for row in rows), 2),
+        "tokens": sum(int(row.get("photo_authenticity_tokens") or 0) for row in rows),
+    }
 
 MODEL_TIMEOUT_SEC = 60
 MODEL_RETRY_TIMEOUT_SEC = 15
@@ -2391,13 +2454,14 @@ def audit_task_hybrid(
     compliance = enforce_photo_noncompliance_manual(compliance, address_ok=precheck["address_ok"])
 
     row = _final_row(task, compliance, normalized_sn, compliance, time.time() - started, pre_elapsed, sn_elapsed, compliance_elapsed)
+    authenticity_tokens = _usage_total(compliance_usage) if authenticity_config.mode != "off" else 0
     fallback_raw: dict[str, Any] = {}
     fallback_usage: dict[str, Any] = {}
     fallback_cached = False
     fallback_elapsed = 0.0
 
     def authenticity_fallback(image: dict[str, Any]) -> Any:
-        nonlocal model_calls, total_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
+        nonlocal model_calls, total_tokens, authenticity_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
         fallback_prompt = load_approved_v4_prompt(
             PROJECT_ROOT / "photo_authenticity" / "prompts" / "non_real_photo_auditor_v4.txt"
         )
@@ -2417,10 +2481,12 @@ def audit_task_hybrid(
         fallback_raw, fallback_usage, fallback_cached, fallback_elapsed = {"content": raw_text}, usage, cached, elapsed
         model_calls += 0 if cached else 1
         total_tokens += _usage_total(usage)
+        authenticity_tokens += _usage_total(usage)
         compliance_elapsed += elapsed
         return parsed
 
     if authenticity_config.mode != "off" and row.get("manual_flag") == "否":
+        authenticity_started = time.time()
         row = apply_photo_authenticity_gate(
             legacy_row=row,
             compliance=compliance,
@@ -2431,6 +2497,8 @@ def audit_task_hybrid(
         )
         row["elapsed_sec"] = round(time.time() - started, 2)
         row["compliance_elapsed_sec"] = round(compliance_elapsed, 2)
+        row["photo_authenticity_elapsed_sec"] = round(time.time() - authenticity_started, 4)
+    row["photo_authenticity_tokens"] = authenticity_tokens
     row["strategy"] = "hybrid_sn_then_compliance"
     row["model_calls"] = model_calls
     row["total_tokens"] = total_tokens
@@ -2448,7 +2516,7 @@ def audit_task_hybrid(
             "photo_authenticity_fallback_usage": fallback_usage,
             "photo_authenticity_fallback_cached": fallback_cached,
         })
-    return row
+    return prepare_photo_authenticity_report_fields(row)
 
 
 def audit_task_v2(
@@ -2566,7 +2634,7 @@ def _final_row(
     if conflict_sn:
         observed_sn = conflict_sn
         sn_match = False
-    return {
+    row = {
         "id": task.get("channel_order_no", ""),
         "manual_flag": "是" if manual else "否",
         "manual_reason_code": primary_reason_code,
@@ -2592,6 +2660,8 @@ def _final_row(
         "image_risk": compliance.get("image_risk", ""),
         "confidence": compliance.get("confidence", sn_result.get("confidence", "")),
     }
+    row.update(PHOTO_AUTHENTICITY_REPORT_DEFAULTS)
+    return row
 
 
 def audit_task_path(
@@ -2658,8 +2728,7 @@ def audit_task_path(
     return index, {"task": task, "result": result, "total": total}
 
 
-def main() -> None:
-    configure_utf8_stdio()
+def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tasks-dir", required=True)
     parser.add_argument("--out-dir", required=True)
@@ -2669,7 +2738,26 @@ def main() -> None:
     parser.add_argument("--no-review", action="store_true")
     parser.add_argument("--no-targeted-sn-review", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--photo-authenticity-mode",
+        choices=["off", "shadow", "enforce"],
+        default=os.environ.get("PHOTO_AUTHENTICITY_MODE", "off"),
+        help="图片真实性审核模式；默认off，shadow只记录，enforce可转人工",
+    )
+    parser.add_argument(
+        "--photo-authenticity-artifact-dir",
+        default=os.environ.get("PHOTO_AUTHENTICITY_ARTIFACT_DIR"),
+        help="可覆盖FFT模型目录；阈值仍强制读取并校验冻结metadata中的0.995",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    configure_utf8_stdio()
+    args = parse_cli_args()
+    os.environ["PHOTO_AUTHENTICITY_MODE"] = args.photo_authenticity_mode
+    if args.photo_authenticity_artifact_dir:
+        os.environ["PHOTO_AUTHENTICITY_ARTIFACT_DIR"] = args.photo_authenticity_artifact_dir
 
     base_url = os.environ["VISION_API_BASE_URL"]
     api_key = os.environ["VISION_API_KEY"]
@@ -2711,6 +2799,7 @@ def main() -> None:
             print(f"[{index}/{len(task_paths)}] {task['channel_order_no']}", flush=True)
             raw = {key: value for key, value in result.items() if key.startswith("_")}
             row = {key: value for key, value in result.items() if not key.startswith("_")}
+            prepare_photo_authenticity_report_fields(row)
             rows.append(row)
             full.append({"task": task, "row": row, **raw})
             with partial_jsonl_path.open("a", encoding="utf-8") as partial_file:
@@ -2727,6 +2816,7 @@ def main() -> None:
     print("PARTIAL_JSONL=" + str(partial_jsonl_path))
     print("COUNT=" + str(len(rows)))
     print("TOTAL_SECONDS=" + str(round(sum(float(row["elapsed_sec"]) for row in rows), 2)))
+    print("PHOTO_AUTHENTICITY_SUMMARY=" + json.dumps(summarize_photo_authenticity(rows), ensure_ascii=False, sort_keys=True))
 
 
 if __name__ == "__main__":

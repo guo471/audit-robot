@@ -2357,3 +2357,71 @@ def test_compliance_prompt_contains_split_category_rules_and_invoice_warning():
 def test_model_and_order_timeout_budget_is_60_seconds():
     assert v2.MODEL_TIMEOUT_SEC == 60
     assert v2.ORDER_TIMEOUT_SEC == 60
+
+
+def test_photo_authenticity_report_columns_are_appended_and_off_defaults_are_csv_safe():
+    legacy = [key for key, _ in v2.CSV_COLUMNS[:28]]
+    assert legacy == [
+        "id", "manual_flag", "source_flow_status", "manual_reason_code", "manual_reason_cn",
+        "manual_reason", "business_pass", "elapsed_sec", "strategy", "model_calls", "total_tokens",
+        "precheck_elapsed_sec", "sn_elapsed_sec", "compliance_elapsed_sec", "product_type",
+        "source_examine_status", "source_settle_status", "system_sn", "observed_sn", "sn_match",
+        "product_type_match", "address_ok", "product_photo_ok", "unboxing_photo_ok",
+        "activation_photo_ok", "activation_evidence_type", "image_risk", "confidence",
+    ]
+    row = v2._final_row(
+        {"channel_order_no": "1", "fields": {}}, {}, {}, {}, 0, 0, 0, 0,
+    )
+    assert row["photo_authenticity_mode"] == "off"
+    assert row["photo_authenticity_would_manual"] is False
+    assert row["photo_authenticity_image_results"] == ""
+    assert set(row) <= {key for key, _ in v2.CSV_COLUMNS}
+
+
+def test_photo_authenticity_image_results_are_serialized_deterministically():
+    row = {
+        "photo_authenticity_image_results": {
+            "b": {"result": "manual_review", "score": 0.999},
+            "a": {"result": "no_evidence", "score": 0.1},
+        }
+    }
+    v2.prepare_photo_authenticity_report_fields(row)
+    assert row["photo_authenticity_image_results"] == (
+        '{"a":{"result":"no_evidence","score":0.1},'
+        '"b":{"result":"manual_review","score":0.999}}'
+    )
+
+
+def test_photo_authenticity_cli_defaults_off_and_rejects_invalid_mode_before_runtime():
+    args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert args.photo_authenticity_mode == "off"
+    assert args.photo_authenticity_artifact_dir is None
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args([
+            "--tasks-dir", "tasks", "--out-dir", "out",
+            "--photo-authenticity-mode", "invalid",
+        ])
+
+
+def test_photo_authenticity_summary_counts_routes_and_resources():
+    rows = [
+        {
+            "photo_authenticity_mode": "shadow", "photo_authenticity_would_manual": True,
+            "photo_authenticity_strong_count": 1, "photo_authenticity_manual_count": 2,
+            "photo_authenticity_fft_count": 1, "photo_authenticity_service_failure": False,
+            "photo_authenticity_fallback_calls": 1, "photo_authenticity_elapsed_sec": 2.5,
+            "photo_authenticity_tokens": 123,
+        },
+        {
+            "photo_authenticity_mode": "shadow", "photo_authenticity_would_manual": False,
+            "photo_authenticity_strong_count": 0, "photo_authenticity_manual_count": 0,
+            "photo_authenticity_fft_count": 0, "photo_authenticity_service_failure": True,
+            "photo_authenticity_fallback_calls": 0, "photo_authenticity_elapsed_sec": 1.5,
+            "photo_authenticity_tokens": 7,
+        },
+    ]
+    assert v2.summarize_photo_authenticity(rows) == {
+        "mode_counts": {"shadow": 2}, "would_manual_orders": 1, "strong_images": 1,
+        "manual_images": 2, "fft_images": 1, "failure_orders": 1, "fallback_calls": 1,
+        "latency_sec": 4.0, "tokens": 130,
+    }

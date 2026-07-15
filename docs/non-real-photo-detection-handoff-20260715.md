@@ -209,3 +209,32 @@ V4固定开发批最初结果：
 - 不得用商品屏全豁免；开发非实拍召回会明显下降。
 - 不得继续在现有779张上调参后宣称盲测成功。
 - 不得把定位水印文字、文件名、目录、尺寸、商品型号作为非实拍特征。
+
+## 11. 主线接入与回退交接（2026-07-15）
+
+已经按用户决定采用“直接合并、单次调用”的方式：真实性观察字段放进现有第二次图片合规提示词，由同一次模型响应返回。没有再做新旧提示词双路测试，已有历史测试结果继续作为原审核规则的基准证据。此次接入不代表不可撤销，真实性能力有独立开关。
+
+三种模式：
+
+- `off`：默认值，完全走原链路，真实性报表字段保持空值或零值。
+- `shadow`：运行真实性判断并写报表，但不改变原订单结论。
+- `enforce`：真实性命中时转人工；如果模型结果看不懂、冻结模型加载失败、图片读取失败或兜底失败，也转人工。
+
+启动示例：
+
+```powershell
+# 只观察
+python tools/run_guobu_model_audit_v2.py --tasks-dir <任务目录> --out-dir <输出目录> --mode hybrid --photo-authenticity-mode shadow
+
+# 正式拦截
+python tools/run_guobu_model_audit_v2.py --tasks-dir <任务目录> --out-dir <输出目录> --mode hybrid --photo-authenticity-mode enforce
+
+# 一键回退原链路
+python tools/run_guobu_model_audit_v2.py --tasks-dir <任务目录> --out-dir <输出目录> --mode hybrid --photo-authenticity-mode off
+```
+
+冻结约束：FFT阈值只能是metadata中的 `0.995`；模型SHA-256为 `49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65b96aa512b`，metadata SHA-256为 `e8c4ba687b702535231d91e001c55f4e0750b07ab79e3cd4829ae1dea5f708cf`。可以用 `--photo-authenticity-artifact-dir` 指定模型目录，但不能借此修改阈值。千问调用保持 `enable_thinking=false`。
+
+输出增加模式、建议转人工、强证据图片数、人工复核图片数、FFT命中图片数、异常订单数、兜底次数、耗时、token和逐图结果。逐图结果按图片ID稳定排序后保存为JSON，便于重复运行和对账。真实性阶段token同时计入订单总token。
+
+范围说明：本次只修改审核脚本、报表和说明文档，没有调用审核后台的通过/驳回接口，也没有改变任何后台订单状态。
