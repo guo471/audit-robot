@@ -10,6 +10,29 @@ def test_authenticity_prompt_forbids_cross_image_evidence_and_model_final_verdic
     assert "每个证据只能属于当前 image_id" in prompt
 
 
+def test_authenticity_prompt_defines_evidence_thresholds_and_exemptions():
+    prompt = v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
+
+    for code in (
+        "EXTERNAL_PHOTO_CARRIER",
+        "PHOTO_VIEWER_UI",
+        "PRINTED_PHOTO_CARRIER",
+        "NESTED_IMAGE_BOUNDARY",
+        "CROSS_OBJECT_MOIRE",
+        "EDGE_CUTOFF",
+        "OUTER_PLANE_OPTICS",
+        "PLANAR_APPEARANCE",
+        "LOCAL_MOIRE",
+        "UI_CANDIDATE",
+    ):
+        assert f"{code}=" in prompt
+    assert "商品自身屏幕内UI不记PHOTO_VIEWER_UI" in prompt
+    assert "局部摩尔纹只记LOCAL_MOIRE" in prompt
+    assert "至少2个不同的非商品屏物理区域" in prompt
+    assert "不限于笔直黑边" in prompt
+    assert "普通反射、模糊、滤镜、常规裁切、局部纹理或单一弱证据不得记为strong" in prompt
+
+
 def test_authenticity_normalizer_rejects_evidence_that_names_another_image():
     observation = {
         "image_id": "a",

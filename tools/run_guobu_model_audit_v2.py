@@ -403,9 +403,10 @@ PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM = r'''
 枚举必须严格使用：
 - edges: scene_continues | carrier_boundary | abrupt_cutoff | not_visible | uncertain
 - screen_owner: product_screen | external_screen | none | uncertain
-- strong_evidence.code: EXTERNAL_PHOTO_CARRIER | PHOTO_VIEWER_UI | PRINTED_PHOTO_CARRIER | NESTED_IMAGE_BOUNDARY | CROSS_OBJECT_MOIRE
-- weak_evidence.code: EDGE_CUTOFF | OUTER_PLANE_OPTICS | PLANAR_APPEARANCE | LOCAL_MOIRE | UI_CANDIDATE
 - regions: product_body | product_screen | package | hand | background | image_edge | unknown
+strong仅在明确看到时使用：EXTERNAL_PHOTO_CARRIER=外部手机/显示器等照片载体；PHOTO_VIEWER_UI=外部屏幕的相册/查看器界面；PRINTED_PHOTO_CARRIER=纸张、相纸或印刷载体；NESTED_IMAGE_BOUNDARY=画面内另一张图片的完整边界；CROSS_OBJECT_MOIRE=同一图片的同类摩尔纹跨至少2个不同的非商品屏物理区域，regions列出区域。商品自身屏幕内UI不记PHOTO_VIEWER_UI。
+weak按含义使用：EDGE_CUTOFF=边缘视觉突然缺块、异常截断或不连续，不限于笔直黑边；OUTER_PLANE_OPTICS=疑似外层平面的反光/光学痕迹；PLANAR_APPEARANCE=整体缺乏景深、疑似平面二次成像；LOCAL_MOIRE=单一区域摩尔纹；UI_CANDIDATE=疑似但不明确的外部界面。局部摩尔纹只记LOCAL_MOIRE。
+普通反射、模糊、滤镜、常规裁切、局部纹理或单一弱证据不得记为strong。
 无证据时对应 evidence 数组必须为 []；不要虚构证据，不要增加字段。
 '''
 
