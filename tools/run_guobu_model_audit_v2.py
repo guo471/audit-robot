@@ -768,27 +768,8 @@ def compliance_prompt_for_category(category: str, *, include_photo_authenticity:
 def _normalize_photo_authenticity_observations(
     compliance: dict[str, Any], expected_image_ids: Any
 ) -> dict[str, ImageObservation]:
-    expected_image_ids = list(expected_image_ids)
-    expected_set = set(expected_image_ids)
-    raw = compliance.get("photo_authenticity_by_image")
-    if isinstance(raw, list):
-        for observation in raw:
-            if not isinstance(observation, dict):
-                continue
-            owner = observation.get("image_id")
-            other_image_ids = expected_set - {owner}
-            for field in ("strong_evidence", "weak_evidence"):
-                evidence_items = observation.get(field)
-                if not isinstance(evidence_items, list):
-                    continue
-                for evidence in evidence_items:
-                    regions = evidence.get("regions") if isinstance(evidence, dict) else None
-                    if isinstance(regions, list) and any(region in other_image_ids for region in regions):
-                        raise PhotoAuthenticitySchemaError(
-                            f"image_id={owner!r}: cross-image evidence reference in {field}"
-                        )
     normalized = validate_image_observations(
-        raw, expected_image_ids
+        compliance.get("photo_authenticity_by_image"), expected_image_ids
     )
     compliance["photo_authenticity_by_image"] = [
         asdict(normalized[image_id]) for image_id in expected_image_ids

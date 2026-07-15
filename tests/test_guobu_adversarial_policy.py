@@ -22,31 +22,29 @@ def test_authenticity_normalizer_rejects_evidence_that_names_another_image():
 
     try:
         v2._normalize_photo_authenticity_observations({"photo_authenticity_by_image": [observation]}, ("a",))
-    except v2.PhotoAuthenticitySchemaError:
-        pass
+    except v2.PhotoAuthenticitySchemaError as exc:
+        assert "entries require exactly code and regions" in str(exc)
     else:
         raise AssertionError("cross-image evidence must be rejected")
 
 
-def test_authenticity_normalizer_identifies_region_value_that_belongs_to_another_image():
-    observation = {
+def test_authenticity_normalizer_allows_legal_region_even_when_another_image_uses_that_id():
+    first = {
         "image_id": "a",
         "edges": {"top": "scene_continues", "right": "scene_continues", "bottom": "scene_continues", "left": "scene_continues"},
         "screen_owner": "none",
-        "strong_evidence": [{"code": "CROSS_OBJECT_MOIRE", "regions": ["b"]}],
+        "strong_evidence": [{"code": "CROSS_OBJECT_MOIRE", "regions": ["background"]}],
         "weak_evidence": [],
         "reason": "异常",
     }
+    second = {**first, "image_id": "background", "strong_evidence": []}
 
-    try:
-        v2._normalize_photo_authenticity_observations(
-            {"photo_authenticity_by_image": [observation, {**observation, "image_id": "b", "strong_evidence": []}]},
-            ("a", "b"),
-        )
-    except v2.PhotoAuthenticitySchemaError as exc:
-        assert "cross-image evidence reference" in str(exc)
-    else:
-        raise AssertionError("cross-image region ownership must be rejected explicitly")
+    normalized = v2._normalize_photo_authenticity_observations(
+        {"photo_authenticity_by_image": [first, second]},
+        ("a", "background"),
+    )
+
+    assert normalized["a"].strong_evidence[0].regions == ("background",)
 
 
 def test_prompts_allow_one_two_code_when_package_sn_matches():
