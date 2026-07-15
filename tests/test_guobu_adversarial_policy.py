@@ -28,6 +28,27 @@ def test_authenticity_normalizer_rejects_evidence_that_names_another_image():
         raise AssertionError("cross-image evidence must be rejected")
 
 
+def test_authenticity_normalizer_identifies_region_value_that_belongs_to_another_image():
+    observation = {
+        "image_id": "a",
+        "edges": {"top": "scene_continues", "right": "scene_continues", "bottom": "scene_continues", "left": "scene_continues"},
+        "screen_owner": "none",
+        "strong_evidence": [{"code": "CROSS_OBJECT_MOIRE", "regions": ["b"]}],
+        "weak_evidence": [],
+        "reason": "异常",
+    }
+
+    try:
+        v2._normalize_photo_authenticity_observations(
+            {"photo_authenticity_by_image": [observation, {**observation, "image_id": "b", "strong_evidence": []}]},
+            ("a", "b"),
+        )
+    except v2.PhotoAuthenticitySchemaError as exc:
+        assert "cross-image evidence reference" in str(exc)
+    else:
+        raise AssertionError("cross-image region ownership must be rejected explicitly")
+
+
 def test_prompts_allow_one_two_code_when_package_sn_matches():
     policy_text = v2.SN_PROMPT + "\n" + v2.ORDINARY_3C_COMPLIANCE_PROMPT
 

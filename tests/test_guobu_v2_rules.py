@@ -1,4 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
+import hashlib
 import json
 
 import pytest
@@ -38,6 +39,27 @@ def test_compliance_prompt_authenticity_addendum_is_opt_in_and_identical_for_all
         assert merged == original[category] + v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
         assert merged.count(v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM) == 1
         assert merged.count('"photo_authenticity_by_image"') == 1
+
+
+def test_legacy_compliance_prompts_match_frozen_pre_task2_sha256_baselines():
+    # Baselines were frozen from the existing working-tree prompts when Task 2
+    # first brought this previously-untracked mainline file under version control.
+    # There is no earlier Git blob from which to reconstruct a historical diff.
+    expected = {
+        "home_appliance": "89be177453d4b9c4efafa9927d21255cd913c67b6cdeaf98835a9b9f16f3f572",
+        "computer": "614a07fc1ec229d97958952ff2015864270eecc770d5f6da4d8ed078c626c772",
+        "ordinary_3c": "8d9e55cae771522f91ec29aca9d8d06a4c3b639de5f03b3e9c2959132d8ebe71",
+        "unknown": "578f0ade0ec8cfbd642b5467041e612e8683de08da5c4419656ed9db69f26315",
+    }
+
+    actual = {
+        category: hashlib.sha256(
+            v2.compliance_prompt_for_category(category, include_photo_authenticity=False).encode("utf-8")
+        ).hexdigest()
+        for category in expected
+    }
+
+    assert actual == expected
 
 
 @pytest.mark.parametrize("image_ids", [("a", "b", "c"), ("a", "b", "c", "d", "e", "f")])
