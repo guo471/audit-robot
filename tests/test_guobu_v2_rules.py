@@ -125,6 +125,29 @@ def test_hybrid_enforce_uses_merged_compliance_and_fails_closed_after_one_fallba
     assert result["photo_authenticity_fallback_calls"] == 1
 
 
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_hybrid_prompt_asset_failure_never_starts_fallback_model(monkeypatch, mode):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", mode)
+    stages = []
+    def fake_call(_base, _key, _model, prompt, payload, images, *, stage, **kwargs):
+        stages.append(stage)
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        decision["photo_authenticity_by_image"] = [_auth_observation("i1"), _auth_observation("i2")]
+        return (decision, "compliance", 0.1, {}, False)
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    monkeypatch.setattr(v2, "load_approved_v4_prompt", lambda _path: (_ for _ in ()).throw(ValueError("prompt hash mismatch")), raising=False)
+    task = _base_task()
+    for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
+        image["image_id"] = image_id
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
+    assert stages == ["hybrid_sn", "hybrid_compliance"]
+    assert result["photo_authenticity_service_failure"] is True
+    assert result["manual_flag"] == ("是" if mode == "enforce" else "否")
+
+
 def test_hybrid_off_keeps_original_prompt_stage_and_never_calls_gate(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     calls = []

@@ -13,6 +13,7 @@ from tools.photo_authenticity_mainline import (
     EXPECTED_FEATURE_DIMENSION,
     EXPECTED_MODEL_SHA256,
     EXPECTED_THRESHOLD,
+    EXPECTED_V4_PROMPT_SHA256,
     FrozenFFTRescue,
     AuthenticityImageResult,
     AuthenticityOrderResult,
@@ -21,6 +22,7 @@ from tools.photo_authenticity_mainline import (
     derive_v4_result,
     evaluate_authenticity_images,
     apply_photo_authenticity_gate,
+    load_approved_v4_prompt,
     validate_image_observations,
 )
 
@@ -407,3 +409,20 @@ def test_strong_reason_wins_over_service_failure():
         config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}), evaluator=lambda **_: result,
     )
     assert row["manual_reason_code"] == "NON_REAL_PHOTO_STRONG_RISK"
+
+
+def test_approved_v4_prompt_has_frozen_sha_and_loads_current_file():
+    expected = "7d4e7224b38c5fc5cbb9293f6d72b091df39d4dc9efb2e983b0daa829a43ca77"
+    path = Path("photo_authenticity/prompts/non_real_photo_auditor_v4.txt")
+    assert EXPECTED_V4_PROMPT_SHA256 == expected
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
+    assert load_approved_v4_prompt(path) == path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("kind", ["tampered", "missing"])
+def test_approved_v4_prompt_loader_rejects_tampering_and_missing(tmp_path, kind):
+    path = tmp_path / "v4.txt"
+    if kind == "tampered":
+        path.write_text("changed", encoding="utf-8")
+    with pytest.raises((ValueError, FileNotFoundError), match="prompt|No such file"):
+        load_approved_v4_prompt(path)

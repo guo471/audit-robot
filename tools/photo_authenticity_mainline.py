@@ -28,11 +28,19 @@ EXPECTED_FEATURE_DIMENSION = 795
 EXPECTED_THRESHOLD = 0.995
 EXPECTED_MODEL_SHA256 = "49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65b96aa512b"
 EXPECTED_METADATA_SHA256 = "e8c4ba687b702535231d91e001c55f4e0750b07ab79e3cd4829ae1dea5f708cf"
+EXPECTED_V4_PROMPT_SHA256 = "7d4e7224b38c5fc5cbb9293f6d72b091df39d4dc9efb2e983b0daa829a43ca77"
 DEFAULT_ARTIFACT_DIR = Path("photo_authenticity/models/releases/non-real-photo-v2")
 
 
 class PhotoAuthenticitySchemaError(ValueError):
     """The merged model response is unusable as a complete per-image contract."""
+
+
+def load_approved_v4_prompt(path: Path) -> str:
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != EXPECTED_V4_PROMPT_SHA256:
+        raise ValueError("approved V4 prompt hash mismatch")
+    return raw.decode("utf-8")
 
 
 @dataclass(frozen=True)

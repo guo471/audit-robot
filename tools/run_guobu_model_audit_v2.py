@@ -35,6 +35,7 @@ from tools.photo_authenticity_mainline import (
     ImageObservation,
     PhotoAuthenticitySchemaError,
     apply_photo_authenticity_gate,
+    load_approved_v4_prompt,
     validate_image_observations,
 )
 
@@ -2400,7 +2401,9 @@ def audit_task_hybrid(
         if cache_dir is not None:
             invalid_cache = cache_dir / f"{_cache_key(model, 'hybrid_compliance', compliance_prompt, compliance_payload, compliance_images)}.json"
             invalid_cache.unlink(missing_ok=True)
-        fallback_prompt = (PROJECT_ROOT / "photo_authenticity" / "prompts" / "non_real_photo_auditor_v4.txt").read_text(encoding="utf-8")
+        fallback_prompt = load_approved_v4_prompt(
+            PROJECT_ROOT / "photo_authenticity" / "prompts" / "non_real_photo_auditor_v4.txt"
+        )
         parsed, raw_text, elapsed, usage, cached = call_model_with_retry(
             base_url, api_key, model, fallback_prompt,
             {"id": task["channel_order_no"], "image_id": image.get("image_id")},
