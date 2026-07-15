@@ -76,6 +76,20 @@ def test_validator_rejects_unknown_edge_owner_evidence_and_region(bad):
         validate_image_observations([bad], ["i1"])
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        raw(edges={"top": [], "right": "scene_continues", "bottom": "scene_continues", "left": "scene_continues"}),
+        raw(screen_owner={"unexpected": "object"}),
+        raw(strong_evidence=[evidence([], "background")]),
+        raw(weak_evidence=[evidence({}, "background")]),
+    ],
+)
+def test_validator_normalizes_unhashable_json_values_to_schema_error(bad):
+    with pytest.raises(PhotoAuthenticitySchemaError, match="i1"):
+        validate_image_observations([raw("valid"), bad], ["valid", "i1"])
+
+
 def test_validator_returns_observations_keyed_by_input_id_not_array_order():
     result = validate_image_observations([raw("i2"), raw("i1")], ["i1", "i2"])
     assert list(result) == ["i1", "i2"]
@@ -151,7 +165,18 @@ def test_frozen_artifact_rejects_tampering_and_threshold_drift(tmp_path):
     (target / "model.joblib").write_bytes((_release_dir() / "model.joblib").read_bytes())
     metadata["threshold"] = 0.9
     (target / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
-    with pytest.raises(ValueError, match="threshold"):
+    with pytest.raises(ValueError, match="metadata hash"):
+        FrozenFFTRescue.load(target)
+
+
+def test_frozen_artifact_rejects_any_metadata_contract_tampering(tmp_path):
+    metadata = json.loads((_release_dir() / "metadata.json").read_text(encoding="utf-8"))
+    metadata["failure_policy"]["after_retries"] = "allow"
+    target = tmp_path / "artifact"
+    target.mkdir()
+    (target / "model.joblib").write_bytes((_release_dir() / "model.joblib").read_bytes())
+    (target / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(ValueError, match="metadata hash"):
         FrozenFFTRescue.load(target)
 
 
@@ -204,3 +229,26 @@ def test_fft_only_rescues_no_evidence_and_retries_twice(monkeypatch, tmp_path):
     assert result.image_results["failure"].result == "manual_review"
     assert result.image_results["failure"].status == "failed_after_retries"
     assert attempts == {"n0": 1, "failure": 2}
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monkeypatch, tmp_path, mode):
+    calls = []
+
+    def fail_load(_artifact_dir):
+        calls.append(1)
+        raise ValueError("frozen model hash mismatch")
+
+    monkeypatch.setattr(FrozenFFTRescue, "load", fail_load)
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": mode}),
+        raw_observations=[raw("n0")],
+        expected_image_ids=["n0"],
+        image_paths={"n0": tmp_path / "unused.png"},
+    )
+    assert calls == [1]
+    assert result.service_failure is True
+    assert result.would_manual is True
+    assert result.image_results["n0"].result == "manual_review"
+    assert result.image_results["n0"].status == "artifact_load_failure"
+    assert "hash mismatch" in result.image_results["n0"].evidence_summary["error"]

@@ -27,6 +27,7 @@ EXPECTED_EXTRACTOR_VERSION = "fft-v1-512-ycbcr-5x53"
 EXPECTED_FEATURE_DIMENSION = 795
 EXPECTED_THRESHOLD = 0.995
 EXPECTED_MODEL_SHA256 = "49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65b96aa512b"
+EXPECTED_METADATA_SHA256 = "e8c4ba687b702535231d91e001c55f4e0750b07ab79e3cd4829ae1dea5f708cf"
 DEFAULT_ARTIFACT_DIR = Path("photo_authenticity/models/releases/non-real-photo-v2")
 
 
@@ -96,7 +97,7 @@ def _validate_evidence(image_id: str, value: Any, field: str, allowed: frozenset
         if not isinstance(item, dict) or set(item) != {"code", "regions"}:
             raise _schema_error(image_id, f"{field} entries require exactly code and regions")
         code, regions = item["code"], item["regions"]
-        if code not in allowed:
+        if not isinstance(code, str) or code not in allowed:
             raise _schema_error(image_id, f"unknown {field} code {code!r}")
         if not isinstance(regions, list) or not all(isinstance(region, str) for region in regions):
             raise _schema_error(image_id, f"{field} regions must be a string array")
@@ -119,9 +120,9 @@ def _validate_one(item: Any) -> ImageObservation:
     edges = item["edges"]
     if not isinstance(edges, dict) or set(edges) != set(EDGE_NAMES):
         raise _schema_error(image_id, "edges must contain exactly top, right, bottom, and left")
-    if any(value not in EDGE_VALUES for value in edges.values()):
+    if any(not isinstance(value, str) or value not in EDGE_VALUES for value in edges.values()):
         raise _schema_error(image_id, "unknown edge value")
-    if item["screen_owner"] not in SCREEN_OWNERS:
+    if not isinstance(item["screen_owner"], str) or item["screen_owner"] not in SCREEN_OWNERS:
         raise _schema_error(image_id, "unknown screen_owner")
     if not isinstance(item["reason"], str):
         raise _schema_error(image_id, "reason must be text")
@@ -261,7 +262,10 @@ class FrozenFFTRescue:
     @classmethod
     def load(cls, artifact_dir: Path) -> "FrozenFFTRescue":
         artifact_dir = Path(artifact_dir)
-        metadata = json.loads((artifact_dir / "metadata.json").read_text(encoding="utf-8"))
+        metadata_path = artifact_dir / "metadata.json"
+        if _sha256(metadata_path) != EXPECTED_METADATA_SHA256:
+            raise ValueError("frozen metadata hash mismatch")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         model_path = artifact_dir / "model.joblib"
         actual_hash = _sha256(model_path)
         if actual_hash != EXPECTED_MODEL_SHA256 or metadata.get("model_sha256") != EXPECTED_MODEL_SHA256:
@@ -304,6 +308,7 @@ def evaluate_authenticity_images(
         return AuthenticityOrderResult(mode="off", would_manual=False, image_results={})
     observations = validate_image_observations(raw_observations, expected_image_ids)
     loaded_rescue = rescue
+    artifact_error: Exception | None = None
     results: dict[str, AuthenticityImageResult] = {}
     service_failure = False
     for image_id, observation in observations.items():
@@ -311,8 +316,18 @@ def evaluate_authenticity_images(
         if result != "no_evidence":
             results[image_id] = AuthenticityImageResult(image_id, result, rule)
             continue
-        if loaded_rescue is None:
-            loaded_rescue = FrozenFFTRescue.load(config.artifact_dir)
+        if loaded_rescue is None and artifact_error is None:
+            try:
+                loaded_rescue = FrozenFFTRescue.load(config.artifact_dir)
+            except Exception as exc:
+                artifact_error = exc
+        if artifact_error is not None:
+            service_failure = True
+            results[image_id] = AuthenticityImageResult(
+                image_id, "manual_review", "ARTIFACT_LOAD_FAILURE", status="artifact_load_failure",
+                evidence_summary={"error": f"{type(artifact_error).__name__}: {artifact_error}"},
+            )
+            continue
         last_error: Exception | None = None
         for _ in range(config.max_fft_attempts):
             try:
