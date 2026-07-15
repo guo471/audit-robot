@@ -499,6 +499,14 @@ def prepare_photo_authenticity_report_fields(row: dict[str, Any]) -> dict[str, A
     return row
 
 
+def finalize_photo_authenticity_report_fields(
+    row: dict[str, Any], config: PhotoAuthenticityConfig,
+) -> dict[str, Any]:
+    """Record the configured mode even when the authenticity stage was skipped."""
+    row["photo_authenticity_mode"] = config.mode
+    return prepare_photo_authenticity_report_fields(row)
+
+
 def summarize_photo_authenticity(rows: list[dict[str, Any]]) -> dict[str, Any]:
     mode_counts: dict[str, int] = {}
     for row in rows:
@@ -2228,7 +2236,7 @@ def audit_task_hybrid(
         row["strategy"] = "local_precheck"
         row["model_calls"] = 0
         row["total_tokens"] = 0
-        return row
+        return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     fields = task["fields"]
     sn_payload = build_sn_payload(task, fields, precheck["activation_images"])
@@ -2262,7 +2270,7 @@ def audit_task_hybrid(
         row["model_calls"] = model_calls
         row["total_tokens"] = total_tokens
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-        return row
+        return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     if allow_review and needs_high_detail_review(normalized_sn):
         if _order_budget_exhausted(started):
@@ -2277,7 +2285,7 @@ def audit_task_hybrid(
             row["model_calls"] = model_calls
             row["total_tokens"] = total_tokens
             row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-            return row
+            return finalize_photo_authenticity_report_fields(row, authenticity_config)
         review_payload = dict(sn_payload)
         review_payload["previous_decision"] = normalized_sn
         review_result, review_raw, review_elapsed, review_usage, review_cached = call_model_with_retry(
@@ -2318,7 +2326,7 @@ def audit_task_hybrid(
                 "review_usage": review_usage,
                 "review_cached": review_cached,
             }
-            return row
+            return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     if allow_targeted_review and _needs_targeted_sn_review(fields, normalized_sn):
         if _order_budget_exhausted(started):
@@ -2333,7 +2341,7 @@ def audit_task_hybrid(
             row["model_calls"] = model_calls
             row["total_tokens"] = total_tokens
             row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-            return row
+            return finalize_photo_authenticity_report_fields(row, authenticity_config)
         target_payload = build_targeted_sn_payload(task, fields, precheck["activation_images"], normalized_sn)
         target_result, target_raw, target_elapsed, target_usage, target_cached = call_model_with_retry(
             base_url,
@@ -2374,7 +2382,7 @@ def audit_task_hybrid(
                 "target_review_usage": target_usage,
                 "target_review_cached": target_cached,
             }
-            return row
+            return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     if not as_bool(normalized_sn.get("sn_match")):
         code = normalized_sn.get("manual_reason_code") or ("SN_MISMATCH" if normalized_sn.get("observed_sn") else "SN_NOT_FOUND")
@@ -2389,7 +2397,7 @@ def audit_task_hybrid(
         row["model_calls"] = model_calls
         row["total_tokens"] = total_tokens
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-        return row
+        return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     if _order_budget_exhausted(started):
         manual = {
@@ -2403,7 +2411,7 @@ def audit_task_hybrid(
         row["model_calls"] = model_calls
         row["total_tokens"] = total_tokens
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-        return row
+        return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     compliance_payload = {
         "id": task["channel_order_no"],
@@ -2516,7 +2524,7 @@ def audit_task_hybrid(
             "photo_authenticity_fallback_usage": fallback_usage,
             "photo_authenticity_fallback_cached": fallback_cached,
         })
-    return prepare_photo_authenticity_report_fields(row)
+    return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
 
 def audit_task_v2(

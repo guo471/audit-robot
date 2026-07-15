@@ -2425,3 +2425,60 @@ def test_photo_authenticity_summary_counts_routes_and_resources():
         "manual_images": 2, "fft_images": 1, "failure_orders": 1, "fallback_calls": 1,
         "latency_sec": 4.0, "tokens": 130,
     }
+
+
+@pytest.mark.parametrize("configured_mode", ["shadow", "enforce"])
+def test_photo_authenticity_mode_is_preserved_on_precheck_early_return(monkeypatch, configured_mode):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", configured_mode)
+    monkeypatch.setattr(v2, "precheck_task", lambda _task: {
+        "manual_required": True, "manual_reason_codes": ["IMAGE_MISSING"],
+        "manual_reason": "missing", "address_ok": True,
+    })
+    result = audit_task_hybrid("https://unused", "key", "model", _base_task())
+    assert result["manual_flag"] == "是"
+    assert result["photo_authenticity_mode"] == configured_mode
+    assert result["photo_authenticity_would_manual"] is False
+    assert result["photo_authenticity_image_results"] == ""
+
+
+@pytest.mark.parametrize("configured_mode", ["shadow", "enforce"])
+def test_photo_authenticity_mode_is_preserved_on_sn_early_return(monkeypatch, configured_mode):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", configured_mode)
+
+    def fake_call(*_args, **_kwargs):
+        return ({"sn_match": False, "observed_sn": "WRONG", "confidence": 0.99}, "{}", 1.0, {"total_tokens": 5}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    result = audit_task_hybrid(
+        "https://unused", "key", "model", _base_task(), allow_review=False, allow_targeted_review=False,
+    )
+    assert result["manual_flag"] == "是"
+    assert result["photo_authenticity_mode"] == configured_mode
+    assert result["photo_authenticity_tokens"] == 0
+
+
+@pytest.mark.parametrize("configured_mode", ["shadow", "enforce"])
+def test_photo_authenticity_mode_is_preserved_when_legacy_compliance_is_already_manual(monkeypatch, configured_mode):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", configured_mode)
+
+    def fake_call(*_args, stage, **_kwargs):
+        if stage == "hybrid_sn":
+            parsed = {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}
+        else:
+            parsed = _screen_sn_compliance_pass()
+            parsed.update({
+                "manual_required": True, "manual_reason_codes": ["PRODUCT_PHOTO_INVALID"],
+                "manual_reason": "legacy manual", "photo_authenticity_by_image": [],
+            })
+        return parsed, "{}", 1.0, {"total_tokens": 5}, False
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    result = audit_task_hybrid(
+        "https://unused", "key", "model", _base_task(), allow_review=False, allow_targeted_review=False,
+    )
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "PRODUCT_PHOTO_INVALID"
+    assert result["photo_authenticity_mode"] == configured_mode
+    assert result["photo_authenticity_would_manual"] is False
+    assert result["photo_authenticity_tokens"] == 5
+    assert v2.summarize_photo_authenticity([result])["mode_counts"] == {configured_mode: 1}
