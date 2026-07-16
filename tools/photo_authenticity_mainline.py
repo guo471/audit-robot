@@ -52,7 +52,7 @@ class PhotoAuthenticityConfig:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "PhotoAuthenticityConfig":
-        mode = str(env.get("PHOTO_AUTHENTICITY_MODE", "off")).strip().lower()
+        mode = str(env.get("PHOTO_AUTHENTICITY_MODE", "enforce")).strip().lower()
         if mode not in {"off", "shadow", "enforce"}:
             raise ValueError("PHOTO_AUTHENTICITY_MODE must be off, shadow, or enforce")
         fft_raw = str(env.get("PHOTO_AUTHENTICITY_FFT_ENABLED", "false")).strip().lower()

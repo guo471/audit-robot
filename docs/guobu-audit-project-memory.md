@@ -174,9 +174,10 @@
 
 运行规则：
 
-- 默认关闭：`--photo-authenticity-mode off`。
+- 正式主线 `hybrid` 默认开启：未传参数且未设置环境变量时，等同于 `--photo-authenticity-mode enforce`。
+- 显式关闭回退：`--photo-authenticity-mode off` 或 `PHOTO_AUTHENTICITY_MODE=off`。`fast`、`v2`、`sn_only` 旧模式保持原样，不承诺执行真实性审核。
 - 只观察不改结果：`--photo-authenticity-mode shadow`。
-- 正式拦截：`--photo-authenticity-mode enforce`。模型字段缺失、格式错误、FFT文件损坏或最终兜底失败时，订单交给人工，不能因为程序看不懂而自动放行。
+- 正式拦截：`--photo-authenticity-mode enforce`。第二次图片合规模型调用同时输出逐图真实性结构，随后由代码机械校验和应用强弱证据规则。模型字段缺失或格式错误时直接交给人工，不再发起第三次局部模型补问。
 - 千问全部调用固定 `enable_thinking=false`，不启用深度思考。
 - FFT阈值锁定为 `0.995`。即使通过 `--photo-authenticity-artifact-dir` 更换模型目录，也必须通过冻结metadata校验，不能从命令行改阈值。
 - FFT模型SHA-256：`49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65b96aa512b`。
@@ -200,3 +201,4 @@ python tools/run_guobu_model_audit_v2.py --tasks-dir <任务目录> --out-dir <�
 - 普通构图没有拍全不再仅凭`abrupt_cutoff`转人工；必须存在结构化`EDGE_CUTOFF`等弱证据，或与`OUTER_PLANE_OPTICS`组合形成更强证据。
 - FFT代码、冻结模型和报表字段继续保留。只有明确设置`PHOTO_AUTHENTICITY_FFT_ENABLED=true`时才恢复0.995阈值路径，用于受控测试，不作为当前默认审核规则。
 - 商品自身屏幕摩尔纹增加严格豁免：仅当`screen_owner=product_screen`、唯一弱证据为`LOCAL_MOIRE`、regions严格等于`[product_screen]`、无强证据且四边均为`scene_continues`时维持无证据。摩尔纹延伸到机身、包装、手部或背景，或同时存在平面化、外层光学、异常边缘、外部UI等证据时仍转人工。
+- 2026-07-16确认：上述商品屏局部摩尔纹豁免继续保留；除此之外不增加或删除强弱证据规则。

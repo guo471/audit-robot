@@ -35,7 +35,6 @@ from tools.photo_authenticity_mainline import (
     ImageObservation,
     PhotoAuthenticitySchemaError,
     apply_photo_authenticity_gate,
-    load_approved_v4_prompt,
     validate_image_observations,
 )
 
@@ -2528,32 +2527,6 @@ def audit_task_hybrid(
     fallback_raw: dict[str, Any] = {}
     fallback_usage: dict[str, Any] = {}
     fallback_cached = False
-    fallback_elapsed = 0.0
-
-    def authenticity_fallback(image: dict[str, Any]) -> Any:
-        nonlocal model_calls, total_tokens, authenticity_postprocess_tokens, fallback_raw, fallback_usage, fallback_cached, fallback_elapsed, compliance_elapsed
-        fallback_prompt = load_approved_v4_prompt(
-            PROJECT_ROOT / "photo_authenticity" / "prompts" / "non_real_photo_auditor_v4.txt"
-        )
-        if cache_dir is not None:
-            invalid_cache = cache_dir / f"{_cache_key(model, 'hybrid_compliance', compliance_prompt, compliance_payload, compliance_images)}.json"
-            invalid_cache.unlink(missing_ok=True)
-        parsed, raw_text, elapsed, usage, cached = call_model_with_retry(
-            base_url, api_key, model, fallback_prompt,
-            {"id": task["channel_order_no"], "image_id": image.get("image_id")},
-            [image],
-            stage="hybrid_photo_authenticity_fallback",
-            cache_dir=cache_dir,
-            detail="low",
-            timeout_sec=min(20, _stage_timeout_from_budget(started)),
-            retry_timeout_sec=0,
-        )
-        fallback_raw, fallback_usage, fallback_cached, fallback_elapsed = {"content": raw_text}, usage, cached, elapsed
-        model_calls += 0 if cached else 1
-        total_tokens += _usage_total(usage)
-        authenticity_postprocess_tokens += _usage_total(usage)
-        compliance_elapsed += elapsed
-        return parsed
 
     if authenticity_config.mode != "off" and row.get("manual_flag") == "否":
         authenticity_started = time.time()
@@ -2562,7 +2535,7 @@ def audit_task_hybrid(
             compliance=compliance,
             images=compliance_images,
             config=authenticity_config,
-            fallback=authenticity_fallback,
+            fallback=None,
             budget_available=lambda: not _order_budget_exhausted(started),
         )
         row["elapsed_sec"] = round(time.time() - started, 2)
@@ -2749,7 +2722,9 @@ def audit_task_path(
 ) -> tuple[int, dict[str, Any]]:
     task = json.loads(task_path.read_text(encoding="utf-8-sig"))
     task_started = time.time()
-    authenticity_config = PhotoAuthenticityConfig.from_env(os.environ)
+    authenticity_config = PhotoAuthenticityConfig.from_env(
+        os.environ if mode == "hybrid" else {"PHOTO_AUTHENTICITY_MODE": "off"}
+    )
     try:
         if mode == "fast":
             result = audit_task_fast(
@@ -2813,8 +2788,8 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--photo-authenticity-mode",
         choices=["off", "shadow", "enforce"],
-        default=os.environ.get("PHOTO_AUTHENTICITY_MODE", "off"),
-        help="图片真实性审核模式；默认off，shadow只记录，enforce可转人工",
+        default=os.environ.get("PHOTO_AUTHENTICITY_MODE", "enforce"),
+        help="图片真实性审核模式；默认enforce可转人工，shadow只记录，off关闭",
     )
     parser.add_argument(
         "--photo-authenticity-artifact-dir",

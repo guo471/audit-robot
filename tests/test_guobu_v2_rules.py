@@ -90,7 +90,7 @@ def test_normalize_photo_authenticity_rejects_invalid_or_inexact_observations(ra
         v2._normalize_photo_authenticity_observations(compliance, ("a", "b"))
 
 
-def test_hybrid_enforce_uses_merged_compliance_and_accepts_valid_no_evidence_fallback_with_fft_off(monkeypatch):
+def test_hybrid_enforce_routes_incomplete_authenticity_structure_manual_without_extra_model_call(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
     calls = []
 
@@ -102,12 +102,7 @@ def test_hybrid_enforce_uses_merged_compliance_and_accepts_valid_no_evidence_fal
             decision = _screen_sn_compliance_pass()
             decision["photo_authenticity_by_image"] = [_auth_observation("i1"), _auth_observation("i2")]
             return (decision, "compliance", 0.1, {}, False)
-        assert stage == "hybrid_photo_authenticity_fallback"
-        assert len(images) == 1 and images[0]["image_id"] == "i3"
-        approved = _auth_observation("i3")
-        approved.pop("image_id")
-        approved["result"] = "no_evidence"
-        return (approved, "fallback", 0.1, {}, False)
+        raise AssertionError(f"unexpected model call: {stage}")
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
     monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
@@ -115,14 +110,11 @@ def test_hybrid_enforce_uses_merged_compliance_and_accepts_valid_no_evidence_fal
     for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
         image["image_id"] = image_id
     result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
-    assert [stage for stage, _, _ in calls] == ["hybrid_sn", "hybrid_compliance", "hybrid_photo_authenticity_fallback"]
+    assert [stage for stage, _, _ in calls] == ["hybrid_sn", "hybrid_compliance"]
     assert v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM in calls[1][1]
-    approved_prompt = (v2.PROJECT_ROOT / "photo_authenticity/prompts/non_real_photo_auditor_v4.txt").read_text(encoding="utf-8")
-    assert calls[2][1] == approved_prompt
-    assert calls[2][2]["retry_timeout_sec"] == 0
-    assert result["manual_flag"] == "否"
-    assert result["manual_reason_code"] == ""
-    assert result["photo_authenticity_fallback_calls"] == 1
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
+    assert result["photo_authenticity_fallback_calls"] == 0
 
 
 def test_hybrid_enforce_routes_structured_weak_evidence_manual_even_when_reason_says_real(monkeypatch):
@@ -1041,6 +1033,7 @@ def test_fast_audit_does_not_auto_pass_without_photo_compliance(monkeypatch):
 
 
 def test_model_timeout_is_60_seconds_for_hybrid_calls(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     timeouts = []
 
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
@@ -1459,6 +1452,7 @@ def test_compliance_gate_keeps_explicit_false_visual_candidate_mismatch():
 
 
 def test_hybrid_runs_compliance_after_sn_passes(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     calls = []
 
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
@@ -1492,6 +1486,7 @@ def test_hybrid_runs_compliance_after_sn_passes(monkeypatch):
 
 
 def test_hybrid_forces_local_category_over_model_category(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     seen = {}
     task = _base_task()
     task["fields"].update({"product_type": "电脑", "goods_name": "ThinkPad 笔记本电脑"})
@@ -2289,6 +2284,7 @@ def test_hybrid_forces_manual_when_model_uncertain_code_returned_without_manual_
 
 
 def test_hybrid_uses_activation_title_not_third_image(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     seen_sn_images = []
 
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
@@ -2333,6 +2329,7 @@ def test_hybrid_uses_activation_title_not_third_image(monkeypatch):
 
 
 def test_hybrid_compliance_payload_preserves_explicit_image_groups(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     seen_payloads = {}
     seen_images = {}
     unboxing_title = "\u62c6\u5c01\u7167\u7247"
@@ -2446,10 +2443,20 @@ def test_photo_authenticity_image_results_are_serialized_deterministically():
     )
 
 
-def test_photo_authenticity_cli_defaults_off_and_rejects_invalid_mode_before_runtime():
+def test_photo_authenticity_cli_defaults_enforce_and_allows_explicit_off_before_runtime(monkeypatch):
+    monkeypatch.delenv("PHOTO_AUTHENTICITY_MODE", raising=False)
     args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
-    assert args.photo_authenticity_mode == "off"
+    assert args.photo_authenticity_mode == "enforce"
     assert args.photo_authenticity_artifact_dir is None
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    env_off = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert env_off.photo_authenticity_mode == "off"
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    explicit_off = v2.parse_cli_args([
+        "--tasks-dir", "tasks", "--out-dir", "out",
+        "--photo-authenticity-mode", "off",
+    ])
+    assert explicit_off.photo_authenticity_mode == "off"
     with pytest.raises(SystemExit):
         v2.parse_cli_args([
             "--tasks-dir", "tasks", "--out-dir", "out",
@@ -2565,6 +2572,25 @@ def test_audit_task_path_exception_preserves_photo_authenticity_mode(
     assert result["photo_authenticity_mode"] == configured_mode
     assert result["photo_authenticity_would_manual"] is False
     assert v2.summarize_photo_authenticity([result])["mode_counts"] == {configured_mode: 1}
+
+
+@pytest.mark.parametrize("legacy_mode", ["fast", "v2", "sn_only"])
+def test_audit_task_path_legacy_mode_exception_still_reports_authenticity_off(
+    monkeypatch, tmp_path, legacy_mode,
+):
+    monkeypatch.delenv("PHOTO_AUTHENTICITY_MODE", raising=False)
+    target = "audit_task_sn_only" if legacy_mode == "sn_only" else f"audit_task_{legacy_mode}"
+    monkeypatch.setattr(v2, target, lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad model json")))
+    task_path = tmp_path / "task.json"
+    task_path.write_text(json.dumps(_base_task(), ensure_ascii=False), encoding="utf-8")
+
+    _, payload = v2.audit_task_path(
+        1, 1, task_path, base_url="https://unused", api_key="key", model="model",
+        mode=legacy_mode, cache_dir=tmp_path / "cache", allow_review=False,
+        allow_targeted_review=False,
+    )
+
+    assert payload["result"]["photo_authenticity_mode"] == "off"
 
 
 def test_photo_authenticity_cost_fields_do_not_treat_merged_usage_as_incremental_without_baseline():

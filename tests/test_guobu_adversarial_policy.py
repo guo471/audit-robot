@@ -137,6 +137,7 @@ def test_address_reason_chinese_mapping_is_readable():
 
 
 def test_pass_candidate_does_not_add_extra_model_review(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     calls = []
 
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):

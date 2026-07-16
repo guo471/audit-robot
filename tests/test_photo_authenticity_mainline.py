@@ -47,8 +47,9 @@ def raw(image_id: str = "i1", **overrides) -> dict:
     return value
 
 
-def test_mode_defaults_off_and_rejects_unknown_value():
-    assert PhotoAuthenticityConfig.from_env({}).mode == "off"
+def test_mode_defaults_enforce_and_rejects_unknown_value():
+    assert PhotoAuthenticityConfig.from_env({}).mode == "enforce"
+    assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "off"}).mode == "off"
     assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "shadow"}).mode == "shadow"
     with pytest.raises(ValueError, match="PHOTO_AUTHENTICITY_MODE"):
         PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "maybe"})
@@ -331,7 +332,8 @@ def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monk
 def test_gate_off_is_exact_noop_and_does_not_touch_dependencies():
     legacy = {"manual_flag": "否", "manual_reason_code": "", "sentinel": [1, 2]}
     result = apply_photo_authenticity_gate(
-        legacy_row=legacy, compliance={}, images=[], config=PhotoAuthenticityConfig.from_env({}),
+        legacy_row=legacy, compliance={}, images=[],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "off"}),
         fallback=lambda: pytest.fail("fallback called"), evaluator=lambda **_: pytest.fail("evaluator called"),
     )
     assert result is legacy
