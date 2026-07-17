@@ -122,3 +122,14 @@ TDD evidence:
 - GREEN full result: `105 passed in 4.91s`.
 
 The scoped parser fix now requires object selections to provide an `orders` list, an empty `missing` list, and non-negative integer-valued numeric `requested`/`selected` counts that equal each other and the number of orders. Bare-list selection artifacts remain compatible. Malformed objects and count mismatches fail closed. No main report was generated and the shared skill wrapper was not changed.
+
+### Retry ID normalization review
+
+A follow-up review found that converting selection IDs directly to a set silently accepted duplicate, whitespace-duplicate, empty, boolean, and container IDs. TDD evidence for the follow-up:
+
+- RED command: `python -m pytest tests\test_guobu_audit_report.py -k 'normalized_duplicate_ids or empty_or_non_scalar_ids or same_id_validation' -q`
+- RED result: `12 failed, 105 deselected`; every prohibited input was silently accepted by the old set conversion.
+- GREEN focused result: `18 passed, 99 deselected in 1.35s` (including the preceding completed-object contract tests).
+- GREEN full result: `117 passed in 7.92s`.
+
+Both object and bare-list selections now normalize allowed string and numeric IDs with surrounding whitespace removed, reject booleans, empty IDs, non-scalar IDs, and normalized duplicates, and then validate object counts against the unique normalized ID count. Duplicate validation occurs before count validation so duplicate artifacts cannot be misreported as only a metadata mismatch.

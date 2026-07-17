@@ -205,6 +205,35 @@ def test_retry_selection_retains_bare_list_compatibility(tmp_path):
     assert _retry_ids(str(path)) == {"9001", "9002"}
 
 
+@pytest.mark.parametrize("orders", [
+    ["1", "1"],
+    ["1", " 1 "],
+])
+def test_retry_selection_object_rejects_normalized_duplicate_ids(orders, tmp_path):
+    path = tmp_path / "selection.json"
+    path.write_text(json.dumps({"requested": 2, "selected": 2, "missing": [],
+                                "orders": orders}), encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate retry selection order ID"):
+        _retry_ids(str(path))
+
+
+@pytest.mark.parametrize("bad_id", ["", "   ", True, None, ["1"], {"id": "1"}])
+def test_retry_selection_object_rejects_empty_or_non_scalar_ids(bad_id, tmp_path):
+    path = tmp_path / "selection.json"
+    path.write_text(json.dumps({"requested": 1, "selected": 1, "missing": [],
+                                "orders": [bad_id]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="retry selection order ID"):
+        _retry_ids(str(path))
+
+
+@pytest.mark.parametrize("orders", [["1", " 1 "], [""], [False], [["1"]]])
+def test_bare_retry_selection_list_uses_same_id_validation(orders, tmp_path):
+    path = tmp_path / "selection.json"
+    path.write_text(json.dumps(orders), encoding="utf-8")
+    with pytest.raises(ValueError, match="retry selection order ID"):
+        _retry_ids(str(path))
+
+
 @pytest.mark.parametrize("item", [
     audit_item(flag="maybe"),
     audit_item(flag=False, code="SN_MISMATCH"),

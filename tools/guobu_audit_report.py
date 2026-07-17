@@ -480,7 +480,8 @@ def _retry_ids(path: str | None) -> set[str] | None:
     if not path:
         return None
     value = json.loads(Path(path).read_text(encoding="utf-8"))
-    if isinstance(value, dict):
+    metadata = value if isinstance(value, dict) else None
+    if metadata is not None:
         orders = value.get("orders")
         missing = value.get("missing")
         requested = value.get("requested")
@@ -489,16 +490,27 @@ def _retry_ids(path: str | None) -> set[str] | None:
             raise ValueError("retry selection orders must be a JSON list")
         if not isinstance(missing, list) or missing:
             raise ValueError("retry selection missing orders must be an empty JSON list")
+        value = orders
+    if not isinstance(value, list):
+        raise ValueError("retry selection must be a JSON list")
+    normalized = set()
+    for item in value:
+        if type(item) not in (str, int, float):
+            raise ValueError("retry selection order ID must be a string or number")
+        order_id = str(item).strip()
+        if not order_id:
+            raise ValueError("retry selection order ID must not be empty")
+        if order_id in normalized:
+            raise ValueError(f"duplicate retry selection order ID: {order_id!r}")
+        normalized.add(order_id)
+    if metadata is not None:
         counts = (requested, selected)
         if any(type(count) not in (int, float) or count < 0 or int(count) != count
                for count in counts):
             raise ValueError("retry selection requested and selected must be integer counts")
-        if int(requested) != int(selected) or int(selected) != len(orders):
+        if int(requested) != int(selected) or int(selected) != len(normalized):
             raise ValueError("retry selection requested/selected count mismatch")
-        value = orders
-    if not isinstance(value, list):
-        raise ValueError("retry selection must be a JSON list")
-    return {str(item).strip() for item in value}
+    return normalized
 
 
 def _replace_outputs(temp_outputs: list[Path], outputs: list[Path]) -> None:
