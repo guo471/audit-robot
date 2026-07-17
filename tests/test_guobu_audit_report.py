@@ -6,6 +6,7 @@ import pytest
 from openpyxl import load_workbook
 
 from tools.guobu_audit_report import (
+    _retry_ids,
     build_summary,
     merge_attempts,
     network_failure,
@@ -159,6 +160,49 @@ def test_retry_selection_must_match_items_and_detected_failures():
         merge_attempts(first, [audit_item("1")], retry_ids={"1", "2"})
     with pytest.raises(ValueError, match="not a first-run network failure"):
         merge_attempts([audit_item("1")], [audit_item("1")], retry_ids={"1"})
+
+
+def test_cli_accepts_completed_retry_selection_object(tmp_path):
+    first_item = audit_item("9001", flag=True, code="MODEL_UNCERTAIN",
+                            error="TimeoutError")
+    retry_item = audit_item("9001", flag=False)
+    for item in (first_item, retry_item):
+        item["row"].update(system_sn="0001", observed_sn="0001", sn_match=True)
+    first, retry = tmp_path / "first.jsonl", tmp_path / "retry.jsonl"
+    first.write_text(json.dumps(first_item) + "\n", encoding="utf-8")
+    retry.write_text(json.dumps(retry_item) + "\n", encoding="utf-8")
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({"source_dirs": ["completed"], "requested": 1,
+        "selected": 1, "missing": [], "orders": ["9001"], "out_dir": "output"}),
+        encoding="utf-8")
+    xlsx, output_json = tmp_path / "cli.xlsx", tmp_path / "cli.json"
+    script = str((__import__("pathlib").Path(__file__).parents[1]
+                  / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        "--retry-jsonl", str(retry), "--retry-selection-json", str(selection),
+        "--output-xlsx", str(xlsx), "--output-json", str(output_json)],
+        text=True, capture_output=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(output_json.read_text(encoding="utf-8"))["rows"][0]["final_source"] == "retry"
+
+
+@pytest.mark.parametrize("selection", [
+    {"requested": 1, "selected": 1, "missing": []},
+    {"requested": 1, "selected": 1, "missing": [], "orders": "9001"},
+    {"requested": 2, "selected": 1, "missing": [], "orders": ["9001"]},
+    {"requested": 1, "selected": 1, "missing": ["9002"], "orders": ["9001"]},
+])
+def test_retry_selection_object_fails_closed_on_malformed_metadata(selection, tmp_path):
+    path = tmp_path / "selection.json"
+    path.write_text(json.dumps(selection), encoding="utf-8")
+    with pytest.raises(ValueError, match="retry selection"):
+        _retry_ids(str(path))
+
+
+def test_retry_selection_retains_bare_list_compatibility(tmp_path):
+    path = tmp_path / "selection.json"
+    path.write_text(json.dumps(["9001", 9002]), encoding="utf-8")
+    assert _retry_ids(str(path)) == {"9001", "9002"}
 
 
 @pytest.mark.parametrize("item", [

@@ -481,7 +481,21 @@ def _retry_ids(path: str | None) -> set[str] | None:
         return None
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(value, dict):
-        value = value.get("retry_ids", value.get("order_ids"))
+        orders = value.get("orders")
+        missing = value.get("missing")
+        requested = value.get("requested")
+        selected = value.get("selected")
+        if not isinstance(orders, list):
+            raise ValueError("retry selection orders must be a JSON list")
+        if not isinstance(missing, list) or missing:
+            raise ValueError("retry selection missing orders must be an empty JSON list")
+        counts = (requested, selected)
+        if any(type(count) not in (int, float) or count < 0 or int(count) != count
+               for count in counts):
+            raise ValueError("retry selection requested and selected must be integer counts")
+        if int(requested) != int(selected) or int(selected) != len(orders):
+            raise ValueError("retry selection requested/selected count mismatch")
+        value = orders
     if not isinstance(value, list):
         raise ValueError("retry selection must be a JSON list")
     return {str(item).strip() for item in value}
