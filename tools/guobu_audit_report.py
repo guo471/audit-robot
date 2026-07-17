@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import uuid
 from copy import copy
@@ -47,15 +48,17 @@ _STANDARD_REASONS = {
 
 _NETWORK_FAILURE_MARKERS = ("timeouterror", "timed out", "modelconnectionerror",
                             "connect failed", "winerror 10060", "http error 500",
-                            "remotedisconnected",
                             "remote end closed connection without response")
+_REMOTE_DISCONNECTED_RE = re.compile(
+    r"(?:^|[\s.:])RemoteDisconnected(?:$|[\s:])", re.IGNORECASE)
 
 
 def network_failure(item: dict) -> bool:
     row = item.get("row") or {}
     values = [item.get("_error"), *(row.get(key) for key in ("manual_reason", "manual_reason_cn", "strategy"))]
     text = "\n".join(str(value) for value in values if value is not None).lower()
-    return any(marker in text for marker in _NETWORK_FAILURE_MARKERS)
+    return (any(marker in text for marker in _NETWORK_FAILURE_MARKERS)
+            or _REMOTE_DISCONNECTED_RE.search(text) is not None)
 
 
 def _indexed(items: list[dict], label: str) -> dict[str, dict]:

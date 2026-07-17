@@ -184,3 +184,16 @@ TDD evidence:
 - Full GREEN result: `157 passed in 5.94s`.
 
 The report `network_failure` markers now include both the exception name `remotedisconnected` and the phrase `remote end closed connection without response`. Detection is covered through item `_error` and row reason inputs. A matching 40,500.92-second attempt retains that raw trace value and contributes 60 seconds to effective elapsed accounting under the default timeout. The shared skill and original retry-selection artifact remain unchanged pending a separately authorized cutover.
+
+### RemoteDisconnected token boundary
+
+A follow-up review found that treating the exception name as a generic substring also classified unrelated longer identifiers such as `RemoteDisconnectedness` and `NotRemoteDisconnectedBut` as network failures.
+
+TDD evidence:
+
+- RED command: `python -m pytest tests\test_guobu_audit_report.py -k 'remote_disconnected_exception_token_boundaries or longer_exception_names' -q`
+- RED result: `2 failed, 3 passed, 157 deselected`; valid traceback/newline/colon forms passed, but both longer-name negative cases were false positives.
+- Focused GREEN result: `5 passed, 157 deselected in 0.30s`.
+- Full GREEN result: `162 passed in 3.70s`.
+
+Normal network markers remain case-normalized substring checks. The exception name is now matched separately and case-insensitively with `(?:^|[\s.:])RemoteDisconnected(?:$|[\s:])`, allowing Python traceback/module punctuation and newline/colon forms without matching embedded longer names. The full phrase `remote end closed connection without response` remains a substring marker.

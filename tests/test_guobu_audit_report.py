@@ -161,6 +161,23 @@ def test_network_failure_detects_remote_disconnected_error_and_row_reason():
         reason="remote end closed connection without response"))
 
 
+@pytest.mark.parametrize("text", [
+    "Traceback follows:\nhttp.client.RemoteDisconnected: transport closed",
+    "RemoteDisconnected\ntransport closed",
+    "prefix:RemoteDisconnected: transport closed",
+])
+def test_network_failure_matches_remote_disconnected_exception_token_boundaries(text):
+    assert network_failure(audit_item(error=text))
+
+
+@pytest.mark.parametrize("text", [
+    "RemoteDisconnectedness: unrelated application error",
+    "NotRemoteDisconnectedBut: unrelated application error",
+])
+def test_network_failure_does_not_substring_match_longer_exception_names(text):
+    assert not network_failure(audit_item(error=text))
+
+
 def test_remote_disconnected_attempt_uses_effective_elapsed_cap():
     item = audit_item("481173059937323224268859", flag=True,
                       code="MODEL_UNCERTAIN", elapsed=40500.92,
