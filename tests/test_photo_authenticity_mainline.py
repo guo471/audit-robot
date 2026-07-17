@@ -183,6 +183,71 @@ def test_product_screen_local_moire_exemption_is_withheld_when_any_guard_fails(o
     assert derive_v4_result(observation)[0] == "manual_review"
 
 
+@pytest.mark.parametrize(
+    "weak_evidence",
+    [
+        [evidence("LOCAL_MOIRE", "package")],
+        [evidence("OUTER_PLANE_OPTICS", "product_body")],
+        [evidence("LOCAL_MOIRE", "product_screen"), evidence("OUTER_PLANE_OPTICS", "package")],
+    ],
+)
+def test_r9_benign_local_moire_and_outer_plane_optics_are_exempt_with_guards(weak_evidence):
+    observation = validate_image_observations([raw(weak_evidence=weak_evidence)], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("no_evidence", "R9")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"screen_owner": "external_screen", "weak_evidence": [evidence("LOCAL_MOIRE", "package")]},
+        {"screen_owner": "uncertain", "weak_evidence": [evidence("LOCAL_MOIRE", "package")]},
+        {"weak_evidence": [evidence("LOCAL_MOIRE", "background")]},
+        {"weak_evidence": [evidence("LOCAL_MOIRE", "package"), evidence("LOCAL_MOIRE", "background")]},
+        {"weak_evidence": [evidence("OUTER_PLANE_OPTICS", "hand")]},
+        {"weak_evidence": [evidence("LOCAL_MOIRE", "unknown")]},
+        {"weak_evidence": [evidence("LOCAL_MOIRE", "package"), evidence("PLANAR_APPEARANCE", "product_body")]},
+        {"strong_evidence": [evidence("CROSS_OBJECT_MOIRE", "product_body")],
+         "weak_evidence": [evidence("LOCAL_MOIRE", "package")]},
+        {"weak_evidence": [evidence("LOCAL_MOIRE", "package")],
+         "edges": {"top": "scene_continues", "right": "abrupt_cutoff", "bottom": "scene_continues", "left": "scene_continues"}},
+    ],
+)
+def test_r9_benign_weak_exemption_is_withheld_when_any_guard_fails(overrides):
+    observation = validate_image_observations([raw(**overrides)], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("manual_review", "R9")
+
+
+def test_r9_benign_weak_exemption_does_not_override_r8():
+    observation = validate_image_observations([
+        raw(
+            weak_evidence=[evidence("OUTER_PLANE_OPTICS", "package")],
+            edges={"top": "scene_continues", "right": "abrupt_cutoff", "bottom": "scene_continues", "left": "scene_continues"},
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("high_risk_non_real", "R8")
+
+
+def test_r9_benign_weak_exemption_does_not_override_r7():
+    observation = validate_image_observations([
+        raw(
+            weak_evidence=[evidence("LOCAL_MOIRE", "package")],
+            edges={"top": "scene_continues", "right": "carrier_boundary", "bottom": "scene_continues", "left": "scene_continues"},
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("manual_review", "R7")
+
+
+def test_r9_benign_weak_exemption_allows_product_screen_viewer_ui_exempt_strong():
+    observation = validate_image_observations([
+        raw(
+            screen_owner="product_screen",
+            strong_evidence=[evidence("PHOTO_VIEWER_UI", "product_screen")],
+            weak_evidence=[evidence("LOCAL_MOIRE", "product_screen")],
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("no_evidence", "R10_PRODUCT_SCREEN_LOCAL_MOIRE_EXEMPT")
+
+
 def test_edge_rules_cover_two_one_and_abrupt_plus_optics():
     two = {side: "scene_continues" for side in SIDES} | {"top": "carrier_boundary", "bottom": "carrier_boundary"}
     one = {side: "scene_continues" for side in SIDES} | {"left": "carrier_boundary"}

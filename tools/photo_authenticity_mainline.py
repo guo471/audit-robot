@@ -21,6 +21,8 @@ STRONG_CODES = frozenset({
     "NESTED_IMAGE_BOUNDARY", "CROSS_OBJECT_MOIRE",
 })
 WEAK_CODES = frozenset({"EDGE_CUTOFF", "OUTER_PLANE_OPTICS", "PLANAR_APPEARANCE", "LOCAL_MOIRE", "UI_CANDIDATE"})
+R9_BENIGN_WEAK_CODES = frozenset({"LOCAL_MOIRE", "OUTER_PLANE_OPTICS"})
+R9_BENIGN_REGIONS = frozenset({"product_screen", "package", "product_body"})
 OBSERVATION_FIELDS = frozenset({"image_id", "edges", "screen_owner", "strong_evidence", "weak_evidence", "reason"})
 
 EXPECTED_EXTRACTOR_VERSION = "fft-v1-512-ycbcr-5x53"
@@ -171,6 +173,20 @@ def validate_image_observations(raw: Any, expected_image_ids: Sequence[str]) -> 
     return {image_id: by_id[image_id] for image_id in expected}
 
 
+def _is_r9_benign_weak_only(observation: ImageObservation, effective_strong: set[str], weak: dict[str, Evidence]) -> bool:
+    if effective_strong or not weak or set(weak) - R9_BENIGN_WEAK_CODES:
+        return False
+    if observation.screen_owner not in {"none", "product_screen"}:
+        return False
+    if any(value != "scene_continues" for value in observation.edges.values()):
+        return False
+    for item in weak.values():
+        regions = set(item.regions)
+        if not regions or regions - R9_BENIGN_REGIONS:
+            return False
+    return True
+
+
 def derive_v4_result(observation: ImageObservation) -> tuple[str, str]:
     strong = {item.code: item for item in observation.strong_evidence}
     weak = {item.code: item for item in observation.weak_evidence}
@@ -211,6 +227,8 @@ def derive_v4_result(observation: ImageObservation) -> tuple[str, str]:
         return "manual_review", "R7"
     if "abrupt_cutoff" in observation.edges.values() and "OUTER_PLANE_OPTICS" in weak:
         return "high_risk_non_real", "R8"
+    if _is_r9_benign_weak_only(observation, effective_strong, weak):
+        return "no_evidence", "R9"
     if effective_strong or weak:
         return "manual_review", "R9"
     return "no_evidence", "R9"

@@ -117,7 +117,7 @@ def test_hybrid_enforce_routes_incomplete_authenticity_structure_manual_without_
     assert result["photo_authenticity_fallback_calls"] == 0
 
 
-def test_hybrid_enforce_routes_structured_weak_evidence_manual_even_when_reason_says_real(monkeypatch):
+def test_hybrid_enforce_exempts_r9_benign_package_local_moire(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
 
     def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
@@ -138,10 +138,87 @@ def test_hybrid_enforce_routes_structured_weak_evidence_manual_even_when_reason_
 
     result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
 
+    assert result["manual_flag"] == "否"
+    assert result["photo_authenticity_would_manual"] is False
+    assert result["photo_authenticity_manual_count"] == 0
+    assert result["photo_authenticity_fft_count"] == 0
+
+
+def test_hybrid_enforce_routes_background_local_moire_manual_even_when_reason_says_real(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+
+    def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        observations = [_auth_observation(image_id) for image_id in ("i1", "i2", "i3")]
+        observations[2]["weak_evidence"] = [{"code": "LOCAL_MOIRE", "regions": ["background"]}]
+        observations[2]["reason"] = "正常微距拍摄，属于实拍"
+        decision["photo_authenticity_by_image"] = observations
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    task = _base_task()
+    for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
+        image["image_id"] = image_id
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
+
     assert result["manual_flag"] == "是"
     assert result["manual_reason_code"] == "NON_REAL_PHOTO_REVIEW"
     assert result["photo_authenticity_manual_count"] == 1
-    assert result["photo_authenticity_fft_count"] == 0
+
+
+def test_hybrid_enforce_exempts_r9_benign_package_outer_plane_optics(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+
+    def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        observations = [_auth_observation(image_id) for image_id in ("i1", "i2", "i3")]
+        observations[2]["weak_evidence"] = [{"code": "OUTER_PLANE_OPTICS", "regions": ["package"]}]
+        decision["photo_authenticity_by_image"] = observations
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    task = _base_task()
+    for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
+        image["image_id"] = image_id
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
+
+    assert result["manual_flag"] == "否"
+    assert result["photo_authenticity_would_manual"] is False
+    assert result["photo_authenticity_manual_count"] == 0
+
+
+def test_hybrid_enforce_keeps_carrier_boundary_with_benign_weak_manual(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+
+    def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        observations = [_auth_observation(image_id) for image_id in ("i1", "i2", "i3")]
+        observations[2]["edges"]["right"] = "carrier_boundary"
+        observations[2]["weak_evidence"] = [{"code": "LOCAL_MOIRE", "regions": ["package"]}]
+        decision["photo_authenticity_by_image"] = observations
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    task = _base_task()
+    for image_id, image in zip(("i1", "i2", "i3"), task["images"]):
+        image["image_id"] = image_id
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "NON_REAL_PHOTO_REVIEW"
+    assert result["photo_authenticity_manual_count"] == 1
 
 
 def test_hybrid_enforce_exempts_only_product_screen_local_moire(monkeypatch):
