@@ -1724,6 +1724,12 @@ def _has_non_sn_label(value: Any) -> bool:
     return bool(_NON_SN_LABEL_RE.search(str(value or "")))
 
 
+def _has_normalized_identity_block(value: Any) -> bool:
+    compact = re.sub(r"[^0-9A-Z]", "", str(value or "").upper())
+    markers = list(re.finditer(r"(?:IMEI[12]?|EID)(?=\d)", compact))
+    return bool(markers and (markers[0].start() == 0 or len(markers) >= 2))
+
+
 def _is_explicit_sn_candidate(candidate: dict[str, Any]) -> bool:
     if _compact_field_type(candidate.get("field_type")) in {"SN", "SERIAL", "SERIALNUMBER"}:
         return True
@@ -1731,12 +1737,24 @@ def _is_explicit_sn_candidate(candidate: dict[str, Any]) -> bool:
 
 
 def _is_non_sn_candidate(candidate: dict[str, Any], decision: dict[str, Any]) -> bool:
-    if _compact_field_type(candidate.get("field_type")) in {"IMEI", "IMEI1", "IMEI2", "EID"}:
-        return True
-    if any(_has_non_sn_label(text) for text in _candidate_texts(candidate)):
+    field_type = _compact_field_type(candidate.get("field_type"))
+    if field_type in {"IMEI", "IMEI1", "IMEI2", "EID"}:
         return True
     candidate_sn = _candidate_sn(candidate)
-    return bool(candidate_sn and candidate_sn in _order_imeis(decision))
+    if candidate_sn and candidate_sn in _order_imeis(decision):
+        return True
+    normalized_text = str(candidate.get("normalized_text") or "").strip()
+    if _has_non_sn_label(normalized_text) or _has_normalized_identity_block(normalized_text):
+        return True
+    raw_text = str(candidate.get("raw_text") or "").strip()
+    clean_normalized_sn = bool(normalized_text) and normalized_text.upper() == candidate_sn
+    if (
+        field_type in {"SN", "SERIAL", "SERIALNUMBER"}
+        and clean_normalized_sn
+        and _EXPLICIT_SN_LABEL_RE.search(raw_text)
+    ):
+        return False
+    return any(_has_non_sn_label(text) for text in _candidate_texts(candidate))
 
 
 def _is_trustworthy_sn_candidate(candidate: dict[str, Any], decision: dict[str, Any]) -> bool:

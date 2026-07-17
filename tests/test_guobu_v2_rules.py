@@ -702,7 +702,7 @@ def test_formal_order_imei_screen_reading_is_discarded_for_package_sn_mismatch()
             "normalized_observed_sn": "867530900000001",
             "sn_candidates": [
                 _sn_candidate(
-                    "867530900000001",
+                    "IMEI1: 867530900000001 IMEI2: 867530900000002",
                     source="DEVICE_SCREEN",
                     raw_text="IMEI1: 867530900000001 IMEI2: 867530900000002",
                     matches_system_sn=True,
@@ -780,6 +780,69 @@ def test_sn_field_with_bounded_imei_or_eid_label_is_excluded(raw_text):
         },
     )
 
+    assert normalized["observed_sn"] == ""
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+def test_package_sn_survives_neighboring_imei_label_and_exposes_top_level_conflict():
+    decision = {
+        "system_sn": "SYSTEM123",
+        "observed_sn": "SYSTEM123",
+        "normalized_observed_sn": "SYSTEM123",
+        "sn_candidates": [
+            _sn_candidate(
+                "REAL999",
+                source="PACKAGE_LABEL",
+                field_type="SN",
+                raw_text="SN: REAL999 IMEI: 355516408057368",
+            )
+        ],
+    }
+
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "SYSTEM123"},
+        decision,
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "REAL999"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+    assert v2._conflicting_observed_sn(decision) == "REAL999"
+
+
+def test_fifteen_digit_sn_survives_neighboring_imei_label():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "123456789012345"},
+        {
+            "sn_candidates": [
+                _sn_candidate(
+                    "123456789012345",
+                    field_type="SN",
+                    raw_text="SN: 123456789012345 IMEI: 355516408057368",
+                )
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "123456789012345"
+
+
+def test_identity_labelled_combined_normalized_value_is_excluded_even_for_sn_field():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "SYSTEM123"},
+        {
+            "sn_candidates": [
+                _sn_candidate(
+                    "IMEI1355516408057368IMEI2355516408057376",
+                    field_type="SN",
+                    raw_text="SN identifiers captured",
+                )
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is False
     assert normalized["observed_sn"] == ""
     assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
 
