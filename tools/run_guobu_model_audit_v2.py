@@ -1867,11 +1867,11 @@ def _preferred_sn_conflict(
 
 def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
     system_sn = normalize_sn(decision.get("system_sn") or decision.get("normalized_system_sn") or "")
-    observed_source, observed_sn, has_identity_value, top_level_readings = _top_level_observed_group(decision)
+    observed_source, observed_sn, _has_identity_value, top_level_readings = _top_level_observed_group(decision)
     candidates = _trustworthy_sn_candidates(decision)
     unique_candidate_values = {candidate_sn for _rank, candidate_sn, _raw in candidates}
 
-    if top_level_readings and (has_identity_value or len(top_level_readings) >= 2):
+    if len(top_level_readings) >= 2:
         conflict_source, conflict_sn = _preferred_sn_conflict(
             top_level_readings, candidates, system_sn
         )
@@ -1923,9 +1923,9 @@ def _conflicting_observed_sn(decision: dict[str, Any]) -> str:
     if not system_sn:
         return ""
 
-    _observed_source, observed_sn, has_identity_value, top_level_readings = _top_level_observed_group(decision)
+    _observed_source, observed_sn, _has_identity_value, top_level_readings = _top_level_observed_group(decision)
     candidates = _trustworthy_sn_candidates(decision)
-    if top_level_readings and (has_identity_value or len(top_level_readings) >= 2):
+    if len(top_level_readings) >= 2:
         return _preferred_sn_conflict(top_level_readings, candidates, system_sn)[1]
     if observed_sn and observed_sn != system_sn:
         return observed_sn

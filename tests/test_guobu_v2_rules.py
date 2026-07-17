@@ -841,6 +841,53 @@ def test_mixed_top_level_sn_and_identity_value_cannot_fall_back_to_match(
 
 
 @pytest.mark.parametrize(
+    "identity_value",
+    [
+        "IMEI1355516408057368IMEI2355516407888847",
+        "EID89049032000000000000000000000001",
+        "355516408057368",
+    ],
+)
+@pytest.mark.parametrize("identity_first", [False, True])
+@pytest.mark.parametrize("with_matching_candidate", [False, True])
+def test_matching_top_level_sn_ignores_identity_values_without_conflicting_sn(
+    identity_value, identity_first, with_matching_candidate
+):
+    observed_sn, normalized_observed_sn = (
+        (identity_value, "SYSTEM123")
+        if identity_first
+        else ("SYSTEM123", identity_value)
+    )
+    candidates = (
+        [_sn_candidate("SYSTEM123", source="PACKAGE_LABEL")]
+        if with_matching_candidate
+        else []
+    )
+    decision = {
+        "system_sn": "SYSTEM123",
+        "imei1": "355516408057368",
+        "imei2": "355516407888847",
+        "observed_sn": observed_sn,
+        "normalized_observed_sn": normalized_observed_sn,
+        "sn_candidates": candidates,
+    }
+
+    normalized = v2._normalize_sn_result(
+        {
+            "system_sn": "SYSTEM123",
+            "imei1": "355516408057368",
+            "imei2": "355516407888847",
+        },
+        decision,
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "SYSTEM123"
+    assert normalized.get("manual_reason_code", "") == ""
+    assert v2._conflicting_observed_sn(decision) == ""
+
+
+@pytest.mark.parametrize(
     ("observed_sn", "normalized_observed_sn"),
     [
         ("SYSTEM123", "WRONG1"),
