@@ -886,6 +886,50 @@ def test_mixed_identity_group_displays_non_system_conflict_independent_of_field_
     assert row["sn_match"] is False
 
 
+@pytest.mark.parametrize(
+    ("observed_sn", "normalized_observed_sn"),
+    [
+        ("SYSTEM123", "IMEI1355516408057368IMEI2355516407888847"),
+        ("IMEI1355516408057368IMEI2355516407888847", "SYSTEM123"),
+    ],
+)
+def test_mixed_identity_group_displays_non_system_candidate_when_top_level_matches(
+    observed_sn, normalized_observed_sn
+):
+    fields = {
+        "system_sn": "SYSTEM123",
+        "imei1": "355516408057368",
+        "imei2": "355516407888847",
+    }
+    compliance = {
+        "observed_sn": observed_sn,
+        "normalized_observed_sn": normalized_observed_sn,
+        "sn_candidates": [_sn_candidate("REAL999")],
+    }
+
+    normalized = v2._normalize_sn_result(fields, compliance)
+    row = v2._final_row(
+        {"channel_order_no": "mixed-identity-candidate-conflict", "fields": fields},
+        {
+            "manual_required": True,
+            "manual_reason_codes": ["SN_MISMATCH"],
+            "manual_reason": "top-level identity and package SN conflict",
+        },
+        normalized,
+        compliance,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "REAL999"
+    assert v2._conflicting_observed_sn({**compliance, **fields}) == "REAL999"
+    assert row["observed_sn"] == "REAL999"
+    assert row["sn_match"] is False
+
+
 def test_imei_screen_reading_falls_back_to_matching_package_sn():
     fields = {
         "system_sn": "HXL7NVMWGM",

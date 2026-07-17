@@ -1847,13 +1847,22 @@ def _top_level_observed_group(
     return observed_source, observed_sn, has_identity_value, tuple(unique_readings)
 
 
-def _preferred_top_level_conflict(
-    readings: tuple[tuple[str, str], ...], system_sn: str
+def _preferred_sn_conflict(
+    readings: tuple[tuple[str, str], ...],
+    candidates: list[tuple[int, str, str]],
+    system_sn: str,
 ) -> tuple[str, str]:
-    return next(
-        (reading for reading in readings if reading[1] != system_sn),
-        readings[0],
-    )
+    for reading in readings:
+        if reading[1] != system_sn:
+            return reading
+    for _rank, candidate_sn, _raw in candidates:
+        if candidate_sn != system_sn:
+            return candidate_sn, candidate_sn
+    if readings:
+        return readings[0]
+    if candidates:
+        return candidates[0][1], candidates[0][1]
+    return "", ""
 
 
 def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
@@ -1863,7 +1872,9 @@ def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
     unique_candidate_values = {candidate_sn for _rank, candidate_sn, _raw in candidates}
 
     if top_level_readings and (has_identity_value or len(top_level_readings) >= 2):
-        conflict_source, conflict_sn = _preferred_top_level_conflict(top_level_readings, system_sn)
+        conflict_source, conflict_sn = _preferred_sn_conflict(
+            top_level_readings, candidates, system_sn
+        )
         return "mismatch", conflict_source, conflict_sn
 
     if observed_sn:
@@ -1912,11 +1923,12 @@ def _conflicting_observed_sn(decision: dict[str, Any]) -> str:
         return ""
 
     _observed_source, observed_sn, has_identity_value, top_level_readings = _top_level_observed_group(decision)
+    candidates = _trustworthy_sn_candidates(decision)
     if top_level_readings and (has_identity_value or len(top_level_readings) >= 2):
-        return _preferred_top_level_conflict(top_level_readings, system_sn)[1]
+        return _preferred_sn_conflict(top_level_readings, candidates, system_sn)[1]
     if observed_sn and observed_sn != system_sn:
         return observed_sn
-    for _rank, candidate_sn, _raw in _trustworthy_sn_candidates(decision):
+    for _rank, candidate_sn, _raw in candidates:
         if candidate_sn != system_sn:
             return candidate_sn
     return ""
