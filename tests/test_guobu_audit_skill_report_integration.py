@@ -2,7 +2,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from openpyxl import load_workbook
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +35,7 @@ def make_stub_project(tmp_path, output_order_ids):
     tools.mkdir(parents=True); tasks.mkdir()
     (tasks / "one.json").write_text(json.dumps({"channel_order_no": "order-1"}), encoding="utf-8")
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
-                 "guobu_audit_contract.py", "merge_guobu_audit_results.py"):
+                 "guobu_audit_contract.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     (tools / "run_guobu_model_audit_v2.py").write_text(
         "import argparse,json\nfrom pathlib import Path\np=argparse.ArgumentParser();"
@@ -62,20 +61,15 @@ def invoke_offline_wrapper(project, tasks, run_name):
         timeout=30, env=env)
 
 
-def test_report_format_defaults_to_business_and_plan_exposes_selection(tmp_path):
+def test_plan_exposes_only_business_report_generator(tmp_path):
     tasks = tmp_path / "tasks"
     tasks.mkdir()
     (tasks / "one.json").write_text("{}", encoding="utf-8")
     completed = run_plan(PROJECT_ROOT, tasks)
     assert completed.returncode == 0, completed.stderr
     plan = json.loads(completed.stdout)
-    assert plan["reportFormat"] == "business"
     assert plan["reportGenerator"] == str(PROJECT_ROOT / "tools/guobu_audit_report.py")
-
-    completed = run_plan(PROJECT_ROOT, tasks, "-ReportFormat", "legacy")
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout)["reportFormat"] == "legacy"
-    assert '[ValidateSet("business", "legacy")][string]$ReportFormat = "business"' in wrapper_text()
+    assert "reportFormat" not in plan
 
 
 def test_missing_selected_generator_fails_before_audit_even_in_plan_only(tmp_path):
@@ -85,7 +79,7 @@ def test_missing_selected_generator_fails_before_audit_even_in_plan_only(tmp_pat
     tasks.mkdir(parents=True)
     tools.mkdir()
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
-                 "guobu_audit_contract.py", "merge_guobu_audit_results.py"):
+                 "guobu_audit_contract.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     (tasks / "one.json").write_text("{}", encoding="utf-8")
     (tools / "run_guobu_model_audit_v2.py").write_text("raise AssertionError", encoding="utf-8")
@@ -94,17 +88,17 @@ def test_missing_selected_generator_fails_before_audit_even_in_plan_only(tmp_pat
     assert "Missing business report generator" in completed.stderr
 
 
-def test_business_and_legacy_generators_keep_their_distinct_cli_contracts():
+def test_business_generator_is_the_only_report_contract():
     text = wrapper_text()
     dense = compact(text)
     assert '$businessgenerator=join-path$projectpath"tools\\guobu_audit_report.py"' in dense
-    assert '$legacymerger=join-path$projectpath"tools\\merge_guobu_audit_results.py"' in dense
-    assert 'if($reportformat-eq"business")' in dense
+    assert "legacy" not in dense
+    assert "merge_guobu_audit_results.py" not in dense
+    assert not (PROJECT_ROOT / "tools/merge_guobu_audit_results.py").exists()
     assert '"--first-jsonl",$firstjsonl' in dense
     assert '"--output-xlsx",$combinedxlsx' in dense
     assert '"--output-json",$combinedjson' in dense
     assert '$reportargs+=@("--retry-jsonl",$secondjsonl,"--retry-selection-json",$selectionsummary)' in dense
-    assert '$reportargs+=@("--second-jsonl",$secondjsonl)' in dense
     assert '"--overwrite"' in dense
 
 
@@ -151,6 +145,7 @@ def test_shared_wrapper_is_thin_delegate_to_versioned_project_wrapper():
     assert 'tools\\run_guobu_audit_batch.ps1' in shared
     assert '&$projectwrapper@forwardparams' in shared
     assert 'invoke-auditrun' not in shared
+    assert "legacy" not in shared
     assert PROJECT_WRAPPER.is_file()
 
 
@@ -186,33 +181,13 @@ def test_partial_first_jsonl_fails_before_retry_and_report(tmp_path):
     assert not (project / "report-invoked.txt").exists()
 
 
-def test_legacy_rollback_generates_valid_combined_outputs_offline(tmp_path):
-    project, tasks = make_stub_project(tmp_path, output_order_ids=["order-1"])
-    env = os.environ.copy()
-    env.update(VISION_API_BASE_URL="https://offline.invalid", VISION_API_KEY="dummy")
-    run_name = "legacy-offline"
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-         str(project / "tools/run_guobu_audit_batch.ps1"), "-ProjectRoot", str(project),
-         "-TasksDir", str(tasks), "-RunName", run_name, "-ReportFormat", "legacy"],
-        text=True, capture_output=True, timeout=30, env=env,
-    )
-    assert completed.returncode == 0, completed.stderr
-    report_root = project / "reports/model_audit"
-    output_json = report_root / f"{run_name}_combined.json"
-    output_xlsx = report_root / f"{run_name}_combined.xlsx"
-    payload = json.loads(output_json.read_text(encoding="utf-8"))
-    assert payload["summary"]["total"] == 1
-    assert load_workbook(output_xlsx, read_only=True)["明细表"].max_row == 2
-
-
 def test_stale_retry_task_cannot_trigger_second_audit_without_network_failure(tmp_path):
     project = tmp_path / "project"
     tools = project / "tools"
     tasks = project / "tasks"
     tools.mkdir(parents=True)
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
-                 "guobu_audit_contract.py", "merge_guobu_audit_results.py"):
+                 "guobu_audit_contract.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     tasks.mkdir()
     (tasks / "one.json").write_text(

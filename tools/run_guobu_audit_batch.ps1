@@ -8,7 +8,6 @@ param(
   [int]$Workers = 1,
   [switch]$EnableTargetedSnReview,
   [switch]$SkipTimeoutRerun,
-  [ValidateSet("business", "legacy")][string]$ReportFormat = "business",
   [switch]$PlanOnly
 )
 
@@ -27,7 +26,6 @@ $modelScript = Join-Path $projectPath "tools\run_guobu_model_audit_v2.py"
 $businessGenerator = Join-Path $projectPath "tools\guobu_audit_report.py"
 $selector = Join-Path $projectPath "tools\select_guobu_tasks.py"
 $contractValidator = Join-Path $projectPath "tools\guobu_audit_contract.py"
-$legacyMerger = Join-Path $projectPath "tools\merge_guobu_audit_results.py"
 $tasksPath = if ([System.IO.Path]::IsPathRooted($TasksDir)) {
   (Resolve-Path -LiteralPath $TasksDir).Path
 } else {
@@ -36,11 +34,7 @@ $tasksPath = if ([System.IO.Path]::IsPathRooted($TasksDir)) {
 if (-not (Test-Path -LiteralPath $modelScript)) { throw "Missing audit entry point: $modelScript" }
 if (-not (Test-Path -LiteralPath $selector)) { throw "Missing task selector: $selector" }
 if (-not (Test-Path -LiteralPath $contractValidator)) { throw "Missing audit contract validator: $contractValidator" }
-if ($ReportFormat -eq "business") {
-  if (-not (Test-Path -LiteralPath $businessGenerator)) { throw "Missing business report generator: $businessGenerator" }
-} elseif (-not (Test-Path -LiteralPath $legacyMerger)) {
-  throw "Missing legacy result merger: $legacyMerger"
-}
+if (-not (Test-Path -LiteralPath $businessGenerator)) { throw "Missing business report generator: $businessGenerator" }
 
 $taskCount = (Get-ChildItem -LiteralPath $tasksPath -Filter "*.json" | Measure-Object).Count
 if ($taskCount -le 0) { throw "No task JSON files found in $tasksPath" }
@@ -65,8 +59,7 @@ $plan = [ordered]@{
   workers = $Workers
   targetedSnReview = [bool]$EnableTargetedSnReview
   timeoutRerun = -not [bool]$SkipTimeoutRerun
-  reportFormat = $ReportFormat
-  reportGenerator = if ($ReportFormat -eq "business") { $businessGenerator } else { $legacyMerger }
+  reportGenerator = $businessGenerator
   firstOutDir = $firstOut
   secondOutDir = $secondOut
   retryTasksDir = $retryTasks
@@ -165,26 +158,25 @@ try {
     }
   }
 
-  if ($ReportFormat -eq "business") {
-    $reportArgs = @(
+  $reportArgs = @(
       $businessGenerator,
       "--first-jsonl", $firstJsonl,
       "--output-xlsx", $combinedXlsx,
       "--output-json", $combinedJson,
       "--overwrite"
     )
-    if (-not [string]::IsNullOrWhiteSpace($secondJsonl)) {
-      $reportArgs += @("--retry-jsonl", $secondJsonl, "--retry-selection-json", $selectionSummary)
-    }
+  if (-not [string]::IsNullOrWhiteSpace($secondJsonl)) {
+    $reportArgs += @("--retry-jsonl", $secondJsonl, "--retry-selection-json", $selectionSummary)
+  }
 
-    $priceValues = @(
+  $priceValues = @(
       $env:QWEN_INPUT_PRICE_PER_MILLION,
       $env:QWEN_CACHED_INPUT_PRICE_PER_MILLION,
       $env:QWEN_OUTPUT_PRICE_PER_MILLION
     )
-    $parsedPrices = @()
-    $pricesValid = $true
-    foreach ($value in $priceValues) {
+  $parsedPrices = @()
+  $pricesValid = $true
+  foreach ($value in $priceValues) {
       $parsed = 0.0
       if ([string]::IsNullOrWhiteSpace($value) -or
           -not [double]::TryParse($value, [Globalization.NumberStyles]::Float,
@@ -194,24 +186,13 @@ try {
         break
       }
       $parsedPrices += $parsed
-    }
-    if ($pricesValid) {
-      $reportArgs += @(
+  }
+  if ($pricesValid) {
+    $reportArgs += @(
         "--input-price-per-million", $parsedPrices[0].ToString("R", [Globalization.CultureInfo]::InvariantCulture),
         "--cached-input-price-per-million", $parsedPrices[1].ToString("R", [Globalization.CultureInfo]::InvariantCulture),
         "--output-price-per-million", $parsedPrices[2].ToString("R", [Globalization.CultureInfo]::InvariantCulture)
-      )
-    }
-  } else {
-    $reportArgs = @(
-    $legacyMerger,
-    "--first-jsonl", $firstJsonl,
-    "--output-xlsx", $combinedXlsx,
-    "--output-json", $combinedJson
-  )
-  if (-not [string]::IsNullOrWhiteSpace($secondJsonl)) {
-      $reportArgs += @("--second-jsonl", $secondJsonl)
-    }
+    )
   }
   $mergeOutput = & python @reportArgs
   if ($LASTEXITCODE -ne 0) { throw "Combined report generation failed" }
