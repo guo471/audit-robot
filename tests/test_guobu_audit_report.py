@@ -256,6 +256,39 @@ def test_retry_replaces_legal_failure_and_retains_both_attempts():
     assert accounting["elapsed_seconds"] == 32
 
 
+def test_network_failure_elapsed_is_capped_but_raw_trace_is_retained():
+    failed = audit_item("1", flag=True, code="MODEL_UNCERTAIN",
+                        error="TimeoutError", elapsed=10811.89)
+    retry = audit_item("1", flag=False, elapsed=2.5)
+    normal = audit_item("2", elapsed=10)
+    _, accounting = merge_attempts([failed, normal], [retry])
+    assert accounting["raw_elapsed_seconds"] == pytest.approx(10824.39)
+    assert accounting["elapsed_seconds"] == pytest.approx(72.5)
+    assert accounting["order_timeout_seconds"] == 60
+    assert [(attempt["elapsed_seconds"], attempt["effective_elapsed_seconds"])
+            for attempt in accounting["attempts"]] == [
+                (10811.89, 60), (10, 10), (2.5, 2.5)]
+
+
+def test_network_failure_elapsed_uses_configured_timeout_and_nonnegative_floor():
+    failures = [
+        audit_item("1", flag=True, code="MODEL_UNCERTAIN",
+                   error="TimeoutError", elapsed=40500.92),
+        audit_item("2", flag=True, code="MODEL_UNCERTAIN",
+                   error="TimeoutError", elapsed=-4),
+    ]
+    _, accounting = merge_attempts(failures, [], order_timeout_seconds=30)
+    assert accounting["raw_elapsed_seconds"] == pytest.approx(40496.92)
+    assert accounting["elapsed_seconds"] == 30
+    assert accounting["order_timeout_seconds"] == 30
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True])
+def test_order_timeout_must_be_positive_finite_number(timeout):
+    with pytest.raises(ValueError, match="order timeout"):
+        merge_attempts([audit_item()], [], order_timeout_seconds=timeout)
+
+
 def test_valid_retry_cannot_bypass_malformed_first_attempt_flag():
     first = audit_item("1", flag="invalid", error="TimeoutError")
     retry = audit_item("1", flag=False)
@@ -420,6 +453,15 @@ def test_workbook_has_exact_business_contract_and_safe_text(tmp_path):
     assert "累计每订单处理时长" in metrics["口径说明"].value
 
 
+def test_workbook_elapsed_note_includes_timeout_and_raw_effective_totals(tmp_path):
+    rows, summary, audit_json = report_fixture()
+    xlsx = tmp_path / "elapsed-note.xlsx"
+    write_report(rows, summary, audit_json, xlsx, tmp_path / "elapsed-note.json")
+    note = load_workbook(xlsx, data_only=False)["\u6c47\u603b\u8868"]["B22"].value
+    assert "60" in note
+    assert note.count("3600.00") == 2
+
+
 def test_workbook_zero_denominator_and_unconfigured_cost(tmp_path):
     rows, accounting = merge_attempts([audit_item(status="reviewing")], [])
     summary = build_summary(rows, accounting)
@@ -476,6 +518,25 @@ def test_cli_regenerates_from_jsonl_without_network_access(tmp_path):
     assert load_workbook(xlsx)["明细表"]["A2"].value == "9001"
 
 
+def test_cli_applies_configured_network_failure_timeout(tmp_path):
+    item = audit_item("9001", flag=True, code="MODEL_UNCERTAIN",
+                      error="TimeoutError", elapsed=10811.89)
+    item["row"].update(system_sn="0001", observed_sn="", sn_match=False)
+    first = tmp_path / "first.jsonl"
+    first.write_text(json.dumps(item) + "\n", encoding="utf-8")
+    xlsx, output_json = tmp_path / "cli.xlsx", tmp_path / "cli.json"
+    script = str((__import__("pathlib").Path(__file__).parents[1]
+                  / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        "--order-timeout-seconds", "30", "--output-xlsx", str(xlsx),
+        "--output-json", str(output_json)], text=True, capture_output=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    accounting = json.loads(output_json.read_text(encoding="utf-8"))["accounting"]
+    assert accounting["raw_elapsed_seconds"] == 10811.89
+    assert accounting["elapsed_seconds"] == 30
+    assert accounting["order_timeout_seconds"] == 30
+
+
 @pytest.mark.parametrize("bad_item", [
     audit_item("1", flag=True, code=""),
     audit_item("1", flag=False, code="SN_MISMATCH"),
@@ -516,6 +577,15 @@ def test_write_report_requires_explicit_pricing_assumption(tmp_path):
     del audit_json["pricing"]
     with pytest.raises(ValueError, match="audit pricing"):
         write_report(rows, summary, audit_json, tmp_path / "pricing.xlsx", tmp_path / "pricing.json")
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True])
+def test_write_report_rejects_invalid_order_timeout_assumption(timeout, tmp_path):
+    rows, summary, audit_json = report_fixture()
+    audit_json["accounting"]["order_timeout_seconds"] = timeout
+    with pytest.raises(ValueError, match="order timeout"):
+        write_report(rows, summary, audit_json,
+                     tmp_path / "timeout.xlsx", tmp_path / "timeout.json")
 
 
 def test_write_report_replaces_stale_payload_summary_and_rows(tmp_path):

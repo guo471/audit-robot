@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import uuid
@@ -98,7 +99,7 @@ def _usage_objects(item: dict):
                 yield usage, cached
 
 
-def _account_attempt(item: dict, source: str) -> tuple[dict, dict]:
+def _account_attempt(item: dict, source: str, order_timeout_seconds: float) -> tuple[dict, dict]:
     totals = {key: 0 for key in ("logical_input_tokens", "logical_cached_input_tokens",
         "logical_output_tokens", "billed_input_tokens", "billed_cached_input_tokens",
         "billed_output_tokens")}
@@ -115,8 +116,12 @@ def _account_attempt(item: dict, source: str) -> tuple[dict, dict]:
             totals["billed_cached_input_tokens"] += cached_input
             totals["billed_output_tokens"] += output
     row = item.get("row") or {}
+    raw_elapsed = _number(row.get("elapsed_sec"))
+    effective_elapsed = (min(max(raw_elapsed, 0.0), order_timeout_seconds)
+                         if network_failure(item) else raw_elapsed)
     trace = {"source": source, "order_id": str(row.get("id") or "").strip(),
-             "elapsed_seconds": _number(row.get("elapsed_sec")), "item": item, **totals}
+             "elapsed_seconds": raw_elapsed, "effective_elapsed_seconds": effective_elapsed,
+             "item": item, **totals}
     return trace, totals
 
 
@@ -138,7 +143,11 @@ def _validate_flag_syntax(items: list[dict]) -> None:
 
 
 def merge_attempts(first_items: list[dict], retry_items: list[dict],
-                   retry_ids: set[str] | None = None) -> tuple[list[dict], dict]:
+                   retry_ids: set[str] | None = None,
+                   order_timeout_seconds: float = 60) -> tuple[list[dict], dict]:
+    if (type(order_timeout_seconds) not in (int, float)
+            or not math.isfinite(order_timeout_seconds) or order_timeout_seconds <= 0):
+        raise ValueError("order timeout must be a positive finite number")
     first = _indexed(first_items, "first-run")
     retries = _indexed(retry_items, "retry")
     _validate_flag_syntax(first_items)
@@ -154,15 +163,17 @@ def merge_attempts(first_items: list[dict], retry_items: list[dict],
     if retry_item_ids - failures:
         raise ValueError(f"unknown retry order ID: {sorted(retry_item_ids - failures)!r}")
 
-    accounting = {"attempts": [], "elapsed_seconds": 0.0,
+    accounting = {"attempts": [], "elapsed_seconds": 0.0, "raw_elapsed_seconds": 0.0,
+                  "order_timeout_seconds": order_timeout_seconds,
                   **{key: 0 for key in ("logical_input_tokens", "logical_cached_input_tokens",
                      "logical_output_tokens", "billed_input_tokens", "billed_cached_input_tokens",
                      "billed_output_tokens")}}
     for source, items in (("first", first_items), ("retry", retry_items)):
         for item in items:
-            trace, totals = _account_attempt(item, source)
+            trace, totals = _account_attempt(item, source, order_timeout_seconds)
             accounting["attempts"].append(trace)
-            accounting["elapsed_seconds"] += trace["elapsed_seconds"]
+            accounting["raw_elapsed_seconds"] += trace["elapsed_seconds"]
+            accounting["elapsed_seconds"] += trace["effective_elapsed_seconds"]
             for key, value in totals.items():
                 accounting[key] += value
 
@@ -212,6 +223,12 @@ def build_summary(rows: list[dict], accounting: dict, prices: dict | None = None
         cost = (accounting.get("billed_input_tokens", 0) * prices["input_per_million"]
                 + accounting.get("billed_cached_input_tokens", 0) * prices["cached_input_per_million"]
                 + accounting.get("billed_output_tokens", 0) * prices["output_per_million"]) / 1_000_000
+    raw_elapsed = _number(accounting.get("raw_elapsed_seconds"))
+    timeout = _number(accounting.get("order_timeout_seconds"))
+    elapsed_note = ("\u6709\u6548\u5ba1\u6838\u603b\u7528\u65f6\u4e3a\u7d2f\u8ba1\u6bcf\u8ba2\u5355\u5904\u7406\u65f6\u957f\uff0c"
+                    "\u5e76\u975e\u6279\u6b21\u5899\u949f\u541e\u5410\u91cf\u3002\u7f51\u7edc\u5931\u8d25\u5355\u6b21\u6709\u6548\u7528\u65f6\u6309 "
+                    f"{timeout:g} \u79d2\u5c01\u9876\uff1b\u539f\u59cb\u7d2f\u8ba1 {raw_elapsed:.2f} \u79d2\uff0c"
+                    f"\u6709\u6548\u7d2f\u8ba1 {_number(accounting.get('elapsed_seconds')):.2f} \u79d2\u3002")
     return {"sample_count": sample_count, "manual_total": manual_total,
             "automatic_pass_total": sample_count - manual_total,
             "failed_interception": _rate(failed_numerator, failed_denominator),
@@ -223,7 +240,9 @@ def build_summary(rows: list[dict], accounting: dict, prices: dict | None = None
             "human_orders_per_hour": human_rate, "human_estimated_hours": human_hours,
             "model_orders_per_hour": model_rate, "efficiency_multiple": multiple,
             "efficiency_improvement": multiple - 1 if multiple is not None else None,
-            "saved_human_hours": human_hours - effective_hours}
+            "saved_human_hours": human_hours - effective_hours,
+            "raw_elapsed_seconds": raw_elapsed, "order_timeout_seconds": timeout,
+            "elapsed_note": elapsed_note}
 
 
 def standard_reason(code: str) -> str:
@@ -348,19 +367,24 @@ def _validate_audit_json(audit_json: dict) -> None:
     if not isinstance(audit_json, dict):
         raise ValueError("audit JSON must be an object")
     accounting = audit_json.get("accounting")
-    required_totals = ("elapsed_seconds", "logical_input_tokens", "logical_cached_input_tokens",
+    required_totals = ("elapsed_seconds", "raw_elapsed_seconds", "order_timeout_seconds",
+                       "logical_input_tokens", "logical_cached_input_tokens",
                        "logical_output_tokens", "billed_input_tokens",
                        "billed_cached_input_tokens", "billed_output_tokens")
     if (not isinstance(accounting, dict) or not isinstance(accounting.get("attempts"), list)
             or not accounting["attempts"]
             or any(not isinstance(accounting.get(key), (int, float)) for key in required_totals)):
         raise ValueError("audit accounting and attempt trace are required")
-    attempt_keys = {"source", "order_id", "elapsed_seconds", "item"}
+    timeout = accounting["order_timeout_seconds"]
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("audit order timeout must be a positive finite number")
+    attempt_keys = {"source", "order_id", "elapsed_seconds", "effective_elapsed_seconds", "item"}
     for attempt in accounting["attempts"]:
         if (not isinstance(attempt, dict) or not attempt_keys <= attempt.keys()
                 or attempt["source"] not in {"first", "retry"}
                 or not str(attempt["order_id"]).strip()
                 or not isinstance(attempt["elapsed_seconds"], (int, float))
+                or not isinstance(attempt["effective_elapsed_seconds"], (int, float))
                 or not isinstance(attempt["item"], dict)):
             raise ValueError("audit attempt trace is malformed")
     if "pricing" not in audit_json:
@@ -403,7 +427,7 @@ def _add_summary(sheet, summary: dict) -> None:
         ("效率倍数", '=IF(B16=0,"无可计算样本",B18/B16)', "0.0x"),
         ("效率提升率", '=IF(B19="无可计算样本","无可计算样本",B19-1)', "0.0%"),
         ("预计节省人工时间（小时）", "=B17-B15", "0.00"),
-        ("口径说明", "有效审核总用时为累计每订单处理时长，并非批次墙钟吞吐量。", "General"),
+        ("口径说明", summary["elapsed_note"], "General"),
     ]
     for label, value, number_format in rows:
         sheet.append([label, value])
@@ -550,6 +574,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input-price-per-million", type=float)
     parser.add_argument("--cached-input-price-per-million", type=float)
     parser.add_argument("--output-price-per-million", type=float)
+    parser.add_argument("--order-timeout-seconds", type=float, default=60)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
     outputs = [Path(args.output_xlsx), Path(args.output_json)]
@@ -567,7 +592,8 @@ def main(argv: list[str] | None = None) -> int:
                   "output_per_million": supplied[2]}
     rows, accounting = merge_attempts(_read_jsonl(args.first_jsonl),
                                       _read_jsonl(args.retry_jsonl),
-                                      _retry_ids(args.retry_selection_json))
+                                      _retry_ids(args.retry_selection_json),
+                                      args.order_timeout_seconds)
     summary = build_summary(rows, accounting, prices)
     audit_json = {"summary": summary, "accounting": accounting, "pricing": prices,
                   "rows": rows}
