@@ -154,6 +154,23 @@ def test_network_failure_reads_item_error_and_row_fields_case_insensitively():
     assert not network_failure(audit_item(reason="SN mismatch"))
 
 
+def test_network_failure_detects_remote_disconnected_error_and_row_reason():
+    assert network_failure(audit_item(
+        error="RemoteDisconnected: Remote end closed connection without response"))
+    assert network_failure(audit_item(
+        reason="remote end closed connection without response"))
+
+
+def test_remote_disconnected_attempt_uses_effective_elapsed_cap():
+    item = audit_item("481173059937323224268859", flag=True,
+                      code="MODEL_UNCERTAIN", elapsed=40500.92,
+                      error="RemoteDisconnected: Remote end closed connection without response")
+    _, accounting = merge_attempts([item], [])
+    assert accounting["raw_elapsed_seconds"] == 40500.92
+    assert accounting["elapsed_seconds"] == 60
+    assert accounting["attempts"][0]["effective_elapsed_seconds"] == 60
+
+
 def test_retry_selection_must_match_items_and_detected_failures():
     first = [audit_item("1", error="TimeoutError"), audit_item("2", error="WinError 10060")]
     with pytest.raises(ValueError, match="retry selection mismatch"):

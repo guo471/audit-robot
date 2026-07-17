@@ -46,7 +46,9 @@ _STANDARD_REASONS = {
 
 
 _NETWORK_FAILURE_MARKERS = ("timeouterror", "timed out", "modelconnectionerror",
-                            "connect failed", "winerror 10060", "http error 500")
+                            "connect failed", "winerror 10060", "http error 500",
+                            "remotedisconnected",
+                            "remote end closed connection without response")
 
 
 def network_failure(item: dict) -> bool:

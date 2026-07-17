@@ -171,3 +171,16 @@ TDD evidence:
 - Final full GREEN result: `155 passed in 3.31s`.
 
 Every source attempt `elapsed_sec` must now be an `int` or `float` (never `bool`), finite, and nonnegative before any network cap is applied. The same predicate validates accounting raw/effective totals and each attempt trace raw/effective field. Timeout remains finite, non-boolean, and strictly positive. Invalid input fails with `ValueError`; no invalid elapsed value is floored or silently coerced. The superseded test that expected a negative network elapsed to floor to zero was updated to verify that a valid short network failure retains its actual duration, while the new parameterized tests verify negative rejection for both normal and network attempts.
+
+### RemoteDisconnected classification
+
+Formal data exposed order `481173059937323224268859` with `_error` `RemoteDisconnected: Remote end closed connection without response` and approximately 40,500.92 raw elapsed seconds. The report classifier did not recognize this standard library connection failure, so it treated the sleep-inflated raw duration as normal effective processing time. The original retry selection also omitted the order; this report-side fix does not manufacture a retry or modify that completed selection.
+
+TDD evidence:
+
+- RED command: `python -m pytest tests\test_guobu_audit_report.py -k 'remote_disconnected' -q`
+- RED result: `2 failed, 155 deselected`; both classification and the expected 60-second effective cap failed.
+- Focused GREEN result: `2 passed, 155 deselected in 0.51s`.
+- Full GREEN result: `157 passed in 5.94s`.
+
+The report `network_failure` markers now include both the exception name `remotedisconnected` and the phrase `remote end closed connection without response`. Detection is covered through item `_error` and row reason inputs. A matching 40,500.92-second attempt retains that raw trace value and contributes 60 seconds to effective elapsed accounting under the default timeout. The shared skill and original retry-selection artifact remain unchanged pending a separately authorized cutover.
