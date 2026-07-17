@@ -840,6 +840,52 @@ def test_mixed_top_level_sn_and_identity_value_cannot_fall_back_to_match(
     assert v2._conflicting_observed_sn(decision) == "REAL999"
 
 
+@pytest.mark.parametrize(
+    ("observed_sn", "normalized_observed_sn"),
+    [
+        ("SYSTEM123", "WRONG1"),
+        ("WRONG1", "SYSTEM123"),
+    ],
+)
+def test_mixed_identity_group_displays_non_system_conflict_independent_of_field_order(
+    observed_sn, normalized_observed_sn
+):
+    fields = {
+        "system_sn": "SYSTEM123",
+        "imei1": "355516408057368",
+        "imei2": "355516407888847",
+    }
+    compliance = {
+        "observed_sn": observed_sn,
+        "normalized_observed_sn": normalized_observed_sn,
+        "read_sn": "WRONG2",
+        "normalized_read_sn": "IMEI1355516408057368IMEI2355516407888847",
+        "sn_candidates": [_sn_candidate("SYSTEM123")],
+    }
+
+    normalized = v2._normalize_sn_result(fields, compliance)
+    row = v2._final_row(
+        {"channel_order_no": "mixed-identity-conflict", "fields": fields},
+        {
+            "manual_required": True,
+            "manual_reason_codes": ["SN_MISMATCH"],
+            "manual_reason": "top-level SN readings conflict",
+        },
+        normalized,
+        compliance,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "WRONG1"
+    assert v2._conflicting_observed_sn({**compliance, **fields}) == "WRONG1"
+    assert row["observed_sn"] == "WRONG1"
+    assert row["sn_match"] is False
+
+
 def test_imei_screen_reading_falls_back_to_matching_package_sn():
     fields = {
         "system_sn": "HXL7NVMWGM",

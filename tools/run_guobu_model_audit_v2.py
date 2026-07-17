@@ -1847,20 +1847,23 @@ def _top_level_observed_group(
     return observed_source, observed_sn, has_identity_value, tuple(unique_readings)
 
 
+def _preferred_top_level_conflict(
+    readings: tuple[tuple[str, str], ...], system_sn: str
+) -> tuple[str, str]:
+    return next(
+        (reading for reading in readings if reading[1] != system_sn),
+        readings[0],
+    )
+
+
 def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
     system_sn = normalize_sn(decision.get("system_sn") or decision.get("normalized_system_sn") or "")
     observed_source, observed_sn, has_identity_value, top_level_readings = _top_level_observed_group(decision)
     candidates = _trustworthy_sn_candidates(decision)
     unique_candidate_values = {candidate_sn for _rank, candidate_sn, _raw in candidates}
 
-    if has_identity_value and top_level_readings:
-        return "mismatch", observed_source, observed_sn
-
-    if len(top_level_readings) >= 2:
-        conflict_source, conflict_sn = next(
-            (reading for reading in top_level_readings if reading[1] != system_sn),
-            top_level_readings[0],
-        )
+    if top_level_readings and (has_identity_value or len(top_level_readings) >= 2):
+        conflict_source, conflict_sn = _preferred_top_level_conflict(top_level_readings, system_sn)
         return "mismatch", conflict_source, conflict_sn
 
     if observed_sn:
@@ -1909,13 +1912,8 @@ def _conflicting_observed_sn(decision: dict[str, Any]) -> str:
         return ""
 
     _observed_source, observed_sn, has_identity_value, top_level_readings = _top_level_observed_group(decision)
-    if has_identity_value and top_level_readings:
-        return observed_sn
-    if len(top_level_readings) >= 2:
-        return next(
-            (reading for _source, reading in top_level_readings if reading != system_sn),
-            top_level_readings[0][1],
-        )
+    if top_level_readings and (has_identity_value or len(top_level_readings) >= 2):
+        return _preferred_top_level_conflict(top_level_readings, system_sn)[1]
     if observed_sn and observed_sn != system_sn:
         return observed_sn
     for _rank, candidate_sn, _raw in _trustworthy_sn_candidates(decision):
