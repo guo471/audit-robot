@@ -197,3 +197,16 @@ TDD evidence:
 - Full GREEN result: `162 passed in 3.70s`.
 
 Normal network markers remain case-normalized substring checks. The exception name is now matched separately and case-insensitively with `(?:^|[\s.:])RemoteDisconnected(?:$|[\s:])`, allowing Python traceback/module punctuation and newline/colon forms without matching embedded longer names. The full phrase `remote end closed connection without response` remains a substring marker.
+
+### Repeatable retry inputs for formal merge
+
+The formal merge needs to consume the original two successful retry rows plus the separately recovered successful row for the missed `RemoteDisconnected` order. A single-value argparse option discarded earlier occurrences, so retry JSONL and selection artifacts could not be composed safely.
+
+TDD evidence:
+
+- RED command: `python -m pytest tests\test_guobu_audit_report.py -k 'completed_retry_selection_object or concatenates_two_retry or duplicate_id_across_retry_selection or empty_or_malformed_repeatable' -q`
+- RED result: `5 failed, 2 passed, 161 deselected`; argparse retained only the last repeated path, sources were absent, cross-file selection duplicates were not identified, and explicit empty files were accepted. Malformed JSON already failed closed.
+- Focused GREEN result: `7 passed, 161 deselected in 5.29s`.
+- Full GREEN result: `168 passed in 9.28s`.
+
+`--retry-jsonl` and `--retry-selection-json` now use argparse `append` and remain compatible with a single occurrence. Retry rows are concatenated in argument order; existing direct merge integrity rejects duplicate retry IDs. Selection IDs are normalized and unioned, with duplicate IDs across selection files rejected before merge. Every explicitly supplied retry JSONL and selection JSON must be parseable and non-empty. The audit JSON records `sources.first_jsonl`, ordered `sources.retry_jsonl`, and ordered `sources.retry_selection_json` paths. This enables a formal composition without editing the original artifacts. The wrapper/shared skill was not changed and no main-workspace report was generated here.

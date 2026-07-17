@@ -513,6 +513,16 @@ def _read_jsonl(path: str | None) -> list[dict]:
             if line.strip()]
 
 
+def _read_jsonl_files(paths: list[str], label: str) -> list[dict]:
+    combined = []
+    for path in paths:
+        items = _read_jsonl(path)
+        if not items:
+            raise ValueError(f"empty {label} JSONL: {path}")
+        combined.extend(items)
+    return combined
+
+
 def _retry_ids(path: str | None) -> set[str] | None:
     if not path:
         return None
@@ -547,7 +557,22 @@ def _retry_ids(path: str | None) -> set[str] | None:
             raise ValueError("retry selection requested and selected must be integer counts")
         if int(requested) != int(selected) or int(selected) != len(normalized):
             raise ValueError("retry selection requested/selected count mismatch")
+    if not normalized:
+        raise ValueError("retry selection file must not be empty")
     return normalized
+
+
+def _retry_ids_many(paths: list[str]) -> set[str] | None:
+    if not paths:
+        return None
+    combined = set()
+    for path in paths:
+        ids = _retry_ids(path)
+        duplicates = combined & ids
+        if duplicates:
+            raise ValueError(f"duplicate retry selection order ID across files: {sorted(duplicates)!r}")
+        combined.update(ids)
+    return combined
 
 
 def _replace_outputs(temp_outputs: list[Path], outputs: list[Path]) -> None:
@@ -580,8 +605,8 @@ def _replace_outputs(temp_outputs: list[Path], outputs: list[Path]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate a Guobu audit XLSX and trace JSON")
     parser.add_argument("--first-jsonl", required=True)
-    parser.add_argument("--retry-jsonl")
-    parser.add_argument("--retry-selection-json")
+    parser.add_argument("--retry-jsonl", action="append", default=[])
+    parser.add_argument("--retry-selection-json", action="append", default=[])
     parser.add_argument("--output-xlsx", required=True)
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--input-price-per-million", type=float)
@@ -604,11 +629,14 @@ def main(argv: list[str] | None = None) -> int:
         prices = {"input_per_million": supplied[0], "cached_input_per_million": supplied[1],
                   "output_per_million": supplied[2]}
     rows, accounting = merge_attempts(_read_jsonl(args.first_jsonl),
-                                      _read_jsonl(args.retry_jsonl),
-                                      _retry_ids(args.retry_selection_json),
+                                      _read_jsonl_files(args.retry_jsonl, "retry"),
+                                      _retry_ids_many(args.retry_selection_json),
                                       args.order_timeout_seconds)
     summary = build_summary(rows, accounting, prices)
     audit_json = {"summary": summary, "accounting": accounting, "pricing": prices,
+                  "sources": {"first_jsonl": args.first_jsonl,
+                              "retry_jsonl": args.retry_jsonl,
+                              "retry_selection_json": args.retry_selection_json},
                   "rows": rows}
     if args.overwrite:
         token = uuid.uuid4().hex

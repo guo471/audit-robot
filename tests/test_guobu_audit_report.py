@@ -217,7 +217,84 @@ def test_cli_accepts_completed_retry_selection_object(tmp_path):
         "--output-xlsx", str(xlsx), "--output-json", str(output_json)],
         text=True, capture_output=True, timeout=30)
     assert completed.returncode == 0, completed.stderr
-    assert json.loads(output_json.read_text(encoding="utf-8"))["rows"][0]["final_source"] == "retry"
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["rows"][0]["final_source"] == "retry"
+    assert payload["sources"] == {"first_jsonl": str(first),
+        "retry_jsonl": [str(retry)], "retry_selection_json": [str(selection)]}
+
+
+def test_cli_concatenates_two_retry_files_and_unions_two_selection_files(tmp_path):
+    first_items = [
+        audit_item("9001", flag=True, code="MODEL_UNCERTAIN", error="TimeoutError"),
+        audit_item("9002", flag=True, code="MODEL_UNCERTAIN", error="WinError 10060"),
+    ]
+    retry_items = [audit_item("9001"), audit_item("9002")]
+    for item in [*first_items, *retry_items]:
+        item["row"].update(system_sn="0001", observed_sn="0001", sn_match=True)
+    first = tmp_path / "first.jsonl"
+    first.write_text("\n".join(json.dumps(item) for item in first_items) + "\n", encoding="utf-8")
+    retries, selections = [], []
+    for index, item in enumerate(retry_items, start=1):
+        retry = tmp_path / f"retry-{index}.jsonl"
+        retry.write_text(json.dumps(item) + "\n", encoding="utf-8")
+        selection = tmp_path / f"selection-{index}.json"
+        selection.write_text(json.dumps({"requested": 1, "selected": 1,
+            "missing": [], "orders": [item["row"]["id"]]}), encoding="utf-8")
+        retries.append(retry)
+        selections.append(selection)
+    xlsx, output_json = tmp_path / "cli.xlsx", tmp_path / "cli.json"
+    script = str((__import__("pathlib").Path(__file__).parents[1]
+                  / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        "--retry-jsonl", str(retries[0]), "--retry-jsonl", str(retries[1]),
+        "--retry-selection-json", str(selections[0]), "--retry-selection-json", str(selections[1]),
+        "--output-xlsx", str(xlsx), "--output-json", str(output_json)],
+        text=True, capture_output=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert [row["final_source"] for row in payload["rows"]] == ["retry", "retry"]
+    assert payload["sources"] == {"first_jsonl": str(first),
+        "retry_jsonl": [str(path) for path in retries],
+        "retry_selection_json": [str(path) for path in selections]}
+
+
+def test_cli_rejects_duplicate_id_across_retry_selection_files(tmp_path):
+    first = tmp_path / "first.jsonl"
+    first.write_text(json.dumps(audit_item("1")) + "\n", encoding="utf-8")
+    selections = []
+    for index in range(2):
+        path = tmp_path / f"selection-{index}.json"
+        path.write_text(json.dumps(["1"]), encoding="utf-8")
+        selections.append(path)
+    script = str((__import__("pathlib").Path(__file__).parents[1]
+                  / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        "--retry-selection-json", str(selections[0]),
+        "--retry-selection-json", str(selections[1]),
+        "--output-xlsx", str(tmp_path / "out.xlsx"),
+        "--output-json", str(tmp_path / "out.json")],
+        text=True, capture_output=True, timeout=30)
+    assert completed.returncode != 0
+    assert "duplicate retry selection order ID" in completed.stderr
+
+
+@pytest.mark.parametrize(("kind", "content"), [
+    ("selection", "not-json"), ("selection", "[]"),
+    ("retry", "not-json"), ("retry", ""),
+])
+def test_cli_rejects_any_empty_or_malformed_repeatable_input(kind, content, tmp_path):
+    first = tmp_path / "first.jsonl"
+    first.write_text(json.dumps(audit_item("1")) + "\n", encoding="utf-8")
+    bad = tmp_path / ("bad.json" if kind == "selection" else "bad.jsonl")
+    bad.write_text(content, encoding="utf-8")
+    option = "--retry-selection-json" if kind == "selection" else "--retry-jsonl"
+    script = str((__import__("pathlib").Path(__file__).parents[1]
+                  / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        option, str(bad), "--output-xlsx", str(tmp_path / "out.xlsx"),
+        "--output-json", str(tmp_path / "out.json")],
+        text=True, capture_output=True, timeout=30)
+    assert completed.returncode != 0
 
 
 @pytest.mark.parametrize("selection", [
