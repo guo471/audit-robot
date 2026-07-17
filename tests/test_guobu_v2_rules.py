@@ -847,6 +847,140 @@ def test_identity_labelled_combined_normalized_value_is_excluded_even_for_sn_fie
     assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
 
 
+def test_sn_label_without_value_binding_does_not_claim_imei_value():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "355516408057368", "imei1": "999999999999999"},
+        {
+            "sn_candidates": [
+                _sn_candidate(
+                    "355516408057368",
+                    field_type="SN",
+                    raw_text="SN identifiers captured; IMEI: 355516408057368",
+                )
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == ""
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+def test_mixed_raw_block_binds_each_candidate_to_its_own_label():
+    raw_text = "SN: ABC123 IMEI: 355516408057368"
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_candidates": [
+                _sn_candidate("ABC123", field_type="SN", raw_text=raw_text),
+                _sn_candidate("355516408057368", field_type="SN", raw_text=raw_text),
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "ABC123"
+
+
+def test_sn_bound_fifteen_digit_value_remains_a_valid_sn():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "123456789012345"},
+        {
+            "sn_candidates": [
+                _sn_candidate(
+                    "123456789012345",
+                    field_type="SN",
+                    raw_text="SN: 123456789012345",
+                )
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "123456789012345"
+
+
+@pytest.mark.parametrize(
+    ("normalized_text", "raw_text"),
+    [
+        ("ABC-123", "SN: ABC-123 IMEI: 355516408057368"),
+        ("ABC 123", "SN: ABC 123 IMEI: 355516408057368"),
+        ("ABC123", "(S) Serial No. ABC123 IMEI: 355516408057368"),
+    ],
+)
+def test_sn_binding_allows_separators_between_candidate_characters(
+    normalized_text, raw_text
+):
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_candidates": [
+                _sn_candidate(
+                    normalized_text,
+                    field_type="SN",
+                    raw_text=raw_text,
+                )
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "ABC123"
+
+
+def test_real_formal_order_keeps_package_mismatch_through_final_row():
+    fields = {
+        "system_sn": "HXL7NVMWGM",
+        "imei1": "867530900000001",
+        "imei2": "867530900000002",
+    }
+    model_result = {
+        "sn_match": True,
+        "observed_sn": "867530900000001",
+        "normalized_observed_sn": "867530900000001",
+        "sn_candidates": [
+            _sn_candidate(
+                "IMEI1867530900000001IMEI2867530900000002",
+                source="DEVICE_SCREEN",
+                field_type="SN",
+                raw_text="IMEI1: 867530900000001 IMEI2: 867530900000002",
+            ),
+            _sn_candidate(
+                "HX27MVN9M",
+                source="PACKAGE_LABEL",
+                field_type="SN",
+                raw_text="SN: HX27MVN9M IMEI: 867530900000001",
+                matches_system_sn=True,
+            ),
+        ],
+    }
+
+    normalized = v2._normalize_sn_result(fields, model_result)
+    row = v2._final_row(
+        {
+            "channel_order_no": "481173067012915222937618",
+            "fields": fields,
+        },
+        {
+            "manual_required": True,
+            "manual_reason_codes": ["SN_MISMATCH"],
+            "manual_reason": "package SN differs from system SN",
+        },
+        normalized,
+        {},
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+
+    assert normalized["observed_sn"] == "HX27MVN9M"
+    assert row["id"] == "481173067012915222937618"
+    assert row["observed_sn"] == "HX27MVN9M"
+    assert row["sn_match"] is False
+    assert row["manual_reason_code"] == "SN_MISMATCH"
+
+
 def test_candidate_equal_to_order_imei_after_punctuation_normalization_is_excluded():
     normalized = v2._normalize_sn_result(
         {"system_sn": "ABC123", "imei1": "867 530 900 000 001"},

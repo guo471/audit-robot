@@ -1684,8 +1684,8 @@ _NON_SN_LABEL_RE = re.compile(
     r"(?<![0-9A-Z])(?:IMEI(?:[ _]*[12])?|EID)(?![0-9A-Z])",
     re.IGNORECASE,
 )
-_EXPLICIT_SN_LABEL_RE = re.compile(
-    r"(?<![0-9A-Z])(?:S\s*/\s*N|SN|SERIAL|序列号)(?![0-9A-Z])",
+_SN_BINDING_LABEL_RE = re.compile(
+    r"(?<![0-9A-Z])(?:S\s*/\s*N|SN|(?:\(S\)\s*)?SERIAL(?:\s+(?:NO\.?|NUMBER))?|序列号)(?![0-9A-Z])",
     re.IGNORECASE,
 )
 _SN_SOURCE_ORDER = {
@@ -1730,10 +1730,25 @@ def _has_normalized_identity_block(value: Any) -> bool:
     return bool(markers and (markers[0].start() == 0 or len(markers) >= 2))
 
 
+def _label_binds_candidate_value(raw_text: Any, candidate_sn: str, label_re: Any) -> bool:
+    if not candidate_sn:
+        return False
+    separated_value = r"[\W_]*".join(re.escape(char) for char in candidate_sn)
+    binding_re = re.compile(
+        rf"(?:{label_re.pattern})[\W_]*{separated_value}(?![0-9A-Z])",
+        re.IGNORECASE,
+    )
+    return bool(binding_re.search(str(raw_text or "")))
+
+
 def _is_explicit_sn_candidate(candidate: dict[str, Any]) -> bool:
     if _compact_field_type(candidate.get("field_type")) in {"SN", "SERIAL", "SERIALNUMBER"}:
         return True
-    return any(_EXPLICIT_SN_LABEL_RE.search(text) for text in _candidate_texts(candidate))
+    candidate_sn = _candidate_sn(candidate)
+    return any(
+        _label_binds_candidate_value(text, candidate_sn, _SN_BINDING_LABEL_RE)
+        for text in _candidate_texts(candidate)
+    )
 
 
 def _is_non_sn_candidate(candidate: dict[str, Any], decision: dict[str, Any]) -> bool:
@@ -1747,14 +1762,17 @@ def _is_non_sn_candidate(candidate: dict[str, Any], decision: dict[str, Any]) ->
     if _has_non_sn_label(normalized_text) or _has_normalized_identity_block(normalized_text):
         return True
     raw_text = str(candidate.get("raw_text") or "").strip()
-    clean_normalized_sn = bool(normalized_text) and normalized_text.upper() == candidate_sn
-    if (
-        field_type in {"SN", "SERIAL", "SERIALNUMBER"}
-        and clean_normalized_sn
-        and _EXPLICIT_SN_LABEL_RE.search(raw_text)
-    ):
-        return False
-    return any(_has_non_sn_label(text) for text in _candidate_texts(candidate))
+    sn_bound = _label_binds_candidate_value(raw_text, candidate_sn, _SN_BINDING_LABEL_RE)
+    identity_bound = any(
+        _label_binds_candidate_value(text, candidate_sn, _NON_SN_LABEL_RE)
+        for text in _candidate_texts(candidate)
+    )
+    if identity_bound:
+        return True
+    has_identity_label = any(_has_non_sn_label(text) for text in _candidate_texts(candidate))
+    if has_identity_label and field_type in {"SN", "SERIAL", "SERIALNUMBER"}:
+        return not sn_bound
+    return has_identity_label
 
 
 def _is_trustworthy_sn_candidate(candidate: dict[str, Any], decision: dict[str, Any]) -> bool:
