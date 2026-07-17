@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from openpyxl import load_workbook
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -183,6 +184,26 @@ def test_partial_first_jsonl_fails_before_retry_and_report(tmp_path):
     assert completed.returncode != 0
     assert "First-run completeness validation failed" in completed.stderr
     assert not (project / "report-invoked.txt").exists()
+
+
+def test_legacy_rollback_generates_valid_combined_outputs_offline(tmp_path):
+    project, tasks = make_stub_project(tmp_path, output_order_ids=["order-1"])
+    env = os.environ.copy()
+    env.update(VISION_API_BASE_URL="https://offline.invalid", VISION_API_KEY="dummy")
+    run_name = "legacy-offline"
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(project / "tools/run_guobu_audit_batch.ps1"), "-ProjectRoot", str(project),
+         "-TasksDir", str(tasks), "-RunName", run_name, "-ReportFormat", "legacy"],
+        text=True, capture_output=True, timeout=30, env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report_root = project / "reports/model_audit"
+    output_json = report_root / f"{run_name}_combined.json"
+    output_xlsx = report_root / f"{run_name}_combined.xlsx"
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["summary"]["total"] == 1
+    assert load_workbook(output_xlsx, read_only=True)["明细表"].max_row == 2
 
 
 def test_stale_retry_task_cannot_trigger_second_audit_without_network_failure(tmp_path):

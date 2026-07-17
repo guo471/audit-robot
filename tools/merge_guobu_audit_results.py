@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -91,37 +90,37 @@ def main() -> None:
         second_tokens = integer(final, "total_tokens") if second_item else 0
         rows.append(
             {
-                "搴忓彿": seq,
-                "璁㈠崟鍙?: order_id,
-                "鏄惁杞汉宸?: "鏄? if manual(final) else "鍚?,
-                "杞汉宸ュ師鍥犵爜": str(final.get("manual_reason_code") or ""),
-                "杞汉宸ュ師鍥?: reason_text(final),
-                "绯荤粺SN": str(final.get("system_sn") or ""),
-                "妯″瀷SN": str(final.get("observed_sn") or ""),
-                "鍘熸湰娴佺▼鐘舵€?: str(final.get("source_flow_status") or ""),
-                "婧愬鏍哥姸鎬?: final.get("source_examine_status", ""),
-                "婧愮粨绠楃姸鎬?: final.get("source_settle_status", ""),
-                "鑰楁椂(绉?": round(number(final, "elapsed_sec"), 2),
-                "浣跨敤token閲?: integer(final, "total_tokens"),
-                "缁撴灉鏉ユ簮": "绗簩杞綉缁滈噸璺? if second_item else "绗竴娆″叏閲忓鏍?,
-                "绗竴娆℃槸鍚︾綉缁滃け璐?: "鏄? if order_id in first_timeout_ids else "鍚?,
-                "绗簩娆℃槸鍚︿粛缃戠粶澶辫触": "鏄? if second_item and network_failure(final) else ("鍚? if second_item else ""),
-                "绗竴娆¤浆浜哄伐鍘熷洜": reason_text(first),
-                "绗竴娆¤€楁椂(绉?": round(first_elapsed, 2),
-                "绗簩娆¤€楁椂(绉?": round(second_elapsed, 2) if second_item else "",
-                "涓よ疆鍚堣鑰楁椂(绉?": round(first_elapsed + second_elapsed, 2),
-                "绗竴娆oken": first_tokens,
-                "绗簩娆oken": second_tokens if second_item else "",
-                "涓よ疆鍚堣token": first_tokens + second_tokens,
-                "绛栫暐": str(final.get("strategy") or ""),
-                "缃俊搴?: final.get("confidence", ""),
+                "序号": seq,
+                "订单号": order_id,
+                "是否转人工": "是" if manual(final) else "否",
+                "转人工原因码": str(final.get("manual_reason_code") or ""),
+                "转人工原因": reason_text(final),
+                "系统SN": str(final.get("system_sn") or ""),
+                "模型SN": str(final.get("observed_sn") or ""),
+                "原本流程状态": str(final.get("source_flow_status") or ""),
+                "源审核状态": final.get("source_examine_status", ""),
+                "源结算状态": final.get("source_settle_status", ""),
+                "耗时(秒)": round(number(final, "elapsed_sec"), 2),
+                "使用token量": integer(final, "total_tokens"),
+                "结果来源": "第二轮网络重跑" if second_item else "第一次全量审核",
+                "第一次是否网络失败": "是" if order_id in first_timeout_ids else "否",
+                "第二次是否仍网络失败": "是" if second_item and network_failure(final) else ("否" if second_item else ""),
+                "第一次转人工原因": reason_text(first),
+                "第一次耗时(秒)": round(first_elapsed, 2),
+                "第二次耗时(秒)": round(second_elapsed, 2) if second_item else "",
+                "两轮合计耗时(秒)": round(first_elapsed + second_elapsed, 2),
+                "第一次token": first_tokens,
+                "第二次token": second_tokens if second_item else "",
+                "两轮合计token": first_tokens + second_tokens,
+                "策略": str(final.get("strategy") or ""),
+                "置信度": final.get("confidence", ""),
             }
         )
 
-    final_manual = sum(row["鏄惁杞汉宸?] == "鏄? for row in rows)
+    final_manual = sum(row["是否转人工"] == "是" for row in rows)
     second_still_timeout = sum(item["row"]["id"] in first_timeout_ids and network_failure(item["row"]) for item in second_items)
     reason_counts = Counter(
-        row["杞汉宸ュ師鍥犵爜"] if row["鏄惁杞汉宸?] == "鏄? and row["杞汉宸ュ師鍥犵爜"] else "鑷姩閫氳繃"
+        row["转人工原因码"] if row["是否转人工"] == "是" and row["转人工原因码"] else "自动通过"
         for row in rows
     )
     summary = {
@@ -133,10 +132,10 @@ def main() -> None:
         "final_manual": final_manual,
         "final_auto": len(rows) - final_manual,
         "final_timeout": second_still_timeout,
-        "final_tokens": sum(int(row["浣跨敤token閲?]) for row in rows),
-        "actual_tokens": sum(int(row["涓よ疆鍚堣token"]) for row in rows),
-        "final_elapsed_seconds": round(sum(float(row["鑰楁椂(绉?"]) for row in rows), 2),
-        "actual_elapsed_seconds": round(sum(float(row["涓よ疆鍚堣鑰楁椂(绉?"]) for row in rows), 2),
+        "final_tokens": sum(int(row["使用token量"]) for row in rows),
+        "actual_tokens": sum(int(row["两轮合计token"]) for row in rows),
+        "final_elapsed_seconds": round(sum(float(row["耗时(秒)"]) for row in rows), 2),
+        "actual_elapsed_seconds": round(sum(float(row["两轮合计耗时(秒)"]) for row in rows), 2),
     }
 
     output_xlsx = Path(args.output_xlsx)
@@ -146,32 +145,32 @@ def main() -> None:
 
     workbook = Workbook()
     detail = workbook.active
-    detail.title = "鏄庣粏琛?
+    detail.title = "明细表"
     headers = list(rows[0])
     detail.append(headers)
     for row in rows:
         detail.append([row[header] for header in headers])
 
-    summary_sheet = workbook.create_sheet("姹囨€昏〃")
-    summary_sheet.append(["鎸囨爣", "鏁板€?])
+    summary_sheet = workbook.create_sheet("汇总表")
+    summary_sheet.append(["指标", "数值"])
     summary_labels = {
-        "total": "鏍锋湰鎬绘暟",
-        "first_timeout": "绗竴娆＄綉缁滃け璐ヨ浆浜哄伐鍗曟暟",
-        "second_rerun": "绗簩杞噸璺戝崟鏁?,
-        "second_resolved": "绗簩杞凡瑙ｅ喅缃戠粶澶辫触鍗曟暟",
-        "second_still_timeout": "绗簩杞粛缃戠粶澶辫触鍗曟暟",
-        "final_manual": "缁煎悎鍚庤浆浜哄伐鎬绘暟",
-        "final_auto": "缁煎悎鍚庤嚜鍔ㄩ€氳繃鏁?,
-        "final_timeout": "缁煎悎鍚庣綉缁滃け璐ヨ浆浜哄伐鏁?,
-        "final_tokens": "缁煎悎缁撴灉token鍚堣",
-        "actual_tokens": "涓よ疆瀹為檯token鍚堣",
-        "final_elapsed_seconds": "缁煎悎缁撴灉鑰楁椂鍚堣(绉?",
-        "actual_elapsed_seconds": "涓よ疆瀹為檯鑰楁椂鍚堣(绉?",
+        "total": "样本总数",
+        "first_timeout": "第一次网络失败转人工单数",
+        "second_rerun": "第二轮重跑单数",
+        "second_resolved": "第二轮已解决网络失败单数",
+        "second_still_timeout": "第二轮仍网络失败单数",
+        "final_manual": "综合后转人工总数",
+        "final_auto": "综合后自动通过数",
+        "final_timeout": "综合后网络失败转人工数",
+        "final_tokens": "综合结果token合计",
+        "actual_tokens": "两轮实际token合计",
+        "final_elapsed_seconds": "综合结果耗时合计(秒)",
+        "actual_elapsed_seconds": "两轮实际耗时合计(秒)",
     }
     for key, value in summary.items():
         summary_sheet.append([summary_labels[key], value])
     summary_sheet.append([])
-    summary_sheet.append(["缁煎悎鍚庤浆浜哄伐鍘熷洜鍒嗗竷", "鍗曟暟"])
+    summary_sheet.append(["综合后转人工原因分布", "单数"])
     for code, count in reason_counts.most_common():
         summary_sheet.append([code, count])
 
@@ -209,7 +208,7 @@ def main() -> None:
     )
 
     check = load_workbook(output_xlsx, read_only=True)
-    if check["鏄庣粏琛?].max_row != len(rows) + 1:
+    if check["明细表"].max_row != len(rows) + 1:
         raise SystemExit("Workbook detail row count mismatch")
     if any("??" in value for sheet in check.worksheets for row in sheet.iter_rows(values_only=True) for value in row if isinstance(value, str)):
         raise SystemExit("Workbook contains question-mark encoding damage")
