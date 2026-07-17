@@ -270,16 +270,16 @@ def test_network_failure_elapsed_is_capped_but_raw_trace_is_retained():
                 (10811.89, 60), (10, 10), (2.5, 2.5)]
 
 
-def test_network_failure_elapsed_uses_configured_timeout_and_nonnegative_floor():
+def test_network_failure_elapsed_uses_configured_timeout_and_preserves_valid_short_failure():
     failures = [
         audit_item("1", flag=True, code="MODEL_UNCERTAIN",
                    error="TimeoutError", elapsed=40500.92),
         audit_item("2", flag=True, code="MODEL_UNCERTAIN",
-                   error="TimeoutError", elapsed=-4),
+                   error="TimeoutError", elapsed=4),
     ]
     _, accounting = merge_attempts(failures, [], order_timeout_seconds=30)
-    assert accounting["raw_elapsed_seconds"] == pytest.approx(40496.92)
-    assert accounting["elapsed_seconds"] == 30
+    assert accounting["raw_elapsed_seconds"] == pytest.approx(40504.92)
+    assert accounting["elapsed_seconds"] == 34
     assert accounting["order_timeout_seconds"] == 30
 
 
@@ -287,6 +287,16 @@ def test_network_failure_elapsed_uses_configured_timeout_and_nonnegative_floor()
 def test_order_timeout_must_be_positive_finite_number(timeout):
     with pytest.raises(ValueError, match="order timeout"):
         merge_attempts([audit_item()], [], order_timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize("elapsed", [-1, float("nan"), float("inf"), True])
+@pytest.mark.parametrize("is_network_failure", [False, True])
+def test_attempt_elapsed_must_be_finite_nonnegative_real(elapsed, is_network_failure):
+    item = audit_item(flag=is_network_failure,
+                      code="MODEL_UNCERTAIN" if is_network_failure else "",
+                      error="TimeoutError" if is_network_failure else "", elapsed=elapsed)
+    with pytest.raises(ValueError, match="elapsed"):
+        merge_attempts([item], [])
 
 
 def test_valid_retry_cannot_bypass_malformed_first_attempt_flag():
@@ -586,6 +596,26 @@ def test_write_report_rejects_invalid_order_timeout_assumption(timeout, tmp_path
     with pytest.raises(ValueError, match="order timeout"):
         write_report(rows, summary, audit_json,
                      tmp_path / "timeout.xlsx", tmp_path / "timeout.json")
+
+
+@pytest.mark.parametrize("field", ["raw_elapsed_seconds", "elapsed_seconds"])
+@pytest.mark.parametrize("invalid", [-1, float("nan"), float("inf"), True])
+def test_write_report_rejects_invalid_elapsed_accounting_totals(field, invalid, tmp_path):
+    rows, summary, audit_json = report_fixture()
+    audit_json["accounting"][field] = invalid
+    with pytest.raises(ValueError, match="elapsed"):
+        write_report(rows, summary, audit_json,
+                     tmp_path / "elapsed-total.xlsx", tmp_path / "elapsed-total.json")
+
+
+@pytest.mark.parametrize("field", ["elapsed_seconds", "effective_elapsed_seconds"])
+@pytest.mark.parametrize("invalid", [-1, float("nan"), float("inf"), True])
+def test_write_report_rejects_invalid_attempt_elapsed_trace(field, invalid, tmp_path):
+    rows, summary, audit_json = report_fixture()
+    audit_json["accounting"]["attempts"][0][field] = invalid
+    with pytest.raises(ValueError, match="elapsed"):
+        write_report(rows, summary, audit_json,
+                     tmp_path / "elapsed-trace.xlsx", tmp_path / "elapsed-trace.json")
 
 
 def test_write_report_replaces_stale_payload_summary_and_rows(tmp_path):

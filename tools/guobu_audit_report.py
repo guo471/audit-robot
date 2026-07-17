@@ -72,6 +72,12 @@ def _number(value: object) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
+def _validated_elapsed(value: object, label: str) -> int | float:
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{label} elapsed must be a finite nonnegative number")
+    return value
+
+
 def _usage_objects(item: dict):
     roots = []
     root_ids = set()
@@ -116,8 +122,8 @@ def _account_attempt(item: dict, source: str, order_timeout_seconds: float) -> t
             totals["billed_cached_input_tokens"] += cached_input
             totals["billed_output_tokens"] += output
     row = item.get("row") or {}
-    raw_elapsed = _number(row.get("elapsed_sec"))
-    effective_elapsed = (min(max(raw_elapsed, 0.0), order_timeout_seconds)
+    raw_elapsed = _validated_elapsed(row.get("elapsed_sec"), "attempt")
+    effective_elapsed = (min(raw_elapsed, order_timeout_seconds)
                          if network_failure(item) else raw_elapsed)
     trace = {"source": source, "order_id": str(row.get("id") or "").strip(),
              "elapsed_seconds": raw_elapsed, "effective_elapsed_seconds": effective_elapsed,
@@ -378,15 +384,17 @@ def _validate_audit_json(audit_json: dict) -> None:
     timeout = accounting["order_timeout_seconds"]
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("audit order timeout must be a positive finite number")
+    _validated_elapsed(accounting["raw_elapsed_seconds"], "audit raw total")
+    _validated_elapsed(accounting["elapsed_seconds"], "audit effective total")
     attempt_keys = {"source", "order_id", "elapsed_seconds", "effective_elapsed_seconds", "item"}
     for attempt in accounting["attempts"]:
         if (not isinstance(attempt, dict) or not attempt_keys <= attempt.keys()
                 or attempt["source"] not in {"first", "retry"}
                 or not str(attempt["order_id"]).strip()
-                or not isinstance(attempt["elapsed_seconds"], (int, float))
-                or not isinstance(attempt["effective_elapsed_seconds"], (int, float))
                 or not isinstance(attempt["item"], dict)):
             raise ValueError("audit attempt trace is malformed")
+        _validated_elapsed(attempt["elapsed_seconds"], "audit attempt raw")
+        _validated_elapsed(attempt["effective_elapsed_seconds"], "audit attempt effective")
     if "pricing" not in audit_json:
         raise ValueError("audit pricing assumption is required")
     pricing = audit_json["pricing"]
