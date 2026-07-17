@@ -667,6 +667,333 @@ def test_sn_result_prioritizes_clear_screen_conflict_over_matching_package():
     assert normalized["manual_reason_code"] == "SN_MISMATCH"
 
 
+def _sn_candidate(
+    value,
+    *,
+    source="PACKAGE_LABEL",
+    field_type="SN",
+    raw_text=None,
+    readable=True,
+    matches_system_sn=None,
+):
+    candidate = {
+        "source": source,
+        "field_type": field_type,
+        "raw_text": raw_text if raw_text is not None else f"SN: {value}",
+        "normalized_text": value,
+        "readable": readable,
+    }
+    if matches_system_sn is not None:
+        candidate["matches_system_sn"] = matches_system_sn
+    return candidate
+
+
+def test_formal_order_imei_screen_reading_is_discarded_for_package_sn_mismatch():
+    fields = {
+        "system_sn": "HXL7NVMWGM",
+        "imei1": "867530900000001",
+        "imei2": "867530900000002",
+    }
+    normalized = v2._normalize_sn_result(
+        fields,
+        {
+            "sn_match": True,
+            "observed_sn": "867530900000001",
+            "normalized_observed_sn": "867530900000001",
+            "sn_candidates": [
+                _sn_candidate(
+                    "867530900000001",
+                    source="DEVICE_SCREEN",
+                    raw_text="IMEI1: 867530900000001 IMEI2: 867530900000002",
+                    matches_system_sn=True,
+                ),
+                _sn_candidate("HX27MVN9M", matches_system_sn=False),
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "HX27MVN9M"
+    assert normalized["normalized_observed_sn"] == "HX27MVN9M"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+    assert "867530900000001" not in normalized["observed_sn"]
+
+
+def test_imei_screen_reading_falls_back_to_matching_package_sn():
+    fields = {
+        "system_sn": "HXL7NVMWGM",
+        "imei1": "867530900000001",
+        "imei2": "867530900000002",
+    }
+    normalized = v2._normalize_sn_result(
+        fields,
+        {
+            "sn_match": False,
+            "observed_sn": "IMEI1: 867530900000001",
+            "normalized_observed_sn": "867530900000001",
+            "sn_candidates": [
+                _sn_candidate(
+                    "867530900000001",
+                    source="DEVICE_SCREEN",
+                    raw_text="IMEI1: 867530900000001 IMEI2: 867530900000002",
+                    matches_system_sn=True,
+                ),
+                _sn_candidate("HXL7NVMWGM", matches_system_sn=False),
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "HXL7NVMWGM"
+    assert normalized["normalized_observed_sn"] == "HXL7NVMWGM"
+    assert normalized.get("manual_reason_code") not in {"SN_MISMATCH", "SN_NOT_FOUND"}
+
+
+@pytest.mark.parametrize("field_type", ["IMEI", "imei_1", "I M E I 2", "E_I_D"])
+def test_imei_and_eid_field_types_are_excluded_from_sn_candidates(field_type):
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {"sn_candidates": [_sn_candidate("ABC123", field_type=field_type)]},
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == ""
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    [
+        "IMEI: 867530900000001",
+        "IMEI1: 867530900000001",
+        "IMEI 2: 867530900000001",
+        "EID: 867530900000001",
+    ],
+)
+def test_sn_field_with_bounded_imei_or_eid_label_is_excluded(raw_text):
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_candidates": [
+                _sn_candidate("867530900000001", field_type="SN", raw_text=raw_text),
+            ]
+        },
+    )
+
+    assert normalized["observed_sn"] == ""
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+def test_candidate_equal_to_order_imei_after_punctuation_normalization_is_excluded():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "imei1": "867 530 900 000 001"},
+        {
+            "sn_candidates": [
+                _sn_candidate(
+                    "867-5309-00000-001",
+                    field_type="SN",
+                    raw_text="SN: 867-5309-00000-001",
+                )
+            ]
+        },
+    )
+
+    assert normalized["observed_sn"] == ""
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    ("system_sn", "candidate_sn", "expected_match", "expected_code"),
+    [
+        ("123456789012345", "123456789012345", True, ""),
+        ("123456789012345", "999999999999999", False, "SN_MISMATCH"),
+    ],
+)
+def test_valid_fifteen_digit_numeric_sn_is_not_filtered_by_length(
+    system_sn, candidate_sn, expected_match, expected_code
+):
+    normalized = v2._normalize_sn_result(
+        {"system_sn": system_sn},
+        {"sn_candidates": [_sn_candidate(candidate_sn)]},
+    )
+
+    assert normalized["sn_match"] is expected_match
+    assert normalized["observed_sn"] == candidate_sn
+    assert normalized.get("manual_reason_code", "") == expected_code
+
+
+def test_ximeiy_substring_is_not_treated_as_an_imei_label():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "XIMEIY123"},
+        {
+            "sn_candidates": [
+                _sn_candidate("XIMEIY123", raw_text="SN: XIMEIY123"),
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "XIMEIY123"
+
+
+@pytest.mark.parametrize(
+    ("candidates", "expected_observed"),
+    [
+        (
+            [
+                _sn_candidate("WRONG123", source="DEVICE_SCREEN"),
+                _sn_candidate("ABC123", source="PACKAGE_LABEL"),
+            ],
+            "WRONG123",
+        ),
+        (
+            [
+                _sn_candidate("ABC123", source="DEVICE_SCREEN"),
+                _sn_candidate("WRONG123", source="PACKAGE_LABEL"),
+            ],
+            "ABC123",
+        ),
+        (
+            [
+                _sn_candidate("ZZZ999", source="PACKAGE_LABEL"),
+                _sn_candidate("AAA111", source="PACKAGE_LABEL"),
+            ],
+            "AAA111",
+        ),
+    ],
+)
+def test_distinct_sn_candidates_always_conflict_and_are_order_stable(
+    candidates, expected_observed
+):
+    outcomes = []
+    for ordered_candidates in (candidates, list(reversed(candidates))):
+        normalized = v2._normalize_sn_result(
+            {"system_sn": "ABC123"},
+            {"sn_match": True, "sn_candidates": ordered_candidates},
+        )
+        outcomes.append(
+            (
+                normalized["sn_match"],
+                normalized["observed_sn"],
+                normalized["manual_reason_code"],
+            )
+        )
+
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0][0] is False
+    assert outcomes[0][1] == expected_observed
+    assert outcomes[0][2] == "SN_MISMATCH"
+
+
+def test_same_sn_from_multiple_sources_is_a_match():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_match": False,
+            "sn_candidates": [
+                _sn_candidate("ABC123", source="DEVICE_SCREEN", matches_system_sn=False),
+                _sn_candidate("ABC123", source="DEVICE_BODY", matches_system_sn=False),
+                _sn_candidate("ABC123", source="PACKAGE_LABEL", matches_system_sn=False),
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "ABC123"
+
+
+def test_unreadable_sn_candidate_is_ignored():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_candidates": [
+                _sn_candidate("WRONG123", source="DEVICE_SCREEN", readable=False),
+                _sn_candidate("ABC123", source="PACKAGE_LABEL"),
+            ]
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "ABC123"
+
+
+def test_top_level_system_observed_is_cross_checked_against_conflicting_candidate():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_match": True,
+            "observed_sn": "ABC123",
+            "normalized_observed_sn": "ABC123",
+            "sn_candidates": [
+                _sn_candidate("WRONG123", source="DEVICE_SCREEN"),
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "WRONG123"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    ("observed_sn", "expected_match", "expected_code"),
+    [
+        ("ABC123", True, ""),
+        ("WRONG123", False, "SN_MISMATCH"),
+    ],
+)
+def test_top_level_observed_without_candidates_preserves_historical_behavior(
+    observed_sn, expected_match, expected_code
+):
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_match": not expected_match,
+            "observed_sn": observed_sn,
+            "normalized_observed_sn": observed_sn,
+        },
+    )
+
+    assert normalized["sn_match"] is expected_match
+    assert normalized["observed_sn"] == observed_sn
+    assert normalized.get("manual_reason_code", "") == expected_code
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        _sn_candidate("867530900000001", source="DEVICE_SCREEN", field_type="IMEI"),
+        _sn_candidate(
+            "867530900000001",
+            source="DEVICE_SCREEN",
+            field_type="SN",
+            raw_text="IMEI1: 867530900000001",
+        ),
+        _sn_candidate("867-5309-00000-001", source="DEVICE_SCREEN", field_type="SN"),
+    ],
+)
+def test_conflict_helpers_ignore_imei_candidates(candidate):
+    decision = {
+        "system_sn": "ABC123",
+        "imei1": "867530900000001",
+        "sn_candidates": [candidate],
+    }
+
+    assert v2._conflicting_screen_sn(decision) == ""
+    assert v2._conflicting_observed_sn(decision) == ""
+
+
+def test_conflicting_observed_helper_discards_imei_top_level_group():
+    decision = {
+        "system_sn": "ABC123",
+        "imei1": "867530900000001",
+        "observed_sn": "IMEI1: 867530900000001",
+        "normalized_observed_sn": "867530900000001",
+    }
+
+    assert v2._conflicting_observed_sn(decision) == ""
+
+
 def test_group_images_by_title_keeps_multiple_images_under_same_title():
     task = {
         "images": [
@@ -1256,7 +1583,7 @@ def test_sn_not_found_sentinel_is_not_treated_as_mismatch():
     assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
 
 
-def test_unknown_or_na_sn_sentinels_are_not_treated_as_mismatch():
+def test_unknown_or_na_sn_sentinels_become_sn_not_found():
     for sentinel in ("UNKNOWN", "N/A", "NA", "NONE", "null"):
         normalized = v2._normalize_sn_result(
             {"system_sn": "ADUNUT5C22000330"},
@@ -1273,7 +1600,7 @@ def test_unknown_or_na_sn_sentinels_are_not_treated_as_mismatch():
         assert normalized["sn_match"] is False
         assert normalized["observed_sn"] == ""
         assert normalized["normalized_observed_sn"] == ""
-        assert normalized["manual_reason_code"] == "MODEL_UNCERTAIN"
+        assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
 
 
 def test_o_zero_conflict_from_image_sn_is_rejected_without_visual_ambiguity_pass():

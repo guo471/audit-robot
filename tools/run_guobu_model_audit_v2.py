@@ -1602,57 +1602,42 @@ def _system_sn_supported_by_visual_ambiguity(
 
 def _normalize_sn_result(fields: dict[str, Any], result: dict[str, Any], *, require_positive_system_match: bool = False) -> dict[str, Any]:
     normalized = dict(result)
-    observed_source = _candidate_observed_sn(result)
-    observed = normalize_sn(observed_source)
     system = normalize_sn(fields.get("system_sn", ""))
-    screen_conflict = _conflicting_screen_sn({**result, "system_sn": system})
-    if screen_conflict:
-        normalized["sn_match"] = False
-        normalized["observed_sn"] = screen_conflict
-        normalized["normalized_observed_sn"] = screen_conflict
-        normalized["manual_reason_code"] = "SN_MISMATCH"
-        normalized["manual_reason_codes"] = ["SN_MISMATCH"]
-        normalized["manual_reason"] = "设备屏幕SN与系统SN不一致"
-        return normalized
+    decision = {
+        **result,
+        "system_sn": system,
+        "imei1": fields.get("imei1", ""),
+        "imei2": fields.get("imei2", ""),
+    }
+    state, observed_source, observed = _evaluate_sn_evidence(decision)
     code = str(result.get("manual_reason_code") or "").strip().upper()
     explicit_rejection = (
         is_explicit_false(result.get("matches_given_system_sn"))
-        or is_explicit_false(result.get("sn_match"))
         or code in {"SN_MISMATCH", "SN_NOT_FOUND", "MODEL_UNCERTAIN"}
     )
-    visual_ambiguity_supported = False if require_positive_system_match and explicit_rejection else _system_sn_supported_by_visual_ambiguity(system, observed, result, allow_alignment_error=True)
-    if observed and system and not (require_positive_system_match and explicit_rejection):
-        sn_match = observed == system or visual_ambiguity_supported
-    else:
-        sn_match = False
-    if observed and system and as_bool(result.get("matches_given_system_sn")) and not (require_positive_system_match and explicit_rejection):
-        sn_match = observed == system or visual_ambiguity_supported
-    normalized["sn_match"] = sn_match
-    if visual_ambiguity_supported:
-        normalized["observed_sn"] = fields.get("system_sn", "")
-        normalized["normalized_observed_sn"] = system
-        normalized["raw_observed_sn"] = result.get("observed_sn") or result.get("normalized_observed_sn") or ""
-        normalized["visual_sn_ambiguity"] = True
-        normalized["manual_reason_code"] = ""
-        normalized["manual_reason_codes"] = []
-    elif observed:
+    if state == "match" and require_positive_system_match and explicit_rejection:
+        normalized["sn_match"] = False
         normalized["observed_sn"] = observed_source
         normalized["normalized_observed_sn"] = observed
-    else:
-        normalized["observed_sn"] = ""
-        normalized["normalized_observed_sn"] = ""
-    if observed and system and observed != system and not visual_ambiguity_supported:
+        if not code or code in {"OK", "PASS", "SN_MATCH", "MATCH"}:
+            code = "MODEL_UNCERTAIN"
+        normalized["manual_reason_code"] = code
+        normalized["manual_reason_codes"] = [code]
+        return normalized
+
+    normalized["sn_match"] = state == "match"
+    normalized["observed_sn"] = observed_source
+    normalized["normalized_observed_sn"] = observed
+    if state == "mismatch":
         normalized["manual_reason_code"] = "SN_MISMATCH"
         normalized["manual_reason_codes"] = ["SN_MISMATCH"]
         normalized["manual_reason"] = "照片中SN与系统SN不一致"
-    elif not observed:
-        code = str(result.get("manual_reason_code") or "").strip().upper()
-        if code in {"", "OK", "PASS", "SN_MATCH", "MATCH", "SN_MISMATCH"}:
-            code = "SN_NOT_FOUND"
-        normalized["manual_reason_code"] = code
-        normalized["manual_reason_codes"] = [code] if code else []
-    if sn_match and not normalized.get("observed_sn"):
-        normalized["observed_sn"] = fields.get("system_sn", "")
+    elif state == "not_found":
+        normalized["manual_reason_code"] = "SN_NOT_FOUND"
+        normalized["manual_reason_codes"] = ["SN_NOT_FOUND"]
+    else:
+        normalized["manual_reason_code"] = ""
+        normalized["manual_reason_codes"] = []
     return normalized
 
 
@@ -1695,11 +1680,146 @@ def _candidate_raw_text(candidate: dict[str, Any]) -> str:
     return str(candidate.get("raw_text") or candidate.get("label") or "").strip()
 
 
+_NON_SN_LABEL_RE = re.compile(
+    r"(?<![0-9A-Z])(?:IMEI(?:[ _]*[12])?|EID)(?![0-9A-Z])",
+    re.IGNORECASE,
+)
+_EXPLICIT_SN_LABEL_RE = re.compile(
+    r"(?<![0-9A-Z])(?:S\s*/\s*N|SN|SERIAL|序列号)(?![0-9A-Z])",
+    re.IGNORECASE,
+)
+_SN_SOURCE_ORDER = {
+    "DEVICE_SCREEN": 0,
+    "SCREEN": 0,
+    "DEVICE_BODY": 1,
+    "PACKAGE_LABEL": 2,
+    "BARCODE_TEXT": 2,
+}
+
+
+def _candidate_texts(candidate: dict[str, Any]) -> list[str]:
+    return [
+        str(candidate.get(key) or "").strip()
+        for key in ("raw_text", "label")
+        if str(candidate.get(key) or "").strip()
+    ]
+
+
+def _compact_field_type(value: Any) -> str:
+    return re.sub(r"[ _]", "", str(value or "").strip().upper())
+
+
+def _order_imeis(decision: dict[str, Any]) -> set[str]:
+    return {
+        normalized
+        for normalized in (
+            normalize_sn(decision.get("imei1") or ""),
+            normalize_sn(decision.get("imei2") or ""),
+        )
+        if normalized
+    }
+
+
+def _has_non_sn_label(value: Any) -> bool:
+    return bool(_NON_SN_LABEL_RE.search(str(value or "")))
+
+
 def _is_explicit_sn_candidate(candidate: dict[str, Any]) -> bool:
-    raw_text = _candidate_raw_text(candidate).upper()
-    if re.search(r"\bS\s*/?\s*N\b|\bSN\b|SERIAL|序列号", raw_text):
+    if _compact_field_type(candidate.get("field_type")) in {"SN", "SERIAL", "SERIALNUMBER"}:
         return True
-    return False
+    return any(_EXPLICIT_SN_LABEL_RE.search(text) for text in _candidate_texts(candidate))
+
+
+def _is_non_sn_candidate(candidate: dict[str, Any], decision: dict[str, Any]) -> bool:
+    if _compact_field_type(candidate.get("field_type")) in {"IMEI", "IMEI1", "IMEI2", "EID"}:
+        return True
+    if any(_has_non_sn_label(text) for text in _candidate_texts(candidate)):
+        return True
+    candidate_sn = _candidate_sn(candidate)
+    return bool(candidate_sn and candidate_sn in _order_imeis(decision))
+
+
+def _is_trustworthy_sn_candidate(candidate: dict[str, Any], decision: dict[str, Any]) -> bool:
+    return (
+        as_bool(candidate.get("readable"))
+        and _is_explicit_sn_candidate(candidate)
+        and not _is_non_sn_candidate(candidate, decision)
+        and bool(_candidate_sn(candidate))
+    )
+
+
+def _is_readable_non_imei_candidate(candidate: dict[str, Any], decision: dict[str, Any]) -> bool:
+    return (
+        as_bool(candidate.get("readable"))
+        and not _is_non_sn_candidate(candidate, decision)
+        and bool(_candidate_sn(candidate))
+    )
+
+
+def _trustworthy_sn_candidates(
+    decision: dict[str, Any],
+    *,
+    sources: set[str] | None = None,
+) -> list[tuple[int, str, str]]:
+    trustworthy: list[tuple[int, str, str]] = []
+    for candidate in _list_value(decision.get("sn_candidates")):
+        if not isinstance(candidate, dict) or not _is_trustworthy_sn_candidate(candidate, decision):
+            continue
+        source = _candidate_source(candidate)
+        if sources is not None and source not in sources:
+            continue
+        candidate_sn = _candidate_sn(candidate)
+        trustworthy.append(
+            (
+                _SN_SOURCE_ORDER.get(source, len(_SN_SOURCE_ORDER)),
+                candidate_sn,
+                _candidate_raw_text(candidate),
+            )
+        )
+    return sorted(trustworthy, key=lambda item: (item[0], item[1], item[2].upper()))
+
+
+def _top_level_observed_group(decision: dict[str, Any]) -> tuple[str, str, bool]:
+    observed_values = [
+        decision.get(key)
+        for key in ("observed_sn", "normalized_observed_sn", "read_sn", "normalized_read_sn")
+        if decision.get(key) is not None and not _is_sn_not_found_sentinel(decision.get(key))
+    ]
+    order_imeis = _order_imeis(decision)
+    if any(
+        _has_non_sn_label(value) or normalize_sn(value) in order_imeis
+        for value in observed_values
+    ):
+        return "", "", True
+    observed_source = _candidate_observed_sn(decision)
+    return observed_source, normalize_sn(observed_source), False
+
+
+def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
+    system_sn = normalize_sn(decision.get("system_sn") or decision.get("normalized_system_sn") or "")
+    observed_source, observed_sn, _discarded_non_sn = _top_level_observed_group(decision)
+    candidates = _trustworthy_sn_candidates(decision)
+    unique_candidate_values = {candidate_sn for _rank, candidate_sn, _raw in candidates}
+
+    if observed_sn:
+        distinct_candidates = [candidate for candidate in candidates if candidate[1] != observed_sn]
+        if distinct_candidates:
+            if observed_sn != system_sn:
+                return "mismatch", observed_source, observed_sn
+            conflict = next(
+                (candidate for candidate in distinct_candidates if candidate[1] != system_sn),
+                distinct_candidates[0],
+            )
+            return "mismatch", conflict[1], conflict[1]
+        return ("match" if system_sn and observed_sn == system_sn else "mismatch"), observed_source, observed_sn
+
+    if not candidates:
+        return "not_found", "", ""
+
+    selected_sn = candidates[0][1]
+    if len(unique_candidate_values) >= 2:
+        return "mismatch", selected_sn, selected_sn
+    return ("match" if system_sn and selected_sn == system_sn else "mismatch"), selected_sn, selected_sn
 
 
 def _conflicting_screen_sn(decision: dict[str, Any]) -> str:
@@ -1707,18 +1827,11 @@ def _conflicting_screen_sn(decision: dict[str, Any]) -> str:
     if not system_sn:
         return ""
 
-    for candidate in _list_value(decision.get("sn_candidates")):
-        if not isinstance(candidate, dict) or _candidate_source(candidate) not in {"SCREEN", "DEVICE_SCREEN"}:
-            continue
-        if not as_bool(candidate.get("readable")):
-            continue
-        field_type = str(candidate.get("field_type") or "").strip().upper()
-        if field_type and field_type not in {"SN", "SERIAL", "SERIAL_NUMBER"}:
-            continue
-        if not field_type and not _is_explicit_sn_candidate(candidate):
-            continue
-        candidate_sn = _candidate_sn(candidate)
-        if candidate_sn and candidate_sn != system_sn:
+    for _rank, candidate_sn, _raw in _trustworthy_sn_candidates(
+        decision,
+        sources={"SCREEN", "DEVICE_SCREEN"},
+    ):
+        if candidate_sn != system_sn:
             return candidate_sn
 
     return ""
@@ -1733,41 +1846,11 @@ def _conflicting_observed_sn(decision: dict[str, Any]) -> str:
     if not system_sn:
         return ""
 
-    observed_values = [
-        normalize_sn(decision.get("observed_sn") or ""),
-        normalize_sn(decision.get("normalized_observed_sn") or ""),
-    ]
-    for observed_sn in observed_values:
-        if observed_sn and observed_sn != system_sn and not _system_sn_supported_by_visual_ambiguity(
-            system_sn,
-            observed_sn,
-            decision,
-            allow_explicit_false=False,
-        ):
-            return observed_sn
-    for candidate in _list_value(decision.get("sn_candidates")):
-        if not isinstance(candidate, dict):
-            continue
-        candidate_sn = _candidate_sn(candidate)
-        candidate_result = {
-            "sn_match": candidate.get("matches_system_sn"),
-            "confidence": decision.get("confidence"),
-            "manual_reason_code": decision.get("manual_reason_code", ""),
-        }
-        if (
-            as_bool(candidate.get("readable"))
-            and candidate_sn
-            and candidate_sn != system_sn
-            and _is_explicit_sn_candidate(candidate)
-            and not _system_sn_supported_by_visual_ambiguity(system_sn, candidate_sn, candidate_result, allow_explicit_false=False)
-        ):
-            return candidate_sn
-        if (
-            candidate_sn
-            and is_explicit_false(candidate.get("matches_system_sn"))
-            and _is_explicit_sn_candidate(candidate)
-            and not _system_sn_supported_by_visual_ambiguity(system_sn, candidate_sn, candidate_result, allow_explicit_false=False)
-        ):
+    _observed_source, observed_sn, _discarded_non_sn = _top_level_observed_group(decision)
+    if observed_sn and observed_sn != system_sn:
+        return observed_sn
+    for _rank, candidate_sn, _raw in _trustworthy_sn_candidates(decision):
+        if candidate_sn != system_sn:
             return candidate_sn
     return ""
 
@@ -1856,7 +1939,7 @@ def _activation_pass_gate_reason(decision: dict[str, Any]) -> str:
     readable_candidates = [
         candidate
         for candidate in candidates
-        if as_bool(candidate.get("readable")) and _candidate_sn(candidate)
+        if _is_readable_non_imei_candidate(candidate, decision)
     ]
 
     def candidate_supports_system_sn(candidate: dict[str, Any]) -> bool:
@@ -1904,13 +1987,12 @@ def _activation_pass_gate_reason(decision: dict[str, Any]) -> str:
         package_match = any(_candidate_source(candidate) == "PACKAGE_LABEL" and candidate_supports_system_sn(candidate) for candidate in readable_candidates)
         return "" if observed_sn == system_sn or text_supports_system_sn(observed_sn) or package_match else "ACTIVATION_PHOTO_INVALID"
 
-    if not readable_candidates:
-        return "ACTIVATION_PHOTO_INVALID"
-
     screen_match = any(_candidate_source(candidate) == "SCREEN" and candidate_supports_system_sn(candidate) for candidate in readable_candidates)
     if evidence_type == "SCREEN_SN":
         if as_bool(screen.get("screen_sn_visible")) and (text_supports_system_sn(screen_text) or screen_match):
             return ""
+        return "ACTIVATION_PHOTO_INVALID"
+    if not readable_candidates:
         return "ACTIVATION_PHOTO_INVALID"
     if evidence_type == "SCREEN_ACTIVE_WITH_SN":
         package_match = any(_candidate_source(candidate) == "PACKAGE_LABEL" and candidate_supports_system_sn(candidate) for candidate in readable_candidates)
@@ -2515,6 +2597,8 @@ def audit_task_hybrid(
     compliance["is_home_appliance"] = precheck["effective_category"] == "home_appliance"
     compliance["system_sn"] = fields.get("system_sn", "")
     compliance["normalized_system_sn"] = normalize_sn(fields.get("system_sn", ""))
+    compliance["imei1"] = fields.get("imei1", "")
+    compliance["imei2"] = fields.get("imei2", "")
     compliance["sn_confidence"] = normalized_sn.get("confidence", "")
     compliance["_sn_already_verified_by_system"] = True
     compliance = enforce_photo_noncompliance_manual(compliance, address_ok=precheck["address_ok"])
@@ -2637,6 +2721,8 @@ def audit_task_v2(
     compliance["is_home_appliance"] = precheck["effective_category"] == "home_appliance"
     compliance["system_sn"] = fields.get("system_sn", "")
     compliance["normalized_system_sn"] = normalize_sn(fields.get("system_sn", ""))
+    compliance["imei1"] = fields.get("imei1", "")
+    compliance["imei2"] = fields.get("imei2", "")
     compliance["sn_confidence"] = normalized_sn_result.get("confidence", "")
     compliance["_sn_already_verified_by_system"] = True
     compliance = enforce_photo_noncompliance_manual(compliance, address_ok=precheck["address_ok"])
@@ -2671,6 +2757,8 @@ def _final_row(
     fields = task.get("fields") or {}
     display_decision = dict(compliance)
     display_decision.setdefault("system_sn", fields.get("system_sn", ""))
+    display_decision.setdefault("imei1", fields.get("imei1", ""))
+    display_decision.setdefault("imei2", fields.get("imei2", ""))
     conflict_sn = _conflicting_observed_sn(display_decision) if primary_reason_code == "SN_MISMATCH" else ""
     observed_sn = sn_result.get("observed_sn") or fields.get("system_sn", "") if as_bool(sn_result.get("sn_match")) else sn_result.get("observed_sn", "")
     sn_match = as_bool(sn_result.get("sn_match")) if sn_result else False
