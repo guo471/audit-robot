@@ -494,11 +494,15 @@ def write_report(rows: list[dict], summary: dict, audit_json: dict,
     payload["summary"] = summary
     payload["rows"] = rows
     payload["summary_formula_definitions"] = {
+        "\u81ea\u52a8\u901a\u8fc7\u603b\u6570": "=B2-B3",
         "\u672a\u901a\u8fc7\u62e6\u622a\u7387": '=IF(B6=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B5/B6)',
         "\u5df2\u901a\u8fc7\u8bef\u5224\u7387": '=IF(B9=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B8/B9)',
+        "Token\u603b\u6d88\u8017": "=B11+B12",
+        "\u4eba\u5de5\u9884\u8ba1\u7528\u65f6\uff08\u5c0f\u65f6\uff09": "=B2/B16",
         "\u6a21\u578b\u6bcf\u5c0f\u65f6\u5ba1\u6838\u91cf": '=IF(B15=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B2/B15)',
         "\u6548\u7387\u500d\u6570": '=IF(B16=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B18/B16)',
         "\u6548\u7387\u63d0\u5347\u7387": '=IF(B19="\u65e0\u53ef\u8ba1\u7b97\u6837\u672c","\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B19-1)',
+        "\u9884\u8ba1\u8282\u7701\u4eba\u5de5\u65f6\u95f4\uff08\u5c0f\u65f6\uff09": "=B17-B15",
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

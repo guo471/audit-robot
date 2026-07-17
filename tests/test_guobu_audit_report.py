@@ -617,6 +617,7 @@ def test_json_utf8_trace_and_validation(tmp_path):
     assert payload["accounting"]["attempts"][0]["source"] == "first"
     assert payload["pricing"]["input_per_million"] == 2
     assert payload["summary_formula_definitions"]["未通过拦截率"].startswith("=IF(")
+    assert len(payload["summary_formula_definitions"]) == 9
     cached = load_workbook(xlsx, data_only=True)["汇总表"]
     assert all(cached.cell(row, 2).value is not None for row in range(2, cached.max_row + 1))
     with pytest.raises(FileExistsError):
