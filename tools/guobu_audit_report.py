@@ -527,6 +527,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
     outputs = [Path(args.output_xlsx), Path(args.output_json)]
+    if outputs[0].resolve() == outputs[1].resolve():
+        raise ValueError("XLSX and JSON output paths must be distinct")
     if not args.overwrite and any(output.exists() for output in outputs):
         raise FileExistsError("report output already exists")
     prices = None

@@ -480,3 +480,19 @@ def test_cli_overwrite_preserves_old_outputs_when_source_invalid(source_lines, t
     assert xlsx.read_bytes() == b"known-good-xlsx"
     assert output_json.read_text(encoding="utf-8") == "known-good-json"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_cli_overwrite_rejects_same_resolved_final_path_and_preserves_file(tmp_path):
+    item = audit_item("1")
+    item["row"].update(system_sn="1", observed_sn="1", sn_match=True)
+    first = tmp_path / "first.jsonl"
+    first.write_text(json.dumps(item) + "\n", encoding="utf-8")
+    output = tmp_path / "good-output"
+    output.write_bytes(b"known-good-output")
+    script = str((__import__("pathlib").Path(__file__).parents[1] / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        "--output-xlsx", str(output), "--output-json", str(output), "--overwrite"],
+        text=True, capture_output=True, timeout=30)
+    assert completed.returncode != 0
+    assert output.read_bytes() == b"known-good-output"
+    assert not list(tmp_path.glob("*.tmp.*"))
