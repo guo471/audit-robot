@@ -803,6 +803,43 @@ def test_conflicting_top_level_group_is_not_hidden_by_matching_package():
     assert normalized["manual_reason_code"] == "SN_MISMATCH"
 
 
+@pytest.mark.parametrize(
+    "identity_value",
+    [
+        "IMEI1355516408057368IMEI2355516407888847",
+        "EID89049032000000000000000000000001",
+        "355516408057368",
+    ],
+)
+@pytest.mark.parametrize("with_matching_package", [False, True])
+def test_mixed_top_level_sn_and_identity_value_cannot_fall_back_to_match(
+    identity_value, with_matching_package
+):
+    candidates = [_sn_candidate("SYSTEM123")] if with_matching_package else []
+    decision = {
+        "system_sn": "SYSTEM123",
+        "imei1": "355516408057368",
+        "imei2": "355516407888847",
+        "observed_sn": "REAL999",
+        "normalized_observed_sn": identity_value,
+        "sn_candidates": candidates,
+    }
+
+    normalized = v2._normalize_sn_result(
+        {
+            "system_sn": "SYSTEM123",
+            "imei1": "355516408057368",
+            "imei2": "355516407888847",
+        },
+        decision,
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "REAL999"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+    assert v2._conflicting_observed_sn(decision) == "REAL999"
+
+
 def test_imei_screen_reading_falls_back_to_matching_package_sn():
     fields = {
         "system_sn": "HXL7NVMWGM",
