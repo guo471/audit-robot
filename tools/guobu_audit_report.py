@@ -32,6 +32,176 @@ _STANDARD_REASONS = {
 }
 
 
+_NETWORK_FAILURE_MARKERS = ("timeouterror", "timed out", "modelconnectionerror",
+                            "connect failed", "winerror 10060", "http error 500")
+
+
+def network_failure(item: dict) -> bool:
+    row = item.get("row") or {}
+    values = [item.get("_error"), *(row.get(key) for key in ("manual_reason", "manual_reason_cn", "strategy"))]
+    text = "\n".join(str(value) for value in values if value is not None).lower()
+    return any(marker in text for marker in _NETWORK_FAILURE_MARKERS)
+
+
+def _indexed(items: list[dict], label: str) -> dict[str, dict]:
+    result = {}
+    for item in items:
+        order_id = str(((item.get("row") or {}).get("id")) or "").strip()
+        if not order_id:
+            raise ValueError(f"empty {label} order ID")
+        if order_id in result:
+            raise ValueError(f"duplicate {label} order ID: {order_id!r}")
+        result[order_id] = item
+    return result
+
+
+def _number(value: object) -> float:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _usage_objects(item: dict):
+    roots = []
+    root_ids = set()
+    if isinstance(item.get("_raw"), dict):
+        roots.append(item["_raw"])
+        root_ids.add(id(item["_raw"]))
+    row_raw = (item.get("row") or {}).get("_raw")
+    if isinstance(row_raw, dict) and id(row_raw) not in root_ids:
+        roots.append(row_raw)
+
+    def visit(container: dict):
+        for key, value in container.items():
+            if key.endswith("_usage") and isinstance(value, dict):
+                stage = key.split("_usage", 1)[0]
+                yield value, container.get(f"{stage}_cached") is True
+            elif isinstance(value, dict):
+                yield from visit(value)
+
+    for root in roots:
+        yield from visit(root)
+
+
+def _account_attempt(item: dict, source: str) -> tuple[dict, dict]:
+    totals = {key: 0 for key in ("logical_input_tokens", "logical_cached_input_tokens",
+        "logical_output_tokens", "billed_input_tokens", "billed_cached_input_tokens",
+        "billed_output_tokens")}
+    for usage, stage_cached in _usage_objects(item):
+        prompt = int(_number(usage.get("prompt_tokens")))
+        details = usage.get("prompt_tokens_details") or {}
+        cached_input = min(prompt, int(_number(details.get("cached_tokens"))))
+        output = int(_number(usage.get("completion_tokens")))
+        totals["logical_input_tokens"] += prompt
+        totals["logical_cached_input_tokens"] += cached_input
+        totals["logical_output_tokens"] += output
+        if not stage_cached:
+            totals["billed_input_tokens"] += prompt - cached_input
+            totals["billed_cached_input_tokens"] += cached_input
+            totals["billed_output_tokens"] += output
+    row = item.get("row") or {}
+    trace = {"source": source, "order_id": str(row.get("id") or "").strip(),
+             "elapsed_seconds": _number(row.get("elapsed_sec")), "item": item, **totals}
+    return trace, totals
+
+
+def _validate_final(item: dict) -> tuple[bool, str]:
+    row = item.get("row") or {}
+    manual = parse_manual_flag(row.get("manual_flag"))
+    code = str(row.get("manual_reason_code") or "").strip()
+    reason = str(row.get("manual_reason") or row.get("manual_reason_cn") or "").strip()
+    if not manual and (code or reason):
+        raise ValueError("manual_flag false contradicts final reason")
+    if manual and not code:
+        raise ValueError("manual_flag true requires final primary reason code")
+    return manual, code
+
+
+def merge_attempts(first_items: list[dict], retry_items: list[dict],
+                   retry_ids: set[str] | None = None) -> tuple[list[dict], dict]:
+    first = _indexed(first_items, "first-run")
+    retries = _indexed(retry_items, "retry")
+    failures = {order_id for order_id, item in first.items() if network_failure(item)}
+    retry_item_ids = set(retries)
+    if retry_ids is not None:
+        selected = {str(order_id).strip() for order_id in retry_ids}
+        if selected != retry_item_ids:
+            raise ValueError("retry selection mismatch")
+        if selected - failures:
+            raise ValueError("retry ID is not a first-run network failure")
+    if retry_item_ids - failures:
+        raise ValueError(f"unknown retry order ID: {sorted(retry_item_ids - failures)!r}")
+
+    accounting = {"attempts": [], "elapsed_seconds": 0.0,
+                  **{key: 0 for key in ("logical_input_tokens", "logical_cached_input_tokens",
+                     "logical_output_tokens", "billed_input_tokens", "billed_cached_input_tokens",
+                     "billed_output_tokens")}}
+    for source, items in (("first", first_items), ("retry", retry_items)):
+        for item in items:
+            trace, totals = _account_attempt(item, source)
+            accounting["attempts"].append(trace)
+            accounting["elapsed_seconds"] += trace["elapsed_seconds"]
+            for key, value in totals.items():
+                accounting[key] += value
+
+    merged = []
+    for order_id, first_item in first.items():
+        retry_item = retries.get(order_id)
+        final_item = retry_item or first_item
+        manual, code = _validate_final(final_item)
+        merged.append({"row": final_item.get("row") or {}, "reason_code": code,
+                       "reason": standard_reason(code), "manual": manual,
+                       "final_source": "retry" if retry_item else "first",
+                       "first_attempt": first_item, "retry_attempt": retry_item})
+    return merged, accounting
+
+
+def _rate(numerator: int, denominator: int) -> dict:
+    return {"numerator": numerator, "denominator": denominator,
+            "rate": numerator / denominator if denominator else None}
+
+
+def build_summary(rows: list[dict], accounting: dict, prices: dict | None = None) -> dict:
+    failed_denominator = failed_numerator = passed_denominator = passed_numerator = 0
+    manual_total = 0
+    for item in rows:
+        row = item.get("row") or {}
+        manual = bool(item.get("manual"))
+        manual_total += int(manual)
+        status = str(row.get("source_flow_status") or "").strip()
+        if status == "\u672a\u901a\u8fc7":
+            failed_denominator += 1
+            failed_numerator += int(manual)
+        elif status == "\u5df2\u901a\u8fc7":
+            passed_denominator += 1
+            passed_numerator += int(manual)
+
+    effective_hours = _number(accounting.get("elapsed_seconds")) / 3600
+    sample_count = len(rows)
+    human_rate = 550 / 7.5
+    human_hours = sample_count / human_rate
+    model_rate = sample_count / effective_hours if effective_hours else None
+    multiple = model_rate / human_rate if model_rate is not None else None
+    required = ("input_per_million", "cached_input_per_million", "output_per_million")
+    configured = prices is not None and all(isinstance(prices.get(key), (int, float))
+        and not isinstance(prices.get(key), bool) for key in required)
+    cost = "\u5f85\u914d\u7f6e"
+    if configured:
+        cost = (accounting.get("billed_input_tokens", 0) * prices["input_per_million"]
+                + accounting.get("billed_cached_input_tokens", 0) * prices["cached_input_per_million"]
+                + accounting.get("billed_output_tokens", 0) * prices["output_per_million"]) / 1_000_000
+    return {"sample_count": sample_count, "manual_total": manual_total,
+            "automatic_pass_total": sample_count - manual_total,
+            "failed_interception": _rate(failed_numerator, failed_denominator),
+            "passed_false_positive": _rate(passed_numerator, passed_denominator),
+            "billed_input_tokens": accounting.get("billed_input_tokens", 0),
+            "billed_cached_input_tokens": accounting.get("billed_cached_input_tokens", 0),
+            "billed_output_tokens": accounting.get("billed_output_tokens", 0),
+            "estimated_cost": cost, "effective_hours": effective_hours,
+            "human_orders_per_hour": human_rate, "human_estimated_hours": human_hours,
+            "model_orders_per_hour": model_rate, "efficiency_multiple": multiple,
+            "efficiency_improvement": multiple - 1 if multiple is not None else None,
+            "saved_human_hours": human_hours - effective_hours}
+
+
 def standard_reason(code: str) -> str:
     """Return the approved business wording for a primary reason code."""
     if not code:

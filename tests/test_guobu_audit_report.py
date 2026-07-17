@@ -1,6 +1,13 @@
 import pytest
 
-from tools.guobu_audit_report import parse_manual_flag, sn_display, standard_reason
+from tools.guobu_audit_report import (
+    build_summary,
+    merge_attempts,
+    network_failure,
+    parse_manual_flag,
+    sn_display,
+    standard_reason,
+)
 
 
 REASONS = {
@@ -99,6 +106,157 @@ def test_sn_display_does_not_mutate_sn_match_or_apply_visual_equivalence():
     row = {"sn_match": False, "system_sn": "O123", "observed_sn": "0123"}
     assert sn_display(row) == ("否", "第1位不同：系统O，模型0")
     assert row["sn_match"] is False
+
+
+def audit_item(order_id="1", *, flag=False, code="", reason="", status="\u5df2\u901a\u8fc7", elapsed=1.0, raw=None, error=""):
+    item = {"row": {"id": order_id, "manual_flag": flag, "manual_reason_code": code,
+                    "manual_reason": reason, "source_flow_status": status,
+                    "elapsed_sec": elapsed, "_raw": raw or {}}}
+    if error:
+        item["_error"] = error
+    return item
+
+
+@pytest.mark.parametrize("order_id", ["", None])
+def test_empty_first_id_fails_closed(order_id):
+    with pytest.raises(ValueError, match="first-run order ID"):
+        merge_attempts([audit_item(order_id)], [])
+
+
+def test_duplicate_first_id_fails_closed():
+    with pytest.raises(ValueError, match="duplicate first-run order ID"):
+        merge_attempts([audit_item("1"), audit_item("1")], [])
+
+
+def test_duplicate_retry_id_fails_closed():
+    first = audit_item("1", error="TimeoutError")
+    with pytest.raises(ValueError, match="duplicate retry order ID"):
+        merge_attempts([first], [audit_item("1"), audit_item("1")])
+
+
+def test_unknown_retry_id_fails_closed():
+    with pytest.raises(ValueError, match="unknown retry order ID"):
+        merge_attempts([audit_item("1")], [audit_item("2")])
+
+
+def test_network_failure_reads_item_error_and_row_fields_case_insensitively():
+    assert network_failure(audit_item(error="ModelConnectionError: unavailable"))
+    assert network_failure(audit_item(reason="request TIMED OUT"))
+    assert network_failure({"row": {"manual_reason_cn": "Connect Failed"}})
+    assert network_failure({"row": {"strategy": "HTTP ERROR 500 fallback"}})
+    assert not network_failure(audit_item(reason="SN mismatch"))
+
+
+def test_retry_selection_must_match_items_and_detected_failures():
+    first = [audit_item("1", error="TimeoutError"), audit_item("2", error="WinError 10060")]
+    with pytest.raises(ValueError, match="retry selection mismatch"):
+        merge_attempts(first, [audit_item("1")], retry_ids={"1", "2"})
+    with pytest.raises(ValueError, match="not a first-run network failure"):
+        merge_attempts([audit_item("1")], [audit_item("1")], retry_ids={"1"})
+
+
+@pytest.mark.parametrize("item", [
+    audit_item(flag="maybe"),
+    audit_item(flag=False, code="SN_MISMATCH"),
+    audit_item(flag=False, reason="business failure"),
+    audit_item(flag=True, code=""),
+])
+def test_final_flag_and_primary_reason_contradictions_fail_closed(item):
+    with pytest.raises(ValueError):
+        merge_attempts([item], [])
+
+
+def test_retry_replaces_legal_failure_and_retains_both_attempts():
+    first = audit_item("1", flag=True, code="MODEL_UNCERTAIN", error="TimeoutError", elapsed=30)
+    retry = audit_item("1", flag=False, elapsed=2)
+    rows, accounting = merge_attempts([first], [retry])
+    assert rows[0]["row"]["manual_flag"] is False
+    assert rows[0]["first_attempt"] is first
+    assert rows[0]["retry_attempt"] is retry
+    assert [attempt["source"] for attempt in accounting["attempts"]] == ["first", "retry"]
+    assert accounting["elapsed_seconds"] == 32
+
+
+def test_only_final_primary_reason_code_is_exposed():
+    item = audit_item(flag=True, code="SN_MISMATCH", reason="mentions IMAGE_MISSING")
+    item["row"]["manual_reason_codes"] = ["SN_MISMATCH", "IMAGE_MISSING"]
+    rows, _ = merge_attempts([item], [])
+    assert rows[0]["reason_code"] == "SN_MISMATCH"
+    assert rows[0]["reason"] == standard_reason("SN_MISMATCH")
+
+
+def test_cached_stage_usage_is_logical_but_not_billed_and_keys_are_unique():
+    usage = {"prompt_tokens": 100, "completion_tokens": 20}
+    raw = {"sn_usage": usage, "sn_cached": True,
+           "review_usage": {"prompt_tokens": 50, "completion_tokens": 10},
+           "review_cached": False, "review_usage_alias": usage}
+    _, accounting = merge_attempts([audit_item(raw=raw)], [])
+    assert accounting["logical_input_tokens"] == 150
+    assert accounting["logical_output_tokens"] == 30
+    assert accounting["billed_input_tokens"] == 50
+    assert accounting["billed_output_tokens"] == 10
+
+
+def test_cached_input_tokens_are_separated_and_priced_at_cached_rate():
+    raw = {"compliance_usage": {"prompt_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 40}, "completion_tokens": 10},
+           "compliance_cached": False}
+    rows, accounting = merge_attempts([audit_item(raw=raw)], [])
+    summary = build_summary(rows, accounting, {"input_per_million": 2,
+        "cached_input_per_million": 1, "output_per_million": 3})
+    assert accounting["billed_input_tokens"] == 60
+    assert accounting["billed_cached_input_tokens"] == 40
+    assert summary["estimated_cost"] == pytest.approx(0.00019)
+    assert build_summary(rows, accounting)["estimated_cost"] == "\u5f85\u914d\u7f6e"
+
+
+def test_same_raw_usage_root_is_not_counted_twice():
+    raw = {"sn_usage": {"prompt_tokens": 10, "completion_tokens": 2}, "sn_cached": False}
+    item = audit_item(raw=raw)
+    item["_raw"] = raw
+    _, accounting = merge_attempts([item], [])
+    assert accounting["billed_input_tokens"] == 10
+    assert accounting["billed_output_tokens"] == 2
+
+
+def test_summary_uses_exact_trimmed_statuses_and_excludes_unknowns():
+    rows, accounting = merge_attempts([
+        audit_item("1", flag=True, code="SN_MISMATCH", status="  \u672a\u901a\u8fc7 "),
+        audit_item("2", status="\u5df2\u901a\u8fc7"),
+        audit_item("3", flag=True, code="SN_MISMATCH", status="pending"),
+        audit_item("4", flag=True, code="SN_MISMATCH", status="\u5df2\u901a\u8fc7-extra"),
+    ], [])
+    summary = build_summary(rows, accounting)
+    assert summary["failed_interception"] == {"numerator": 1, "denominator": 1, "rate": 1.0}
+    assert summary["passed_false_positive"] == {"numerator": 0, "denominator": 1, "rate": 0.0}
+
+
+def test_zero_denominators_have_no_rate():
+    rows, accounting = merge_attempts([audit_item(status="reviewing")], [])
+    summary = build_summary(rows, accounting)
+    assert summary["failed_interception"] == {"numerator": 0, "denominator": 0, "rate": None}
+    assert summary["passed_false_positive"] == {"numerator": 0, "denominator": 0, "rate": None}
+
+
+def test_efficiency_uses_baseline_and_accumulated_elapsed():
+    rows, accounting = merge_attempts([audit_item("1", elapsed=1800), audit_item("2", elapsed=1800)], [])
+    summary = build_summary(rows, accounting)
+    baseline = 550 / 7.5
+    assert summary["effective_hours"] == 1
+    assert summary["human_orders_per_hour"] == pytest.approx(baseline)
+    assert summary["human_estimated_hours"] == pytest.approx(2 / baseline)
+    assert summary["model_orders_per_hour"] == 2
+    assert summary["efficiency_multiple"] == pytest.approx(2 / baseline)
+    assert summary["efficiency_improvement"] == pytest.approx(2 / baseline - 1)
+    assert summary["saved_human_hours"] == pytest.approx(2 / baseline - 1)
+
+
+def test_zero_elapsed_avoids_division_by_zero():
+    rows, accounting = merge_attempts([audit_item(elapsed=0)], [])
+    summary = build_summary(rows, accounting)
+    assert summary["model_orders_per_hour"] is None
+    assert summary["efficiency_multiple"] is None
+    assert summary["efficiency_improvement"] is None
 
 
 def test_sn_display_transposition_names_the_raw_character_pairs():
