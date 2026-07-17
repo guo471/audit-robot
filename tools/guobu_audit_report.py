@@ -77,8 +77,13 @@ def _usage_objects(item: dict):
             elif isinstance(value, dict):
                 yield from visit(value)
 
+    seen_usage_ids = set()
     for root in roots:
-        yield from visit(root)
+        for usage, cached in visit(root):
+            usage_id = id(usage)
+            if usage_id not in seen_usage_ids:
+                seen_usage_ids.add(usage_id)
+                yield usage, cached
 
 
 def _account_attempt(item: dict, source: str) -> tuple[dict, dict]:
@@ -90,7 +95,7 @@ def _account_attempt(item: dict, source: str) -> tuple[dict, dict]:
         details = usage.get("prompt_tokens_details") or {}
         cached_input = min(prompt, int(_number(details.get("cached_tokens"))))
         output = int(_number(usage.get("completion_tokens")))
-        totals["logical_input_tokens"] += prompt
+        totals["logical_input_tokens"] += prompt - cached_input
         totals["logical_cached_input_tokens"] += cached_input
         totals["logical_output_tokens"] += output
         if not stage_cached:
@@ -115,10 +120,17 @@ def _validate_final(item: dict) -> tuple[bool, str]:
     return manual, code
 
 
+def _validate_flag_syntax(items: list[dict]) -> None:
+    for item in items:
+        parse_manual_flag((item.get("row") or {}).get("manual_flag"))
+
+
 def merge_attempts(first_items: list[dict], retry_items: list[dict],
                    retry_ids: set[str] | None = None) -> tuple[list[dict], dict]:
     first = _indexed(first_items, "first-run")
     retries = _indexed(retry_items, "retry")
+    _validate_flag_syntax(first_items)
+    _validate_flag_syntax(retry_items)
     failures = {order_id for order_id, item in first.items() if network_failure(item)}
     retry_item_ids = set(retries)
     if retry_ids is not None:

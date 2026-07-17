@@ -177,6 +177,13 @@ def test_retry_replaces_legal_failure_and_retains_both_attempts():
     assert accounting["elapsed_seconds"] == 32
 
 
+def test_valid_retry_cannot_bypass_malformed_first_attempt_flag():
+    first = audit_item("1", flag="invalid", error="TimeoutError")
+    retry = audit_item("1", flag=False)
+    with pytest.raises(ValueError, match="invalid manual_flag"):
+        merge_attempts([first], [retry])
+
+
 def test_only_final_primary_reason_code_is_exposed():
     item = audit_item(flag=True, code="SN_MISMATCH", reason="mentions IMAGE_MISSING")
     item["row"]["manual_reason_codes"] = ["SN_MISMATCH", "IMAGE_MISSING"]
@@ -206,6 +213,8 @@ def test_cached_input_tokens_are_separated_and_priced_at_cached_rate():
         "cached_input_per_million": 1, "output_per_million": 3})
     assert accounting["billed_input_tokens"] == 60
     assert accounting["billed_cached_input_tokens"] == 40
+    assert accounting["logical_input_tokens"] == 60
+    assert accounting["logical_cached_input_tokens"] == 40
     assert summary["estimated_cost"] == pytest.approx(0.00019)
     assert build_summary(rows, accounting)["estimated_cost"] == "\u5f85\u914d\u7f6e"
 
@@ -217,6 +226,29 @@ def test_same_raw_usage_root_is_not_counted_twice():
     _, accounting = merge_attempts([item], [])
     assert accounting["billed_input_tokens"] == 10
     assert accounting["billed_output_tokens"] == 2
+
+
+def test_same_usage_object_across_distinct_raw_roots_is_counted_once():
+    usage = {"prompt_tokens": 10, "completion_tokens": 2}
+    item = audit_item(raw={"sn_usage": usage, "sn_cached": False})
+    item["_raw"] = {"review_usage": usage, "review_cached": False}
+    _, accounting = merge_attempts([item], [])
+    assert accounting["logical_input_tokens"] == 10
+    assert accounting["logical_output_tokens"] == 2
+    assert accounting["billed_input_tokens"] == 10
+    assert accounting["billed_output_tokens"] == 2
+
+
+def test_equal_but_distinct_usage_objects_are_each_counted():
+    item = audit_item(raw={"sn_usage": {"prompt_tokens": 10, "completion_tokens": 2},
+                           "sn_cached": False})
+    item["_raw"] = {"review_usage": {"prompt_tokens": 10, "completion_tokens": 2},
+                    "review_cached": False}
+    _, accounting = merge_attempts([item], [])
+    assert accounting["logical_input_tokens"] == 20
+    assert accounting["logical_output_tokens"] == 4
+    assert accounting["billed_input_tokens"] == 20
+    assert accounting["billed_output_tokens"] == 4
 
 
 def test_summary_uses_exact_trimmed_statuses_and_excludes_unknowns():
