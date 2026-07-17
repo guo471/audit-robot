@@ -1815,7 +1815,9 @@ def _trustworthy_sn_candidates(
     return sorted(trustworthy, key=lambda item: (item[0], item[1], item[2].upper()))
 
 
-def _top_level_observed_group(decision: dict[str, Any]) -> tuple[str, str, bool]:
+def _top_level_observed_group(
+    decision: dict[str, Any],
+) -> tuple[str, str, bool, tuple[tuple[str, str], ...]]:
     observed_values = [
         decision.get(key)
         for key in ("observed_sn", "normalized_observed_sn", "read_sn", "normalized_read_sn")
@@ -1828,16 +1830,35 @@ def _top_level_observed_group(decision: dict[str, Any]) -> tuple[str, str, bool]
         or normalize_sn(value) in order_imeis
         for value in observed_values
     ):
-        return "", "", True
+        return "", "", True, ()
+
+    unique_readings: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for value in observed_values:
+        normalized = normalize_sn(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_readings.append((str(value), normalized))
+
+    if not unique_readings:
+        return "", "", False, ()
     observed_source = _candidate_observed_sn(decision)
-    return observed_source, normalize_sn(observed_source), False
+    return observed_source, normalize_sn(observed_source), False, tuple(unique_readings)
 
 
 def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
     system_sn = normalize_sn(decision.get("system_sn") or decision.get("normalized_system_sn") or "")
-    observed_source, observed_sn, _discarded_non_sn = _top_level_observed_group(decision)
+    observed_source, observed_sn, _discarded_non_sn, top_level_readings = _top_level_observed_group(decision)
     candidates = _trustworthy_sn_candidates(decision)
     unique_candidate_values = {candidate_sn for _rank, candidate_sn, _raw in candidates}
+
+    if len(top_level_readings) >= 2:
+        conflict_source, conflict_sn = next(
+            (reading for reading in top_level_readings if reading[1] != system_sn),
+            top_level_readings[0],
+        )
+        return "mismatch", conflict_source, conflict_sn
 
     if observed_sn:
         distinct_candidates = [candidate for candidate in candidates if candidate[1] != observed_sn]
@@ -1884,7 +1905,12 @@ def _conflicting_observed_sn(decision: dict[str, Any]) -> str:
     if not system_sn:
         return ""
 
-    _observed_source, observed_sn, _discarded_non_sn = _top_level_observed_group(decision)
+    _observed_source, observed_sn, _discarded_non_sn, top_level_readings = _top_level_observed_group(decision)
+    if len(top_level_readings) >= 2:
+        return next(
+            (reading for _source, reading in top_level_readings if reading != system_sn),
+            top_level_readings[0][1],
+        )
     if observed_sn and observed_sn != system_sn:
         return observed_sn
     for _rank, candidate_sn, _raw in _trustworthy_sn_candidates(decision):

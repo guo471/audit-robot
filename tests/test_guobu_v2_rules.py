@@ -759,6 +759,50 @@ def test_compact_top_level_identity_group_is_discarded_without_order_imei_contex
         assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
 
 
+def test_equivalent_top_level_observed_fields_normalize_to_one_reading():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "observed_sn": "ABC-123",
+            "normalized_observed_sn": "ABC123",
+            "sn_candidates": [],
+        },
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["normalized_observed_sn"] == "ABC123"
+
+
+def test_conflicting_top_level_observed_fields_cannot_auto_pass():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "SYSTEM123"},
+        {
+            "observed_sn": "SYSTEM123",
+            "normalized_observed_sn": "REAL999",
+            "sn_candidates": [],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "REAL999"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+
+
+def test_conflicting_top_level_group_is_not_hidden_by_matching_package():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "SYSTEM123"},
+        {
+            "observed_sn": "SYSTEM123",
+            "normalized_observed_sn": "REAL999",
+            "sn_candidates": [_sn_candidate("SYSTEM123")],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "REAL999"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+
+
 def test_imei_screen_reading_falls_back_to_matching_package_sn():
     fields = {
         "system_sn": "HXL7NVMWGM",
