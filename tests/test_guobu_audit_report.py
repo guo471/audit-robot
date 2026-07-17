@@ -351,7 +351,7 @@ def test_workbook_zero_denominator_and_unconfigured_cost(tmp_path):
     rows, accounting = merge_attempts([audit_item(status="reviewing")], [])
     summary = build_summary(rows, accounting)
     xlsx = tmp_path / "zero.xlsx"
-    write_report(rows, summary, {"summary": summary, "accounting": accounting},
+    write_report(rows, summary, {"summary": summary, "accounting": accounting, "pricing": None},
                  xlsx, tmp_path / "zero.json")
     sheet = load_workbook(xlsx, data_only=False)["汇总表"]
     metrics = {sheet.cell(row, 1).value: sheet.cell(row, 2).value
@@ -401,3 +401,82 @@ def test_cli_regenerates_from_jsonl_without_network_access(tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert xlsx.exists() and output_json.exists()
     assert load_workbook(xlsx)["明细表"]["A2"].value == "9001"
+
+
+@pytest.mark.parametrize("bad_item", [
+    audit_item("1", flag=True, code=""),
+    audit_item("1", flag=False, code="SN_MISMATCH"),
+])
+def test_write_report_revalidates_final_business_decision(bad_item, tmp_path):
+    row = bad_item["row"]
+    merged = {"row": row, "manual": bool(row["manual_flag"]),
+              "reason_code": str(row["manual_reason_code"]), "reason": "caller supplied",
+              "final_source": "first"}
+    _, _, audit_json = report_fixture()
+    with pytest.raises(ValueError):
+        write_report([merged], audit_json["summary"], audit_json,
+                     tmp_path / "bad.xlsx", tmp_path / "bad.json")
+
+
+def test_write_report_derives_reason_from_primary_code_not_caller(tmp_path):
+    rows, summary, audit_json = report_fixture()
+    rows[0]["reason"] = "=untrusted caller reason"
+    xlsx = tmp_path / "derived.xlsx"
+    write_report(rows, summary, audit_json, xlsx, tmp_path / "derived.json")
+    assert load_workbook(xlsx)["明细表"]["D2"].value == standard_reason("SN_MISMATCH")
+
+
+@pytest.mark.parametrize("audit_json", [
+    {},
+    {"accounting": {}, "pricing": None},
+    {"accounting": {"attempts": [{}]}, "pricing": None},
+    {"accounting": {"attempts": []}, "pricing": {"input_per_million": "bad"}},
+])
+def test_write_report_requires_validated_audit_trace(audit_json, tmp_path):
+    rows, summary, _ = report_fixture()
+    with pytest.raises(ValueError, match="audit"):
+        write_report(rows, summary, audit_json, tmp_path / "audit.xlsx", tmp_path / "audit.json")
+
+
+def test_write_report_requires_explicit_pricing_assumption(tmp_path):
+    rows, summary, audit_json = report_fixture()
+    del audit_json["pricing"]
+    with pytest.raises(ValueError, match="audit pricing"):
+        write_report(rows, summary, audit_json, tmp_path / "pricing.xlsx", tmp_path / "pricing.json")
+
+
+def test_write_report_replaces_stale_payload_summary_and_rows(tmp_path):
+    rows, summary, audit_json = report_fixture()
+    audit_json["summary"] = {"stale": True}
+    audit_json["rows"] = [{"stale": True}]
+    write_report(rows, summary, audit_json, tmp_path / "actual.xlsx", tmp_path / "actual.json")
+    payload = json.loads((tmp_path / "actual.json").read_text(encoding="utf-8"))
+    assert payload["summary"] == summary
+    assert payload["rows"][0]["reason_code"] == "SN_MISMATCH"
+
+
+def test_write_report_rejects_same_resolved_output_path(tmp_path):
+    rows, summary, audit_json = report_fixture()
+    output = tmp_path / "same"
+    with pytest.raises(ValueError, match="distinct"):
+        write_report(rows, summary, audit_json, output, output)
+
+
+@pytest.mark.parametrize("source_lines", [
+    ["not-json"],
+    [json.dumps(audit_item("1")), json.dumps(audit_item("1"))],
+])
+def test_cli_overwrite_preserves_old_outputs_when_source_invalid(source_lines, tmp_path):
+    first = tmp_path / "invalid.jsonl"
+    first.write_text("\n".join(source_lines) + "\n", encoding="utf-8")
+    xlsx, output_json = tmp_path / "old.xlsx", tmp_path / "old.json"
+    xlsx.write_bytes(b"known-good-xlsx")
+    output_json.write_text("known-good-json", encoding="utf-8")
+    script = str((__import__("pathlib").Path(__file__).parents[1] / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        "--output-xlsx", str(xlsx), "--output-json", str(output_json), "--overwrite"],
+        text=True, capture_output=True, timeout=30)
+    assert completed.returncode != 0
+    assert xlsx.read_bytes() == b"known-good-xlsx"
+    assert output_json.read_text(encoding="utf-8") == "known-good-json"
+    assert not list(tmp_path.glob("*.tmp"))

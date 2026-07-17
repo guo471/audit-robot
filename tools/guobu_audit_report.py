@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import uuid
 from copy import copy
 from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
@@ -330,13 +333,44 @@ def _validate_report_rows(rows: list[dict]) -> None:
         row = item["row"]
         order_id = str(row.get("id") or "").strip()
         if (not order_id or type(item.get("manual")) is not bool
-                or not isinstance(item.get("reason"), str)
                 or not isinstance(item.get("reason_code"), str)
                 or item.get("final_source") not in {"first", "retry"}):
             raise ValueError("malformed merged row")
+        manual, code = _validate_final({"row": row})
+        if item["manual"] is not manual or item["reason_code"].strip() != code:
+            raise ValueError("malformed merged row business decision")
         if order_id in seen:
             raise ValueError(f"duplicate display order ID: {order_id!r}")
         seen.add(order_id)
+
+
+def _validate_audit_json(audit_json: dict) -> None:
+    if not isinstance(audit_json, dict):
+        raise ValueError("audit JSON must be an object")
+    accounting = audit_json.get("accounting")
+    required_totals = ("elapsed_seconds", "logical_input_tokens", "logical_cached_input_tokens",
+                       "logical_output_tokens", "billed_input_tokens",
+                       "billed_cached_input_tokens", "billed_output_tokens")
+    if (not isinstance(accounting, dict) or not isinstance(accounting.get("attempts"), list)
+            or not accounting["attempts"]
+            or any(not isinstance(accounting.get(key), (int, float)) for key in required_totals)):
+        raise ValueError("audit accounting and attempt trace are required")
+    attempt_keys = {"source", "order_id", "elapsed_seconds", "item"}
+    for attempt in accounting["attempts"]:
+        if (not isinstance(attempt, dict) or not attempt_keys <= attempt.keys()
+                or attempt["source"] not in {"first", "retry"}
+                or not str(attempt["order_id"]).strip()
+                or not isinstance(attempt["elapsed_seconds"], (int, float))
+                or not isinstance(attempt["item"], dict)):
+            raise ValueError("audit attempt trace is malformed")
+    if "pricing" not in audit_json:
+        raise ValueError("audit pricing assumption is required")
+    pricing = audit_json["pricing"]
+    price_keys = ("input_per_million", "cached_input_per_million", "output_per_million")
+    if pricing is not None and (not isinstance(pricing, dict)
+            or any(not isinstance(pricing.get(key), (int, float))
+                   or isinstance(pricing.get(key), bool) or pricing[key] < 0 for key in price_keys)):
+        raise ValueError("audit pricing is malformed")
 
 
 def _style_header(sheet) -> None:
@@ -384,7 +418,10 @@ def write_report(rows: list[dict], summary: dict, audit_json: dict,
                  xlsx_path: str | Path, json_path: str | Path) -> None:
     """Write the compact business workbook and its traceable UTF-8 audit JSON."""
     _validate_report_rows(rows)
+    _validate_audit_json(audit_json)
     xlsx_path, json_path = Path(xlsx_path), Path(json_path)
+    if xlsx_path.resolve() == json_path.resolve():
+        raise ValueError("XLSX and JSON output paths must be distinct")
     if xlsx_path.exists() or json_path.exists():
         raise FileExistsError("report output already exists")
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
@@ -398,7 +435,7 @@ def write_report(rows: list[dict], summary: dict, audit_json: dict,
         row = item["row"]
         status, difference = sn_display(row)
         detail.append([str(row["id"]), "是" if item["manual"] else "否",
-                       _safe_text(row.get("source_flow_status")), _safe_text(item["reason"]),
+                       _safe_text(row.get("source_flow_status")), standard_reason(item["reason_code"]),
                        _safe_text(row.get("system_sn")), _safe_text(row.get("observed_sn")),
                        status, _safe_text(difference)])
         for column in (1, 3, 4, 5, 6, 8):
@@ -427,8 +464,8 @@ def write_report(rows: list[dict], summary: dict, audit_json: dict,
                 cell.font = font
     workbook.save(xlsx_path)
     payload = dict(audit_json)
-    payload.setdefault("summary", summary)
-    payload.setdefault("rows", rows)
+    payload["summary"] = summary
+    payload["rows"] = rows
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -450,6 +487,33 @@ def _retry_ids(path: str | None) -> set[str] | None:
     return {str(item).strip() for item in value}
 
 
+def _replace_outputs(temp_outputs: list[Path], outputs: list[Path]) -> None:
+    backups: list[Path | None] = []
+    replaced = []
+    try:
+        for output in outputs:
+            if output.exists():
+                backup = output.with_name(f".{output.name}.{uuid.uuid4().hex}.bak")
+                shutil.copy2(output, backup)
+                backups.append(backup)
+            else:
+                backups.append(None)
+        for temp, output in zip(temp_outputs, outputs):
+            os.replace(temp, output)
+            replaced.append(output)
+    except Exception:
+        for output, backup in zip(outputs, backups):
+            if backup is not None and backup.exists():
+                os.replace(backup, output)
+            elif output in replaced and output.exists():
+                output.unlink()
+        raise
+    finally:
+        for path in [*temp_outputs, *(backup for backup in backups if backup is not None)]:
+            if path.exists():
+                path.unlink()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate a Guobu audit XLSX and trace JSON")
     parser.add_argument("--first-jsonl", required=True)
@@ -463,10 +527,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
     outputs = [Path(args.output_xlsx), Path(args.output_json)]
-    if args.overwrite:
-        for output in outputs:
-            if output.exists():
-                output.unlink()
+    if not args.overwrite and any(output.exists() for output in outputs):
+        raise FileExistsError("report output already exists")
     prices = None
     supplied = [args.input_price_per_million, args.cached_input_price_per_million,
                 args.output_price_per_million]
@@ -481,7 +543,21 @@ def main(argv: list[str] | None = None) -> int:
     summary = build_summary(rows, accounting, prices)
     audit_json = {"summary": summary, "accounting": accounting, "pricing": prices,
                   "rows": rows}
-    write_report(rows, summary, audit_json, outputs[0], outputs[1])
+    if args.overwrite:
+        token = uuid.uuid4().hex
+        temp_outputs = [outputs[0].with_name(f".{outputs[0].stem}.{token}.tmp.xlsx"),
+                        outputs[1].with_name(f".{outputs[1].stem}.{token}.tmp.json")]
+        try:
+            write_report(rows, summary, audit_json, temp_outputs[0], temp_outputs[1])
+            load_workbook(temp_outputs[0], read_only=True).close()
+            json.loads(temp_outputs[1].read_text(encoding="utf-8"))
+            _replace_outputs(temp_outputs, outputs)
+        finally:
+            for temp in temp_outputs:
+                if temp.exists():
+                    temp.unlink()
+    else:
+        write_report(rows, summary, audit_json, outputs[0], outputs[1])
     return 0
 
 
