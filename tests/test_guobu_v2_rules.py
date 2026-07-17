@@ -691,23 +691,29 @@ def _sn_candidate(
 def test_formal_order_imei_screen_reading_is_discarded_for_package_sn_mismatch():
     fields = {
         "system_sn": "HXL7NVMWGM",
-        "imei1": "867530900000001",
-        "imei2": "867530900000002",
+        "imei1": "355516408057368",
+        "imei2": "355516407888847",
     }
     normalized = v2._normalize_sn_result(
         fields,
         {
             "sn_match": True,
-            "observed_sn": "867530900000001",
-            "normalized_observed_sn": "867530900000001",
+            "observed_sn": "IMEI1355516408057368IMEI2355516407888847",
+            "normalized_observed_sn": "IMEI1355516408057368IMEI2355516407888847",
             "sn_candidates": [
                 _sn_candidate(
-                    "IMEI1: 867530900000001 IMEI2: 867530900000002",
+                    "IMEI1355516408057368IMEI2355516407888847",
                     source="DEVICE_SCREEN",
-                    raw_text="IMEI1: 867530900000001 IMEI2: 867530900000002",
+                    raw_text="IMEI1: 355516408057368 IMEI2: 355516407888847",
                     matches_system_sn=True,
                 ),
-                _sn_candidate("HX27MVN9M", matches_system_sn=False),
+                _sn_candidate(
+                    "HX27MVN9M",
+                    source="PACKAGE_LABEL",
+                    field_type="SN",
+                    raw_text="HX27MVN9M",
+                    matches_system_sn=False,
+                ),
             ],
         },
     )
@@ -716,7 +722,41 @@ def test_formal_order_imei_screen_reading_is_discarded_for_package_sn_mismatch()
     assert normalized["observed_sn"] == "HX27MVN9M"
     assert normalized["normalized_observed_sn"] == "HX27MVN9M"
     assert normalized["manual_reason_code"] == "SN_MISMATCH"
-    assert "867530900000001" not in normalized["observed_sn"]
+    assert "355516408057368" not in normalized["observed_sn"]
+
+
+@pytest.mark.parametrize(
+    "compact_identity",
+    [
+        "IMEI1355516408057368IMEI2355516407888847",
+        "EID89049032000000000000000000000001",
+    ],
+)
+@pytest.mark.parametrize("with_package_fallback", [True, False])
+def test_compact_top_level_identity_group_is_discarded_without_order_imei_context(
+    compact_identity, with_package_fallback
+):
+    candidates = [_sn_candidate("ABC123", source="PACKAGE_LABEL")] if with_package_fallback else []
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123"},
+        {
+            "sn_match": True,
+            "observed_sn": compact_identity,
+            "normalized_observed_sn": compact_identity,
+            "sn_candidates": candidates,
+        },
+    )
+
+    if with_package_fallback:
+        assert normalized["sn_match"] is True
+        assert normalized["observed_sn"] == "ABC123"
+        assert normalized["normalized_observed_sn"] == "ABC123"
+        assert normalized["manual_reason_code"] == ""
+    else:
+        assert normalized["sn_match"] is False
+        assert normalized["observed_sn"] == ""
+        assert normalized["normalized_observed_sn"] == ""
+        assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
 
 
 def test_imei_screen_reading_falls_back_to_matching_package_sn():
@@ -931,26 +971,26 @@ def test_sn_binding_allows_separators_between_candidate_characters(
 def test_real_formal_order_keeps_package_mismatch_through_final_row():
     fields = {
         "system_sn": "HXL7NVMWGM",
-        "imei1": "867530900000001",
-        "imei2": "867530900000002",
+        "imei1": "355516408057368",
+        "imei2": "355516407888847",
     }
     model_result = {
         "sn_match": True,
-        "observed_sn": "867530900000001",
-        "normalized_observed_sn": "867530900000001",
+        "observed_sn": "IMEI1355516408057368IMEI2355516407888847",
+        "normalized_observed_sn": "IMEI1355516408057368IMEI2355516407888847",
         "sn_candidates": [
             _sn_candidate(
-                "IMEI1867530900000001IMEI2867530900000002",
+                "IMEI1355516408057368IMEI2355516407888847",
                 source="DEVICE_SCREEN",
                 field_type="SN",
-                raw_text="IMEI1: 867530900000001 IMEI2: 867530900000002",
+                raw_text="IMEI1: 355516408057368 IMEI2: 355516407888847",
             ),
             _sn_candidate(
                 "HX27MVN9M",
                 source="PACKAGE_LABEL",
                 field_type="SN",
-                raw_text="SN: HX27MVN9M IMEI: 867530900000001",
-                matches_system_sn=True,
+                raw_text="HX27MVN9M",
+                matches_system_sn=False,
             ),
         ],
     }

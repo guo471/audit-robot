@@ -1823,7 +1823,9 @@ def _top_level_observed_group(decision: dict[str, Any]) -> tuple[str, str, bool]
     ]
     order_imeis = _order_imeis(decision)
     if any(
-        _has_non_sn_label(value) or normalize_sn(value) in order_imeis
+        _has_non_sn_label(value)
+        or _has_normalized_identity_block(value)
+        or normalize_sn(value) in order_imeis
         for value in observed_values
     ):
         return "", "", True
