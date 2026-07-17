@@ -1,4 +1,9 @@
+import json
+import subprocess
+import sys
+
 import pytest
+from openpyxl import load_workbook
 
 from tools.guobu_audit_report import (
     build_summary,
@@ -7,6 +12,7 @@ from tools.guobu_audit_report import (
     parse_manual_flag,
     sn_display,
     standard_reason,
+    write_report,
 )
 
 
@@ -294,3 +300,104 @@ def test_zero_elapsed_avoids_division_by_zero():
 def test_sn_display_transposition_names_the_raw_character_pairs():
     row = {"sn_match": False, "system_sn": "12XY34", "observed_sn": "12YX34"}
     assert sn_display(row) == ("否", "字符顺序不同：系统XY，模型YX")
+
+
+def report_fixture(order_id="001234567890123456789", system_sn="00123", observed_sn="00124"):
+    item = audit_item(order_id, flag=True, code="SN_MISMATCH", reason="=external",
+                      status="未通过", elapsed=3600,
+                      raw={"review_usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+    item["row"].update(system_sn=system_sn, observed_sn=observed_sn, sn_match=False)
+    rows, accounting = merge_attempts([item], [])
+    prices = {"input_per_million": 2, "cached_input_per_million": 1,
+              "output_per_million": 3}
+    summary = build_summary(rows, accounting, prices)
+    return rows, summary, {"summary": summary, "accounting": accounting,
+                           "pricing": prices, "rows": rows}
+
+
+def test_workbook_has_exact_business_contract_and_safe_text(tmp_path):
+    rows, summary, audit_json = report_fixture()
+    xlsx, output_json = tmp_path / "report.xlsx", tmp_path / "report.json"
+    write_report(rows, summary, audit_json, xlsx, output_json)
+    wb = load_workbook(xlsx, data_only=False)
+    assert wb.sheetnames == ["明细表", "汇总表"]
+    detail = wb["明细表"]
+    assert [cell.value for cell in detail[1]] == [
+        "订单号", "是否转人工", "原始流程状态", "转人工原因",
+        "系统SN", "模型SN", "SN是否一致", "SN具体差别",
+    ]
+    assert detail.max_row == 2
+    assert [detail.cell(2, col).value for col in (1, 5, 6)] == [
+        "001234567890123456789", "00123", "00124"]
+    assert all(detail.cell(2, col).number_format == "@" for col in (1, 5, 6))
+    assert detail["D2"].data_type == "s" and not str(detail["D2"].value).startswith("=")
+    assert detail.freeze_panes == "A2"
+    assert detail.auto_filter.ref == detail.tables["明细表格"].ref
+    assert detail["D2"].alignment.wrap_text and detail["H2"].alignment.wrap_text
+    assert all(cell.font.name == "Arial" for sheet in wb for row in sheet for cell in row)
+    assert detail["A1"].font.bold and detail["A1"].font.color.rgb.endswith("FFFFFF")
+
+    sheet = wb["汇总表"]
+    metrics = {sheet.cell(row, 1).value: sheet.cell(row, 2)
+               for row in range(2, sheet.max_row + 1)}
+    assert metrics["未通过拦截率"].value.startswith("=IF(")
+    assert metrics["未通过拦截率"].number_format == "0.0%"
+    assert metrics["有效审核总用时（小时）"].number_format == "0.00"
+    assert metrics["效率倍数"].number_format == "0.0x"
+    assert "累计每订单处理时长" in metrics["口径说明"].value
+
+
+def test_workbook_zero_denominator_and_unconfigured_cost(tmp_path):
+    rows, accounting = merge_attempts([audit_item(status="reviewing")], [])
+    summary = build_summary(rows, accounting)
+    xlsx = tmp_path / "zero.xlsx"
+    write_report(rows, summary, {"summary": summary, "accounting": accounting},
+                 xlsx, tmp_path / "zero.json")
+    sheet = load_workbook(xlsx, data_only=False)["汇总表"]
+    metrics = {sheet.cell(row, 1).value: sheet.cell(row, 2).value
+               for row in range(2, sheet.max_row + 1)}
+    assert 'IF(B' in metrics["未通过拦截率"] and '"无可计算样本"' in metrics["未通过拦截率"]
+    assert metrics["Token预计成本"] == "待配置"
+
+
+@pytest.mark.parametrize("prefix", ["=", "+", "-", "@"])
+def test_formula_injection_strings_round_trip_as_text(prefix, tmp_path):
+    rows, summary, audit_json = report_fixture(system_sn=prefix + "SN", observed_sn=prefix + "MODEL")
+    rows[0]["row"]["source_flow_status"] = prefix + "STATUS"
+    xlsx = tmp_path / f"safe-{ord(prefix)}.xlsx"
+    write_report(rows, summary, audit_json, xlsx, tmp_path / f"safe-{ord(prefix)}.json")
+    detail = load_workbook(xlsx, data_only=False)["明细表"]
+    assert [(detail.cell(2, col).value, detail.cell(2, col).data_type) for col in (3, 5, 6)] == [
+        (prefix + "STATUS", "s"), (prefix + "SN", "s"), (prefix + "MODEL", "s")]
+
+
+def test_json_utf8_trace_and_validation(tmp_path):
+    rows, summary, audit_json = report_fixture()
+    xlsx, output_json = tmp_path / "trace.xlsx", tmp_path / "trace.json"
+    write_report(rows, summary, audit_json, xlsx, output_json)
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["rows"][0]["reason_code"] == "SN_MISMATCH"
+    assert payload["rows"][0]["row"]["system_sn"] == "00123"
+    assert payload["accounting"]["attempts"][0]["source"] == "first"
+    assert payload["pricing"]["input_per_million"] == 2
+    with pytest.raises(FileExistsError):
+        write_report(rows, summary, audit_json, xlsx, output_json)
+    with pytest.raises(ValueError, match="empty rows"):
+        write_report([], summary, audit_json, tmp_path / "empty.xlsx", tmp_path / "empty.json")
+    with pytest.raises(ValueError, match="duplicate display order ID"):
+        write_report(rows + rows, summary, audit_json, tmp_path / "dup.xlsx", tmp_path / "dup.json")
+
+
+def test_cli_regenerates_from_jsonl_without_network_access(tmp_path):
+    item = audit_item("9001", flag=False, elapsed=2)
+    item["row"].update(system_sn="0001", observed_sn="0001", sn_match=True)
+    first = tmp_path / "first.jsonl"
+    first.write_text(json.dumps(item, ensure_ascii=False) + "\n", encoding="utf-8")
+    xlsx, output_json = tmp_path / "cli.xlsx", tmp_path / "cli.json"
+    script = str((__import__("pathlib").Path(__file__).parents[1] / "tools" / "guobu_audit_report.py"))
+    completed = subprocess.run([sys.executable, script, "--first-jsonl", str(first),
+        "--output-xlsx", str(xlsx), "--output-json", str(output_json)],
+        text=True, capture_output=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    assert xlsx.exists() and output_json.exists()
+    assert load_workbook(xlsx)["明细表"]["A2"].value == "9001"

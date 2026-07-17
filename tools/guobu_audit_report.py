@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+from copy import copy
+from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.table import Table, TableStyleInfo
+
 
 _UNKNOWN_REASON = "图片信息无法确认"
 
@@ -300,3 +309,181 @@ def sn_display(row: dict) -> tuple[str, str]:
     if not observed:
         return "未读取", _sn_difference(system, observed)
     return "否", _sn_difference(system, observed)
+
+
+_DETAIL_HEADERS = ["订单号", "是否转人工", "原始流程状态", "转人工原因",
+                   "系统SN", "模型SN", "SN是否一致", "SN具体差别"]
+_HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
+
+
+def _safe_text(value: object) -> str:
+    return "" if value is None else str(value)
+
+
+def _validate_report_rows(rows: list[dict]) -> None:
+    if not rows:
+        raise ValueError("empty rows")
+    seen = set()
+    for item in rows:
+        if not isinstance(item, dict) or not isinstance(item.get("row"), dict):
+            raise ValueError("malformed merged row")
+        row = item["row"]
+        order_id = str(row.get("id") or "").strip()
+        if (not order_id or type(item.get("manual")) is not bool
+                or not isinstance(item.get("reason"), str)
+                or not isinstance(item.get("reason_code"), str)
+                or item.get("final_source") not in {"first", "retry"}):
+            raise ValueError("malformed merged row")
+        if order_id in seen:
+            raise ValueError(f"duplicate display order ID: {order_id!r}")
+        seen.add(order_id)
+
+
+def _style_header(sheet) -> None:
+    for cell in sheet[1]:
+        cell.fill = _HEADER_FILL
+        cell.font = Font(name="Arial", bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+
+def _add_summary(sheet, summary: dict) -> None:
+    sheet.append(["指标", "值"])
+    rows = [
+        ("样本总数", summary["sample_count"], "0"),
+        ("转人工总数", summary["manual_total"], "0"),
+        ("自动通过总数", "=B2-B3", "0"),
+        ("未通过拦截数（分子）", summary["failed_interception"]["numerator"], "0"),
+        ("未通过订单数（分母）", summary["failed_interception"]["denominator"], "0"),
+        ("未通过拦截率", '=IF(B6=0,"无可计算样本",B5/B6)', "0.0%"),
+        ("已通过误判数（分子）", summary["passed_false_positive"]["numerator"], "0"),
+        ("已通过订单数（分母）", summary["passed_false_positive"]["denominator"], "0"),
+        ("已通过误判率", '=IF(B9=0,"无可计算样本",B8/B9)', "0.0%"),
+        ("输入Token", summary["billed_input_tokens"] + summary["billed_cached_input_tokens"], "0"),
+        ("输出Token", summary["billed_output_tokens"], "0"),
+        ("Token总消耗", "=B11+B12", "0"),
+        ("Token预计成本", summary["estimated_cost"], "0.00"),
+        ("有效审核总用时（小时）", summary["effective_hours"], "0.00"),
+        ("人工每小时审核量", summary["human_orders_per_hour"], "0.00"),
+        ("人工预计用时（小时）", "=B2/B16", "0.00"),
+        ("模型每小时审核量", '=IF(B15=0,"无可计算样本",B2/B15)', "0.00"),
+        ("效率倍数", '=IF(B16=0,"无可计算样本",B18/B16)', "0.0x"),
+        ("效率提升率", '=IF(B19="无可计算样本","无可计算样本",B19-1)', "0.0%"),
+        ("预计节省人工时间（小时）", "=B17-B15", "0.00"),
+        ("口径说明", "有效审核总用时为累计每订单处理时长，并非批次墙钟吞吐量。", "General"),
+    ]
+    for label, value, number_format in rows:
+        sheet.append([label, value])
+        sheet.cell(sheet.max_row, 2).number_format = number_format
+    _style_header(sheet)
+    sheet.column_dimensions["A"].width = 30
+    sheet.column_dimensions["B"].width = 62
+    sheet["B22"].alignment = Alignment(wrap_text=True)
+
+
+def write_report(rows: list[dict], summary: dict, audit_json: dict,
+                 xlsx_path: str | Path, json_path: str | Path) -> None:
+    """Write the compact business workbook and its traceable UTF-8 audit JSON."""
+    _validate_report_rows(rows)
+    xlsx_path, json_path = Path(xlsx_path), Path(json_path)
+    if xlsx_path.exists() or json_path.exists():
+        raise FileExistsError("report output already exists")
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+
+    workbook = Workbook()
+    detail = workbook.active
+    detail.title = "明细表"
+    detail.append(_DETAIL_HEADERS)
+    for item in rows:
+        row = item["row"]
+        status, difference = sn_display(row)
+        detail.append([str(row["id"]), "是" if item["manual"] else "否",
+                       _safe_text(row.get("source_flow_status")), _safe_text(item["reason"]),
+                       _safe_text(row.get("system_sn")), _safe_text(row.get("observed_sn")),
+                       status, _safe_text(difference)])
+        for column in (1, 3, 4, 5, 6, 8):
+            detail.cell(detail.max_row, column).data_type = "s"
+        for column in (1, 5, 6):
+            detail.cell(detail.max_row, column).number_format = "@"
+        for column in (4, 8):
+            detail.cell(detail.max_row, column).alignment = Alignment(wrap_text=True, vertical="top")
+    _style_header(detail)
+    detail.freeze_panes = "A2"
+    detail.auto_filter.ref = f"A1:H{detail.max_row}"
+    table = Table(displayName="明细表格", ref=detail.auto_filter.ref)
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True,
+                                          showFirstColumn=False, showLastColumn=False)
+    detail.add_table(table)
+    for column, width in zip("ABCDEFGH", (24, 14, 18, 34, 24, 24, 16, 38)):
+        detail.column_dimensions[column].width = width
+
+    summary_sheet = workbook.create_sheet("汇总表")
+    _add_summary(summary_sheet, summary)
+    for sheet in workbook:
+        for row in sheet:
+            for cell in row:
+                font = copy(cell.font)
+                font.name = "Arial"
+                cell.font = font
+    workbook.save(xlsx_path)
+    payload = dict(audit_json)
+    payload.setdefault("summary", summary)
+    payload.setdefault("rows", rows)
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_jsonl(path: str | None) -> list[dict]:
+    if not path:
+        return []
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def _retry_ids(path: str | None) -> set[str] | None:
+    if not path:
+        return None
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(value, dict):
+        value = value.get("retry_ids", value.get("order_ids"))
+    if not isinstance(value, list):
+        raise ValueError("retry selection must be a JSON list")
+    return {str(item).strip() for item in value}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate a Guobu audit XLSX and trace JSON")
+    parser.add_argument("--first-jsonl", required=True)
+    parser.add_argument("--retry-jsonl")
+    parser.add_argument("--retry-selection-json")
+    parser.add_argument("--output-xlsx", required=True)
+    parser.add_argument("--output-json", required=True)
+    parser.add_argument("--input-price-per-million", type=float)
+    parser.add_argument("--cached-input-price-per-million", type=float)
+    parser.add_argument("--output-price-per-million", type=float)
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args(argv)
+    outputs = [Path(args.output_xlsx), Path(args.output_json)]
+    if args.overwrite:
+        for output in outputs:
+            if output.exists():
+                output.unlink()
+    prices = None
+    supplied = [args.input_price_per_million, args.cached_input_price_per_million,
+                args.output_price_per_million]
+    if any(value is not None for value in supplied):
+        if not all(value is not None and value >= 0 for value in supplied):
+            parser.error("all three non-negative prices are required")
+        prices = {"input_per_million": supplied[0], "cached_input_per_million": supplied[1],
+                  "output_per_million": supplied[2]}
+    rows, accounting = merge_attempts(_read_jsonl(args.first_jsonl),
+                                      _read_jsonl(args.retry_jsonl),
+                                      _retry_ids(args.retry_selection_json))
+    summary = build_summary(rows, accounting, prices)
+    audit_json = {"summary": summary, "accounting": accounting, "pricing": prices,
+                  "rows": rows}
+    write_report(rows, summary, audit_json, outputs[0], outputs[1])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
