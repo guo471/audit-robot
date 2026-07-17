@@ -107,3 +107,63 @@ def test_prices_are_forwarded_only_as_one_numeric_triplet_without_secrets():
     assert "VISION_API_KEY" not in "\n".join(
         line for line in text.splitlines() if "Write-" in line or "Tee-Object" in line
     )
+
+
+def test_stale_retry_task_cannot_trigger_second_audit_without_network_failure(tmp_path):
+    project = tmp_path / "project"
+    tools = project / "tools"
+    tasks = project / "tasks"
+    tools.mkdir(parents=True)
+    tasks.mkdir()
+    (tasks / "one.json").write_text(
+        json.dumps({"channel_order_no": "order-1"}), encoding="utf-8")
+
+    invocation_log = project / "model-invocations.txt"
+    (tools / "run_guobu_model_audit_v2.py").write_text(
+        """import argparse, json
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument('--tasks-dir'); p.add_argument('--out-dir'); p.add_argument('--cache-dir')
+p.add_argument('--model'); p.add_argument('--mode'); p.add_argument('--workers')
+p.add_argument('--no-targeted-sn-review', action='store_true')
+a = p.parse_args()
+log = Path(__file__).parents[1] / 'model-invocations.txt'
+with log.open('a', encoding='utf-8') as f: f.write(a.tasks_dir + '\\n')
+out = Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
+item = {'row': {'id': 'order-1', 'manual_reason': '', 'manual_reason_cn': '',
+                'strategy': '', 'manual_flag': False}}
+(out / 'result.jsonl').write_text(json.dumps(item) + '\\n', encoding='utf-8')
+""", encoding="utf-8")
+    (tools / "guobu_audit_report.py").write_text(
+        """import argparse, json
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument('--first-jsonl'); p.add_argument('--retry-jsonl')
+p.add_argument('--retry-selection-json'); p.add_argument('--output-xlsx')
+p.add_argument('--output-json'); p.add_argument('--overwrite', action='store_true')
+a, _ = p.parse_known_args()
+Path(a.output_xlsx).write_bytes(b'xlsx-placeholder')
+Path(a.output_json).write_text(json.dumps({'summary': {'stub': True}}), encoding='utf-8')
+""", encoding="utf-8")
+
+    run_name = "no_network_retry_regression"
+    retry_tasks = project / "temp" / f"{run_name}_network_retry_tasks"
+    retry_tasks.mkdir(parents=True)
+    stale = retry_tasks / "stale.json"
+    stale.write_text(json.dumps({"channel_order_no": "stale-order"}), encoding="utf-8")
+    env = os.environ.copy()
+    env.update(VISION_API_BASE_URL="https://offline.invalid", VISION_API_KEY="dummy")
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(WRAPPER),
+         "-ProjectRoot", str(project), "-TasksDir", str(tasks), "-RunName", run_name],
+        text=True, capture_output=True, timeout=30, env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert invocation_log.read_text(encoding="utf-8").splitlines() == [str(tasks)]
+    selection = json.loads((project / "temp" / f"{run_name}_network_retry_selection.json")
+                           .read_text(encoding="utf-8"))
+    assert selection["selected"] == 0
+    assert not stale.exists()
+    second_out = project / "reports" / "model_audit" / f"{run_name}_network_rerun"
+    assert not list(second_out.glob("*.jsonl"))
