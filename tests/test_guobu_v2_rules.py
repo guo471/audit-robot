@@ -46,7 +46,7 @@ def test_legacy_compliance_prompts_match_frozen_pre_task2_sha256_baselines():
     # first brought this previously-untracked mainline file under version control.
     # There is no earlier Git blob from which to reconstruct a historical diff.
     expected = {
-        "home_appliance": "89be177453d4b9c4efafa9927d21255cd913c67b6cdeaf98835a9b9f16f3f572",
+        "home_appliance": "c598cd041171f2552797cac2d71ed6c3615f05f495c3638a9dcd6f06a8708bb0",
         "computer": "614a07fc1ec229d97958952ff2015864270eecc770d5f6da4d8ed078c626c772",
         "ordinary_3c": "8d9e55cae771522f91ec29aca9d8d06a4c3b639de5f03b3e9c2959132d8ebe71",
         "unknown": "578f0ade0ec8cfbd642b5467041e612e8683de08da5c4419656ed9db69f26315",
@@ -2644,6 +2644,106 @@ def test_verified_home_appliance_without_packaging_passes_strict_home_scene_gate
     assert result["manual_reason_codes"] == []
 
 
+@pytest.mark.parametrize("missing_field", ["whole_product_visible", "home_or_installation_scene_visible"])
+def test_verified_home_appliance_without_packaging_requires_complete_home_scene_gate(missing_field):
+    decision = {
+        "_sn_already_verified_by_system": True,
+        "manual_required": False,
+        "manual_reason_codes": [],
+        "manual_reason": "",
+        "effective_category": "home_appliance",
+        "category_name": "电冰箱",
+        "product_type_match": "match",
+        "product_photo_ok": True,
+        "unboxing_photo_ok": True,
+        "package_visible": False,
+        "whole_product_visible": True,
+        "home_or_installation_scene_visible": True,
+        "activation_photo_ok": True,
+        "activation_evidence_type": "PACKAGE_SN_ONLY",
+        "image_risk": False,
+        "duplicate_image_evidence": False,
+        "confidence": 0.95,
+    }
+    decision[missing_field] = False
+
+    result = v2.enforce_photo_noncompliance_manual(decision)
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == ["UNBOXING_PHOTO_INVALID"]
+
+
+@pytest.mark.parametrize("effective_category", ["ordinary_3c", "computer"])
+def test_no_box_home_scene_gate_does_not_apply_to_3c_or_computer(effective_category):
+    result = v2.enforce_photo_noncompliance_manual(
+        {
+            "_sn_already_verified_by_system": True,
+            "manual_required": False,
+            "manual_reason_codes": [],
+            "manual_reason": "",
+            "effective_category": effective_category,
+            "product_type_match": "match",
+            "product_photo_ok": True,
+            "unboxing_photo_ok": True,
+            "package_visible": False,
+            "whole_product_visible": True,
+            "home_or_installation_scene_visible": True,
+            "activation_photo_ok": True,
+            "activation_evidence_type": "PACKAGE_SN_ONLY",
+            "image_risk": False,
+            "duplicate_image_evidence": False,
+            "confidence": 0.95,
+        }
+    )
+
+    assert result["manual_reason_codes"] != ["UNBOXING_PHOTO_INVALID"]
+
+
+@pytest.mark.parametrize(
+    "code, field",
+    [
+        ("IMAGE_STRONG_RISK", "image_risk"),
+        ("DUPLICATE_IMAGE_EVIDENCE", "duplicate_image_evidence"),
+        ("PRODUCT_TYPE_MISMATCH", "product_type_match"),
+        ("PRODUCT_PHOTO_INVALID", "product_photo_ok"),
+    ],
+)
+def test_home_scene_gate_does_not_override_higher_priority_photo_failures(code, field):
+    decision = {
+        "_sn_already_verified_by_system": True,
+        "manual_required": True,
+        "manual_reason_codes": [code],
+        "manual_reason": code,
+        "effective_category": "home_appliance",
+        "category_name": "电冰箱",
+        "product_type_match": "match",
+        "product_photo_ok": True,
+        "unboxing_photo_ok": True,
+        "package_visible": False,
+        "whole_product_visible": True,
+        "home_or_installation_scene_visible": True,
+        "activation_photo_ok": True,
+        "activation_evidence_type": "PACKAGE_SN_ONLY",
+        "image_risk": False,
+        "duplicate_image_evidence": False,
+        "confidence": 0.95,
+    }
+    if field == "image_risk":
+        decision[field] = True
+    elif field == "duplicate_image_evidence":
+        decision[field] = True
+        decision["manual_reason"] = "商品、拆封、激活三类照片完全相同"
+    elif field == "product_type_match":
+        decision[field] = "mismatch"
+    elif field == "product_photo_ok":
+        decision[field] = False
+
+    result = v2.enforce_photo_noncompliance_manual(decision)
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == [code]
+
+
 def test_compliance_nonstandard_reason_codes_are_normalized():
     result = v2.enforce_photo_noncompliance_manual(
         {
@@ -3277,10 +3377,14 @@ def test_hybrid_compliance_payload_preserves_explicit_image_groups(monkeypatch):
     assert seen_payloads["hybrid_compliance"]["category_name"] == "\u7535\u51b0\u7bb1"
     assert result["manual_flag"] == "\u5426"
 
-def test_home_appliance_unboxing_rule_requires_visible_packaging():
+def test_home_appliance_unboxing_rule_accepts_installation_scene_without_packaging():
     checklist = open("docs/guobu-collector-field-checklist.md", encoding="utf-8").read()
 
-    assert "拆封照片必须出现可识别外箱或包装结构" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "无包装但商品已安装在家庭、店铺或使用场景中，且能清楚看到商品本体，也可判定拆封/安装照片合格" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "whole_product_visible" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "home_or_installation_scene_visible" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "whole_product_visible" not in v2.ORDINARY_3C_COMPLIANCE_PROMPT
+    assert "home_or_installation_scene_visible" not in v2.COMPUTER_COMPLIANCE_PROMPT
     assert "当前品类：家电" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
     assert "整组" in checklist
 

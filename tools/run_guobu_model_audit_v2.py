@@ -317,6 +317,13 @@ COMPLIANCE_OUTPUT_SCHEMA = """只输出 JSON，不输出解释。
 原因码只能使用：
 INVOICE_ORANGE_WARNING, IMAGE_STRONG_RISK, DUPLICATE_IMAGE_EVIDENCE, PRODUCT_TYPE_MISMATCH, PRODUCT_PHOTO_INVALID, UNBOXING_PHOTO_INVALID, ACTIVATION_PHOTO_INVALID, MODEL_UNCERTAIN。"""
 
+HOME_APPLIANCE_OUTPUT_SCHEMA = COMPLIANCE_OUTPUT_SCHEMA.replace(
+    '  "package_visible": boolean,\n',
+    '  "package_visible": boolean,\n'
+    '  "whole_product_visible": boolean,\n'
+    '  "home_or_installation_scene_visible": boolean,\n',
+)
+
 COMPLIANCE_COMMON_PROMPT = """你是国补订单图片合规审核员。只输出 JSON。
 
 前置条件：
@@ -336,13 +343,13 @@ HOME_APPLIANCE_COMPLIANCE_PROMPT = COMPLIANCE_COMMON_PROMPT + """
 
 审核规则：
 1. 商品照片应能看到商品本体或外包装。
-2. 拆封照片必须出现可识别外箱或包装结构，并与商品本体形成同一商品证据链。
-3. 只有商品内部、机身铭牌、保护膜、胶带或泡沫，但没有可识别外箱或包装结构，返回 UNBOXING_PHOTO_INVALID。
-4. package_visible 只在拆封照片中出现可识别外箱或包装结构时返回 true。
+2. 拆封/安装照片可由两种证据满足：可识别外箱或包装结构，并与商品本体形成同一商品证据链；或无包装但商品已安装在家庭、店铺或使用场景中，且能清楚看到商品本体，也可判定拆封/安装照片合格。
+3. 只有商品内部、机身铭牌、保护膜、胶带、泡沫或局部零件，且不能证明商品已交付、拆封或安装，返回 UNBOXING_PHOTO_INVALID。
+4. package_visible 只在拆封照片中出现可识别外箱或包装结构时返回 true；无包装但已安装到家/店/使用场景时，package_visible=false，同时 whole_product_visible=true 且 home_or_installation_scene_visible=true。
 5. 激活/SN照片只检查是否真实拍摄，以及是否存在翻拍、截图、拼图、P图、篡改风险。
 6. 若商品类型与订单类型明显不一致，返回 PRODUCT_TYPE_MISMATCH。
 
-""" + COMPLIANCE_OUTPUT_SCHEMA
+""" + HOME_APPLIANCE_OUTPUT_SCHEMA
 
 ORDINARY_3C_COMPLIANCE_PROMPT = COMPLIANCE_COMMON_PROMPT + """
 
