@@ -930,6 +930,44 @@ def test_mixed_identity_group_displays_non_system_candidate_when_top_level_match
     assert row["sn_match"] is False
 
 
+def test_identity_only_top_level_displays_non_system_candidate_conflict():
+    fields = {
+        "system_sn": "SYSTEM123",
+        "imei1": "355516408057368",
+        "imei2": "355516407888847",
+    }
+    compliance = {
+        "observed_sn": "IMEI1355516408057368IMEI2355516407888847",
+        "normalized_observed_sn": "IMEI1355516408057368IMEI2355516407888847",
+        "sn_candidates": [
+            _sn_candidate("SYSTEM123", source="DEVICE_SCREEN"),
+            _sn_candidate("REAL999", source="PACKAGE_LABEL"),
+        ],
+    }
+
+    normalized = v2._normalize_sn_result(fields, compliance)
+    row = v2._final_row(
+        {"channel_order_no": "identity-candidate-conflict", "fields": fields},
+        {
+            "manual_required": True,
+            "manual_reason_codes": ["SN_MISMATCH"],
+            "manual_reason": "structured SN candidates conflict",
+        },
+        normalized,
+        compliance,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "REAL999"
+    assert v2._conflicting_observed_sn({**compliance, **fields}) == "REAL999"
+    assert row["observed_sn"] == "REAL999"
+    assert row["sn_match"] is False
+
+
 def test_imei_screen_reading_falls_back_to_matching_package_sn():
     fields = {
         "system_sn": "HXL7NVMWGM",
@@ -1259,7 +1297,7 @@ def test_ximeiy_substring_is_not_treated_as_an_imei_label():
                 _sn_candidate("ABC123", source="DEVICE_SCREEN"),
                 _sn_candidate("WRONG123", source="PACKAGE_LABEL"),
             ],
-            "ABC123",
+            "WRONG123",
         ),
         (
             [

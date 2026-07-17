@@ -1894,7 +1894,8 @@ def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
 
     selected_sn = candidates[0][1]
     if len(unique_candidate_values) >= 2:
-        return "mismatch", selected_sn, selected_sn
+        conflict_source, conflict_sn = _preferred_sn_conflict((), candidates, system_sn)
+        return "mismatch", conflict_source, conflict_sn
     return ("match" if system_sn and selected_sn == system_sn else "mismatch"), selected_sn, selected_sn
 
 
