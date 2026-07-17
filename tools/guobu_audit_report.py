@@ -15,6 +15,10 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
+try:
+    from tools.guobu_audit_contract import network_failure
+except ModuleNotFoundError:
+    from guobu_audit_contract import network_failure
 
 
 _UNKNOWN_REASON = "图片信息无法确认"
@@ -44,21 +48,6 @@ _STANDARD_REASONS = {
     "PRODUCT_TYPE_MISSING": "商品类型信息缺失",
     "NON_REAL_PHOTO_FFT_RESCUE": "图片疑似非实拍",
 }
-
-
-_NETWORK_FAILURE_MARKERS = ("timeouterror", "timed out", "modelconnectionerror",
-                            "connect failed", "winerror 10060", "http error 500",
-                            "remote end closed connection without response")
-_REMOTE_DISCONNECTED_RE = re.compile(
-    r"(?:^|[\s.:])RemoteDisconnected(?:$|[\s:])", re.IGNORECASE)
-
-
-def network_failure(item: dict) -> bool:
-    row = item.get("row") or {}
-    values = [item.get("_error"), *(row.get(key) for key in ("manual_reason", "manual_reason_cn", "strategy"))]
-    text = "\n".join(str(value) for value in values if value is not None).lower()
-    return (any(marker in text for marker in _NETWORK_FAILURE_MARKERS)
-            or _REMOTE_DISCONNECTED_RE.search(text) is not None)
 
 
 def _indexed(items: list[dict], label: str) -> dict[str, dict]:
@@ -418,29 +407,30 @@ def _style_header(sheet) -> None:
 
 
 def _add_summary(sheet, summary: dict) -> None:
-    sheet.append(["指标", "值"])
+    unavailable = "\u65e0\u53ef\u8ba1\u7b97\u6837\u672c"
+    sheet.append(["\u6307\u6807", "\u503c"])
     rows = [
-        ("样本总数", summary["sample_count"], "0"),
-        ("转人工总数", summary["manual_total"], "0"),
-        ("自动通过总数", "=B2-B3", "0"),
-        ("未通过拦截数（分子）", summary["failed_interception"]["numerator"], "0"),
-        ("未通过订单数（分母）", summary["failed_interception"]["denominator"], "0"),
-        ("未通过拦截率", '=IF(B6=0,"无可计算样本",B5/B6)', "0.0%"),
-        ("已通过误判数（分子）", summary["passed_false_positive"]["numerator"], "0"),
-        ("已通过订单数（分母）", summary["passed_false_positive"]["denominator"], "0"),
-        ("已通过误判率", '=IF(B9=0,"无可计算样本",B8/B9)', "0.0%"),
-        ("输入Token", summary["billed_input_tokens"] + summary["billed_cached_input_tokens"], "0"),
-        ("输出Token", summary["billed_output_tokens"], "0"),
-        ("Token总消耗", "=B11+B12", "0"),
-        ("Token预计成本", summary["estimated_cost"], "0.00"),
-        ("有效审核总用时（小时）", summary["effective_hours"], "0.00"),
-        ("人工每小时审核量", summary["human_orders_per_hour"], "0.00"),
-        ("人工预计用时（小时）", "=B2/B16", "0.00"),
-        ("模型每小时审核量", '=IF(B15=0,"无可计算样本",B2/B15)', "0.00"),
-        ("效率倍数", '=IF(B16=0,"无可计算样本",B18/B16)', "0.0x"),
-        ("效率提升率", '=IF(B19="无可计算样本","无可计算样本",B19-1)', "0.0%"),
-        ("预计节省人工时间（小时）", "=B17-B15", "0.00"),
-        ("口径说明", summary["elapsed_note"], "General"),
+        ("\u6837\u672c\u603b\u6570", summary["sample_count"], "0"),
+        ("\u8f6c\u4eba\u5de5\u603b\u6570", summary["manual_total"], "0"),
+        ("\u81ea\u52a8\u901a\u8fc7\u603b\u6570", summary["automatic_pass_total"], "0"),
+        ("\u672a\u901a\u8fc7\u62e6\u622a\u6570\uff08\u5206\u5b50\uff09", summary["failed_interception"]["numerator"], "0"),
+        ("\u672a\u901a\u8fc7\u8ba2\u5355\u6570\uff08\u5206\u6bcd\uff09", summary["failed_interception"]["denominator"], "0"),
+        ("\u672a\u901a\u8fc7\u62e6\u622a\u7387", summary["failed_interception"]["rate"] if summary["failed_interception"]["rate"] is not None else unavailable, "0.0%"),
+        ("\u5df2\u901a\u8fc7\u8bef\u5224\u6570\uff08\u5206\u5b50\uff09", summary["passed_false_positive"]["numerator"], "0"),
+        ("\u5df2\u901a\u8fc7\u8ba2\u5355\u6570\uff08\u5206\u6bcd\uff09", summary["passed_false_positive"]["denominator"], "0"),
+        ("\u5df2\u901a\u8fc7\u8bef\u5224\u7387", summary["passed_false_positive"]["rate"] if summary["passed_false_positive"]["rate"] is not None else unavailable, "0.0%"),
+        ("\u8f93\u5165Token", summary["billed_input_tokens"] + summary["billed_cached_input_tokens"], "0"),
+        ("\u8f93\u51faToken", summary["billed_output_tokens"], "0"),
+        ("Token\u603b\u6d88\u8017", summary["billed_input_tokens"] + summary["billed_cached_input_tokens"] + summary["billed_output_tokens"], "0"),
+        ("Token\u9884\u8ba1\u6210\u672c", summary["estimated_cost"], "0.00"),
+        ("\u6709\u6548\u5ba1\u6838\u603b\u7528\u65f6\uff08\u5c0f\u65f6\uff09", summary["effective_hours"], "0.00"),
+        ("\u4eba\u5de5\u6bcf\u5c0f\u65f6\u5ba1\u6838\u91cf", summary["human_orders_per_hour"], "0.00"),
+        ("\u4eba\u5de5\u9884\u8ba1\u7528\u65f6\uff08\u5c0f\u65f6\uff09", summary["human_estimated_hours"], "0.00"),
+        ("\u6a21\u578b\u6bcf\u5c0f\u65f6\u5ba1\u6838\u91cf", summary["model_orders_per_hour"] if summary["model_orders_per_hour"] is not None else unavailable, "0.00"),
+        ("\u6548\u7387\u500d\u6570", summary["efficiency_multiple"] if summary["efficiency_multiple"] is not None else unavailable, "0.0x"),
+        ("\u6548\u7387\u63d0\u5347\u7387", summary["efficiency_improvement"] if summary["efficiency_improvement"] is not None else unavailable, "0.0%"),
+        ("\u9884\u8ba1\u8282\u7701\u4eba\u5de5\u65f6\u95f4\uff08\u5c0f\u65f6\uff09", summary["saved_human_hours"], "0.00"),
+        ("\u53e3\u5f84\u8bf4\u660e", summary["elapsed_note"] + " \u516c\u5f0f\u5b9a\u4e49\u4fdd\u7559\u5728 JSON trace\u3002", "General"),
     ]
     for label, value, number_format in rows:
         sheet.append([label, value])
@@ -503,6 +493,13 @@ def write_report(rows: list[dict], summary: dict, audit_json: dict,
     payload = dict(audit_json)
     payload["summary"] = summary
     payload["rows"] = rows
+    payload["summary_formula_definitions"] = {
+        "\u672a\u901a\u8fc7\u62e6\u622a\u7387": '=IF(B6=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B5/B6)',
+        "\u5df2\u901a\u8fc7\u8bef\u5224\u7387": '=IF(B9=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B8/B9)',
+        "\u6a21\u578b\u6bcf\u5c0f\u65f6\u5ba1\u6838\u91cf": '=IF(B15=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B2/B15)',
+        "\u6548\u7387\u500d\u6570": '=IF(B16=0,"\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B18/B16)',
+        "\u6548\u7387\u63d0\u5347\u7387": '=IF(B19="\u65e0\u53ef\u8ba1\u7b97\u6837\u672c","\u65e0\u53ef\u8ba1\u7b97\u6837\u672c",B19-1)',
+    }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

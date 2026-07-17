@@ -567,7 +567,7 @@ def test_workbook_has_exact_business_contract_and_safe_text(tmp_path):
     sheet = wb["汇总表"]
     metrics = {sheet.cell(row, 1).value: sheet.cell(row, 2)
                for row in range(2, sheet.max_row + 1)}
-    assert metrics["未通过拦截率"].value.startswith("=IF(")
+    assert metrics["未通过拦截率"].value == pytest.approx(1.0)
     assert metrics["未通过拦截率"].number_format == "0.0%"
     assert metrics["有效审核总用时（小时）"].number_format == "0.00"
     assert metrics["效率倍数"].number_format == "0.0x"
@@ -592,7 +592,7 @@ def test_workbook_zero_denominator_and_unconfigured_cost(tmp_path):
     sheet = load_workbook(xlsx, data_only=False)["汇总表"]
     metrics = {sheet.cell(row, 1).value: sheet.cell(row, 2).value
                for row in range(2, sheet.max_row + 1)}
-    assert 'IF(B' in metrics["未通过拦截率"] and '"无可计算样本"' in metrics["未通过拦截率"]
+    assert metrics["未通过拦截率"] == "无可计算样本"
     assert metrics["Token预计成本"] == "待配置"
 
 
@@ -616,6 +616,9 @@ def test_json_utf8_trace_and_validation(tmp_path):
     assert payload["rows"][0]["row"]["system_sn"] == "00123"
     assert payload["accounting"]["attempts"][0]["source"] == "first"
     assert payload["pricing"]["input_per_million"] == 2
+    assert payload["summary_formula_definitions"]["未通过拦截率"].startswith("=IF(")
+    cached = load_workbook(xlsx, data_only=True)["汇总表"]
+    assert all(cached.cell(row, 2).value is not None for row in range(2, cached.max_row + 1))
     with pytest.raises(FileExistsError):
         write_report(rows, summary, audit_json, xlsx, output_json)
     with pytest.raises(ValueError, match="empty rows"):

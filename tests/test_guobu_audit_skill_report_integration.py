@@ -5,10 +5,12 @@ import subprocess
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-WRAPPER = Path(os.environ.get(
+SHARED_WRAPPER = Path(os.environ.get(
     "GUOBU_AUDIT_BATCH_WRAPPER",
     Path.home() / ".codex/skills/auditing-guobu-orders/scripts/run_guobu_audit_batch.ps1",
 ))
+PROJECT_WRAPPER = PROJECT_ROOT / "tools/run_guobu_audit_batch.ps1"
+WRAPPER = PROJECT_WRAPPER
 
 
 def wrapper_text():
@@ -26,6 +28,37 @@ def run_plan(project_root, tasks_dir, *extra):
          "-RunName", "integration_contract", "-PlanOnly", *extra],
         text=True, capture_output=True, timeout=30,
     )
+
+
+def make_stub_project(tmp_path, output_order_ids):
+    project = tmp_path / "project"; tools = project / "tools"; tasks = project / "tasks"
+    tools.mkdir(parents=True); tasks.mkdir()
+    (tasks / "one.json").write_text(json.dumps({"channel_order_no": "order-1"}), encoding="utf-8")
+    for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
+                 "guobu_audit_contract.py", "merge_guobu_audit_results.py"):
+        (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
+    (tools / "run_guobu_model_audit_v2.py").write_text(
+        "import argparse,json\nfrom pathlib import Path\np=argparse.ArgumentParser();"
+        "p.add_argument('--out-dir');p.add_argument('--tasks-dir');p.add_argument('--cache-dir');"
+        "a,_=p.parse_known_args();out=Path(a.out_dir);out.mkdir(parents=True,exist_ok=True);"
+        f"items={[{'row': {'id': x, 'manual_reason': '', 'manual_flag': False}} for x in output_order_ids]!r};"
+        "(out/'result.jsonl').write_text(''.join(json.dumps(x)+'\\n' for x in items),encoding='utf-8')",
+        encoding="utf-8")
+    (tools / "guobu_audit_report.py").write_text(
+        "import argparse,json\nfrom pathlib import Path\np=argparse.ArgumentParser();"
+        "p.add_argument('--output-xlsx');p.add_argument('--output-json');a,_=p.parse_known_args();"
+        "Path(__file__).parents[1].joinpath('report-invoked.txt').write_text('yes');"
+        "Path(a.output_xlsx).write_bytes(b'x');Path(a.output_json).write_text(json.dumps({'summary':{}}))",
+        encoding="utf-8")
+    return project, tasks
+
+
+def invoke_offline_wrapper(project, tasks, run_name):
+    env = os.environ.copy(); env.update(VISION_API_BASE_URL="https://offline.invalid", VISION_API_KEY="dummy")
+    return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        str(project / "tools/run_guobu_audit_batch.ps1"), "-ProjectRoot", str(project),
+        "-TasksDir", str(tasks), "-RunName", run_name], text=True, capture_output=True,
+        timeout=30, env=env)
 
 
 def test_report_format_defaults_to_business_and_plan_exposes_selection(tmp_path):
@@ -50,6 +83,9 @@ def test_missing_selected_generator_fails_before_audit_even_in_plan_only(tmp_pat
     tools = project / "tools"
     tasks.mkdir(parents=True)
     tools.mkdir()
+    for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
+                 "guobu_audit_contract.py", "merge_guobu_audit_results.py"):
+        (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     (tasks / "one.json").write_text("{}", encoding="utf-8")
     (tools / "run_guobu_model_audit_v2.py").write_text("raise AssertionError", encoding="utf-8")
     completed = run_plan(project, tasks)
@@ -61,7 +97,7 @@ def test_business_and_legacy_generators_keep_their_distinct_cli_contracts():
     text = wrapper_text()
     dense = compact(text)
     assert '$businessgenerator=join-path$projectpath"tools\\guobu_audit_report.py"' in dense
-    assert '$legacymerger=join-path$skillroot"scripts\\merge_guobu_audit_results.py"' in dense
+    assert '$legacymerger=join-path$projectpath"tools\\merge_guobu_audit_results.py"' in dense
     assert 'if($reportformat-eq"business")' in dense
     assert '"--first-jsonl",$firstjsonl' in dense
     assert '"--output-xlsx",$combinedxlsx' in dense
@@ -109,11 +145,54 @@ def test_prices_are_forwarded_only_as_one_numeric_triplet_without_secrets():
     )
 
 
+def test_shared_wrapper_is_thin_delegate_to_versioned_project_wrapper():
+    shared = compact(SHARED_WRAPPER.read_text(encoding="utf-8"))
+    assert 'tools\\run_guobu_audit_batch.ps1' in shared
+    assert '&$projectwrapper@forwardparams' in shared
+    assert 'invoke-auditrun' not in shared
+    assert PROJECT_WRAPPER.is_file()
+
+
+def test_project_selector_detects_all_formal_network_failures(tmp_path):
+    order_ids = ["timeout-order", "connection-order", "481173059937323224268859"]
+    tasks = tmp_path / "tasks"; tasks.mkdir()
+    for order_id in order_ids:
+        (tasks / f"{order_id}.json").write_text(
+            json.dumps({"channel_order_no": order_id}), encoding="utf-8")
+    first = tmp_path / "first.jsonl"
+    failures = [
+        {"_error": "TimeoutError: request timed out", "row": {"id": order_ids[0]}},
+        {"row": {"id": order_ids[1], "manual_reason": "ModelConnectionError"}},
+        {"_error": "http.client.RemoteDisconnected: Remote end closed connection without response",
+         "row": {"id": order_ids[2]}},
+    ]
+    first.write_text("".join(json.dumps(x) + "\n" for x in failures), encoding="utf-8")
+    out = tmp_path / "selected"; summary = tmp_path / "selection.json"
+    completed = subprocess.run([os.sys.executable, str(PROJECT_ROOT / "tools/select_guobu_tasks.py"),
+        "--source-dir", str(tasks), "--out-dir", str(out), "--timeout-jsonl", str(first),
+        "--summary-json", str(summary)], text=True, capture_output=True)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(summary.read_text(encoding="utf-8"))["selected"] == 3
+    assert len(list(out.glob("*.json"))) == 3
+
+
+def test_partial_first_jsonl_fails_before_retry_and_report(tmp_path):
+    project, tasks = make_stub_project(tmp_path, output_order_ids=["order-1"])
+    (tasks / "two.json").write_text(json.dumps({"channel_order_no": "order-2"}), encoding="utf-8")
+    completed = invoke_offline_wrapper(project, tasks, "partial-first")
+    assert completed.returncode != 0
+    assert "First-run completeness validation failed" in completed.stderr
+    assert not (project / "report-invoked.txt").exists()
+
+
 def test_stale_retry_task_cannot_trigger_second_audit_without_network_failure(tmp_path):
     project = tmp_path / "project"
     tools = project / "tools"
     tasks = project / "tasks"
     tools.mkdir(parents=True)
+    for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
+                 "guobu_audit_contract.py", "merge_guobu_audit_results.py"):
+        (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     tasks.mkdir()
     (tasks / "one.json").write_text(
         json.dumps({"channel_order_no": "order-1"}), encoding="utf-8")
