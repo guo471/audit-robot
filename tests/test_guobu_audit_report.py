@@ -4,29 +4,29 @@ from tools.guobu_audit_report import parse_manual_flag, sn_display, standard_rea
 
 
 REASONS = {
-    "PRODUCT_TYPE_MISMATCH": "鍟嗗搧绫诲瀷涓嶄竴鑷碻",
-    "PRODUCT_PHOTO_INVALID": "鍟嗗搧鐓х墖涓嶇鍚堣姹俙",
-    "UNBOXING_PHOTO_INVALID": "鎷嗗皝/瀹夎鐓х墖涓嶇鍚堣姹俙",
-    "ACTIVATION_PHOTO_INVALID": "婵€娲荤収鐗囦笉绗﹀悎瑕佹眰",
-    "SN_MISSING_IN_ACTIVATION_PHOTO": "婵€娲荤収鐗囦笉绗﹀悎瑕佹眰",
-    "ADDRESS_TOO_COARSE": "鏀惰揣鍦板潃涓嶇鍚堣姹俙",
-    "DUPLICATE_IMAGE_EVIDENCE": "瀛樺湪閲嶅鍥剧墖锛屼笉绗﹀悎瑕佹眰",
-    "NON_REAL_PHOTO_REVIEW": "鍥剧墖鐤戜技闈炲疄鎷峘",
-    "NON_REAL_PHOTO_STRONG_RISK": "鍥剧墖鐤戜技闈炲疄鎷峘",
-    "IMAGE_STRONG_RISK": "鍥剧墖鐤戜技闈炲疄鎷峘",
-    "SN_MISMATCH": "SN涓嶄竴鑷碻",
-    "INVOICE_ORANGE_WARNING": "鍙戠エ鐤戜技宸茬孩鍐瞏",
-    "MODEL_UNCERTAIN": "鍥剧墖淇℃伅鏃犳硶纭",
-    "PHOTO_AUTHENTICITY_SERVICE_FAILURE": "瀹℃牳鏈嶅姟寮傚父",
-    "ARTIFACT_LOAD_FAILURE": "瀹℃牳鏈嶅姟寮傚父",
-    "FFT_FAILURE": "瀹℃牳鏈嶅姟寮傚父",
-    "SN_TRUNCATED_OBSCURED": "SN涓嶅畬鏁达紝鏃犳硶璇嗗埆",
-    "SN_NOT_FOUND": "SN鏃犳硶璇嗗埆",
-    "SYSTEM_SN_MISSING": "绯荤粺SN缂哄け",
-    "IMAGE_MISSING": "鍥剧墖缂哄け",
-    "FIELD_MISSING": "璁㈠崟淇℃伅缂哄け",
-    "PRODUCT_TYPE_MISSING": "鍟嗗搧绫诲瀷淇℃伅缂哄け",
-    "NON_REAL_PHOTO_FFT_RESCUE": "鍥剧墖鐤戜技闈炲疄鎷峘",
+    "PRODUCT_TYPE_MISMATCH": "商品类型不一致",
+    "PRODUCT_PHOTO_INVALID": "商品照片不符合要求",
+    "UNBOXING_PHOTO_INVALID": "拆封/安装照片不符合要求",
+    "ACTIVATION_PHOTO_INVALID": "激活照片不符合要求",
+    "SN_MISSING_IN_ACTIVATION_PHOTO": "激活照片不符合要求",
+    "ADDRESS_TOO_COARSE": "收货地址不符合要求",
+    "DUPLICATE_IMAGE_EVIDENCE": "存在重复图片，不符合要求",
+    "NON_REAL_PHOTO_REVIEW": "图片疑似非实拍",
+    "NON_REAL_PHOTO_STRONG_RISK": "图片疑似非实拍",
+    "IMAGE_STRONG_RISK": "图片疑似非实拍",
+    "SN_MISMATCH": "SN不一致",
+    "INVOICE_ORANGE_WARNING": "发票疑似已红冲",
+    "MODEL_UNCERTAIN": "图片信息无法确认",
+    "PHOTO_AUTHENTICITY_SERVICE_FAILURE": "审核服务异常",
+    "ARTIFACT_LOAD_FAILURE": "审核服务异常",
+    "FFT_FAILURE": "审核服务异常",
+    "SN_TRUNCATED_OBSCURED": "SN不完整，无法识别",
+    "SN_NOT_FOUND": "SN无法识别",
+    "SYSTEM_SN_MISSING": "系统SN缺失",
+    "IMAGE_MISSING": "图片缺失",
+    "FIELD_MISSING": "订单信息缺失",
+    "PRODUCT_TYPE_MISSING": "商品类型信息缺失",
+    "NON_REAL_PHOTO_FFT_RESCUE": "图片疑似非实拍",
 }
 
 
@@ -37,19 +37,22 @@ def test_standard_reason_maps_every_confirmed_code(code, text):
 
 def test_standard_reason_handles_empty_and_unknown_codes():
     assert standard_reason("") == ""
-    assert standard_reason("NEW_REASON") == "鍥剧墖淇℃伅鏃犳硶纭"
+    assert standard_reason("NEW_REASON") == "图片信息无法确认"
 
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(True, True), (False, False), ("鏄痐", True), ("鍚", False)],
+    [(True, True), (False, False), ("是", True), ("否", False)],
 )
 def test_parse_manual_flag_accepts_only_explicit_values(value, expected):
     assert parse_manual_flag(value) is expected
 
 
-@pytest.mark.parametrize("value", [None, 0, 1, "", "true", " 鏄痐", "鍚 "])
-def test_parse_manual_flag_rejects_ambiguous_values(value):
+@pytest.mark.parametrize(
+    "value",
+    [None, 0, 1, "", "true", " 是", "否 ", "\u93c4\u75d0", "\u935a\ue6c6"],
+)
+def test_parse_manual_flag_rejects_ambiguous_or_corrupt_values(value):
     with pytest.raises(ValueError):
         parse_manual_flag(value)
 
@@ -57,10 +60,13 @@ def test_parse_manual_flag_rejects_ambiguous_values(value):
 @pytest.mark.parametrize(
     ("row", "expected"),
     [
-        ({"sn_match": True, "system_sn": "", "observed_sn": ""}, ("鏄痐", "")),
-        ({"sn_match": False, "system_sn": "", "observed_sn": "ABC"}, ("鏃犵郴缁烻N", "")),
-        ({"sn_match": False, "system_sn": "ABC", "observed_sn": ""}, ("鏈鍙朻", "妯″瀷鏈鍙栧埌SN")),
-        ({"sn_match": False, "system_sn": "ABC", "observed_sn": "ABC"}, ("鍚", "")),
+        ({"sn_match": True, "system_sn": "", "observed_sn": ""}, ("是", "")),
+        ({"sn_match": False, "system_sn": "", "observed_sn": "ABC"}, ("无系统SN", "")),
+        (
+            {"sn_match": False, "system_sn": "ABC", "observed_sn": ""},
+            ("未读取", "模型未读取到SN"),
+        ),
+        ({"sn_match": False, "system_sn": "ABC", "observed_sn": "ABC"}, ("否", "")),
     ],
 )
 def test_sn_display_uses_fixed_status_priority(row, expected):
@@ -70,33 +76,31 @@ def test_sn_display_uses_fixed_status_priority(row, expected):
 @pytest.mark.parametrize(
     ("system_sn", "observed_sn", "difference"),
     [
-        ("O123", "0123", "绗?浣嶄笉鍚岋細绯荤粺O锛屾ā鍨?"),
-        ("ABCD", "ABXCD", "妯″瀷绗?浣嶅璇籗"),
-        ("ABXCD", "ABCD", "妯″瀷绗?浣嶅皯璇籗"),
-        (
-            "ABCD",
-            "ACBD",
-            "瀛楃椤哄簭涓嶅悓锛氱郴缁" + "BC" + "锛屾ā鍨" + "CB",
-        ),
-        ("ABCDJ", "ABCD", "妯″瀷鏈熬灏戣J"),
-        ("JABCD", "ABCD", "妯″瀷寮€澶村皯璇籎"),
+        ("ABOCD", "AB0CD", "第3位不同：系统O，模型0"),
+        ("ABCD", "SABCD", "模型第1位多读S"),
+        ("ABCD", "ABXCD", "模型第3位多读X"),
+        ("ABXCD", "ABCD", "模型第3位少读X"),
+        ("ABCD", "ACBD", "字符顺序不同：系统BC，模型CB"),
+        ("ABCDJ", "ABCD", "模型末尾少读J"),
+        ("PQABCD", "ABCD", "模型开头少读PQ"),
+        ("ABCD", "AB", "模型末尾少读CD"),
+        ("ABCD", "CD", "模型开头少读AB"),
         ("00123", "00123", ""),
-        ("ABCD", "AXYD", "SN瀛樺湪澶氬宸紓"),
+        ("ABCD", "AXYD", "SN存在多处差异"),
+        ("ABCDE", "AXC", "SN存在多处差异"),
     ],
 )
 def test_sn_display_classifies_raw_string_differences(system_sn, observed_sn, difference):
     row = {"sn_match": False, "system_sn": system_sn, "observed_sn": observed_sn}
-    assert sn_display(row) == ("鍚", difference)
+    assert sn_display(row) == ("否", difference)
 
 
-def test_sn_display_does_not_mutate_sn_match():
+def test_sn_display_does_not_mutate_sn_match_or_apply_visual_equivalence():
     row = {"sn_match": False, "system_sn": "O123", "observed_sn": "0123"}
-    sn_display(row)
+    assert sn_display(row) == ("否", "第1位不同：系统O，模型0")
     assert row["sn_match"] is False
 
 
 def test_sn_display_transposition_names_the_raw_character_pairs():
     row = {"sn_match": False, "system_sn": "12XY34", "observed_sn": "12YX34"}
-    _, difference = sn_display(row)
-    assert "XY" in difference
-    assert "YX" in difference
+    assert sn_display(row) == ("否", "字符顺序不同：系统XY，模型YX")
