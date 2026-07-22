@@ -29,8 +29,9 @@ These six orders are excluded from blind scoring.
 - `SN_LABEL_AUTH_REVIEW_MODE=off`
 - `DIGITAL_ACTIVATION_EVIDENCE_MODE=on`
 - Do not set or change `VISION_MODEL_NAME`.
-- Use identical timeout, retry, cache, and image-byte inputs for baseline and both candidates.
+- The shared baseline call is byte-identical for both arms. Candidate A and B use identical model request parameters, timeout/retry policy, montage bytes, and `detail=high` whenever both trigger. Candidate montage bytes intentionally differ from baseline source-image bytes; this is the tested ROI intervention, not a model-name or decoding-parameter change.
 - A cached result is reusable only when model, prompt hash, input image SHA-256, and decoding parameters match exactly.
+- The experiment uses an experiment-local cache fingerprint over normalized request fields and image bytes; it does not trust the production client's path-based cache key.
 
 Before running candidates, freeze the actual production authenticity addendum from `tools/run_guobu_model_audit_v2.py`. The standalone `photo_authenticity/prompts/non_real_photo_auditor_v4.txt` is not treated as the production source until the source-of-truth drift is resolved.
 
@@ -51,11 +52,15 @@ All candidate and blind splits are order/record level, never image level. Before
 4. Stability subset: 30 blind orders selected before unblinding and run three times with fresh candidate caches.
 5. Out-of-time subset: where source dates exist, reserve at least 20% from the newest available time window and report it separately.
 
-Two reviewers independently verify the blind labels. Disagreements go to a third reviewer. Ambiguous samples are excluded from real/non-real primary metrics and retained in a separate uncertainty set.
+Two reviewers independently verify the blind labels without seeing source-directory labels or candidate outputs. Source-directory labels are provenance only and do not count as either review. Disagreements go to a third reviewer. Ambiguous samples are excluded from real/non-real primary metrics and retained in a separate uncertainty set.
+
+The data steward writes separate runtime bundles and a sealed label key before any blind calls. A runtime bundle contains only opaque sample/asset IDs, dimensions, byte lengths, hashes, and content-addressed assets; it contains no label, source group, path, order ID, provenance, partition, or date. The runner cannot accept or read the label key. Calibration features and blind results are generated without labels; only separate calibration/scoring processes may open the relevant sealed labels.
 
 ## Baseline
 
-Run the frozen production authenticity observation and current local adjudicator once per image. Store complete order-level baseline records including image SHA-256, prompt hash, raw structured observations, final image decisions, token usage, latency, errors, and cache status.
+The six development orders use their frozen full-payload production authenticity observations and current local adjudicator records. The image-only real/non-real libraries cannot reconstruct the complete category payload, so their shared baseline is explicitly `isolated_authenticity`: the frozen runtime addendum plus an output-only wrapper and the current local adjudicator. Store complete order-level baseline records including image SHA-256, prompt hash, raw structured observations, final image decisions, token usage, latency, errors, and cache status.
+
+Image-only results must record `production_equivalent=false`. They can select the stronger experiment arm for continued shadow work, but cannot support a production-rollout recommendation until a separate labeled full-payload replay passes the same gates.
 
 The same baseline output feeds both candidate trigger policies. A and B must not issue different baseline calls.
 
@@ -68,9 +73,9 @@ Candidate A scans every source image with deterministic relative geometry. It do
 - G3: a three- or four-sided nested rectangle or perspective quadrilateral enclosing 20% to 95% of image area.
 - Repeated compatible geometry across images in the same order raises candidate confidence but never directly changes the decision.
 
-For each triggered order, create one evidence montage containing the full image, selected edge strips, the central nested-frame candidate, candidate type, and normalized coordinates. Submit the montage in one isolated `qwen3.7-plus` review call.
+Before paid review calls, run both selectors across the complete unlabeled bundle. For each triggered order, create one deterministic 2048x2048 evidence montage containing overviews of every order image and the deterministic union of the candidates that triggered either arm, with context, enlarged ROI, candidate type, stable panel ID, and normalized coordinates. The union is capped at six; overflow symmetrically fails that order for both arms instead of truncating. Submit the montage in one isolated `qwen3.7-plus` review call. If both arms trigger the order, the montage bytes and SHA-256 must be identical.
 
-Candidate A changes the shadow result to `manual_review` only when the reviewer confirms an external carrier and points to the candidate region, or when the reviewer returns `uncertain` and deterministic geometry contains G1, paired G2, G3, or two independent signals.
+The model returns observation fields and valid montage panel references only; it does not return the final decision. Deterministic local Candidate A code changes the shadow result to `manual_review` only when the reviewer confirms an external carrier and points to the candidate region, or when the reviewer returns `uncertain` and deterministic geometry contains G1, paired G2, G3, or two independent signals.
 
 ## Candidate B: Baseline-Gated ROI Review
 
@@ -79,24 +84,24 @@ Candidate B uses a narrower selector:
 - Trigger when the baseline result is `R10_PRODUCT_SCREEN_LOCAL_MOIRE_EXEMPT` and relative geometry finds an outer band, partial straight boundary, or central nested rectangle.
 - Trigger when the baseline is R9/no-evidence with owner `none` or `uncertain` and relative geometry finds opposing boundaries.
 
-For every triggered image, create a 2x3 montage containing the full image, four proportional edge strips, and the central rectangle candidate. Candidate montages from one order are submitted in one isolated `qwen3.7-plus` review call.
+For every triggered order, use the same deterministic order montage format and renderer as Candidate A. Each arm submits at most one isolated `qwen3.7-plus` review call per order.
 
 The reviewer must output:
 
 ```json
 {
-  "image_id": "img_001",
+  "panel_id": "F1",
   "outermost_layer": "direct_scene | product_device | external_display | uncertain",
   "pattern": "full_edge_band | opposite_edge_bands | partial_edge_with_outer_optics | central_nested_frame | none | uncertain",
   "visible_sides": ["bottom"],
   "content_terminates_at_boundary": true,
   "outer_plane_optics": false,
-  "decision": "manual_review | no_evidence",
+  "evidence_refs": ["F1"],
   "reason": "visible evidence only"
 }
 ```
 
-Candidate B changes the shadow result to `manual_review` only for one of these frozen combinations:
+The model does not choose Candidate B's result. Deterministic local Candidate B code changes the shadow result to `manual_review` only for one of these frozen combinations:
 
 - `full_edge_band` and `content_terminates_at_boundary=true`
 - `opposite_edge_bands` with at least two visible sides
@@ -107,13 +112,14 @@ Candidate B changes the shadow result to `manual_review` only for one of these f
 
 ## Failure Behavior
 
-Both candidates expose independent `off | shadow | enforce` modes, but this comparison uses `shadow` only.
+The experiment exposes independent `off | shadow` modes only. `enforce` and all production enablement are outside this experiment.
 
 - Local image decode failure: record candidate service failure and preserve the baseline decision.
 - Optional review timeout or schema failure: retry once, then record service failure and preserve the baseline decision during shadow.
 - Never silently convert a service failure into either confirmed real or confirmed non-real.
-- Stop candidate calls when trigger rate exceeds 10%, rolling review failure exceeds 2%, or the configured token/latency budget is exceeded.
+- Compute each arm's trigger rate over the complete bundle before any paid candidate call; an arm above 10% is ineligible and makes no candidate calls. After at least 20 measured calls, stop only the affected arm when rolling review failure exceeds 2% or the configured token/latency budget is exceeded.
 - `off` must bypass all candidate work and reproduce the baseline output.
+- Candidate budgets and stop states are independent. A stopped arm is ineligible and cannot prevent the other arm from completing.
 
 ## Metrics
 
