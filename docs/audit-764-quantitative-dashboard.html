@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>审核运行量化 | 764单</title>
+  <style>
+    :root {
+      --ink: #17324d; --muted: #647486; --line: #d7e0e7;
+      --paper: #f5f8fa; --white: #ffffff; --teal: #238a83;
+      --coral: #cb5a50; --amber: #b47b1d;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--paper); }
+    body {
+      margin: 0; color: var(--ink);
+      background:
+        linear-gradient(var(--line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line) 1px, transparent 1px),
+        var(--paper);
+      background-size: 32px 32px;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      font-variant-numeric: tabular-nums;
+    }
+    main { max-width: 1420px; margin: 0 auto; padding: 34px 28px 52px; }
+    .topline { display: flex; justify-content: space-between; gap: 24px; align-items: end; border-bottom: 2px solid var(--ink); padding-bottom: 18px; }
+    .eyebrow { margin: 0 0 10px; color: var(--coral); font-size: 12px; font-weight: 700; letter-spacing: .12em; }
+    h1 { margin: 0; font-size: clamp(30px, 4.4vw, 62px); line-height: .98; letter-spacing: -0.03em; font-weight: 800; }
+    .run-meta { text-align: right; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .run-meta strong { display: block; color: var(--ink); font-size: 24px; }
+    .notice { display: grid; grid-template-columns: 10px 1fr auto; gap: 16px; align-items: center; margin: 22px 0; padding: 15px 18px; background: var(--white); border: 1px solid var(--line); }
+    .notice-mark { height: 100%; min-height: 42px; background: var(--amber); }
+    .notice h2 { margin: 0 0 4px; font-size: 15px; }
+    .notice p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .notice b { color: var(--amber); }
+    .notice-stat { font-size: 28px; font-weight: 800; color: var(--amber); white-space: nowrap; }
+    .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .kpi { min-height: 124px; padding: 17px 16px; background: var(--white); border: 1px solid var(--line); border-top: 4px solid var(--ink); }
+    .kpi.teal { border-top-color: var(--teal); } .kpi.coral { border-top-color: var(--coral); } .kpi.amber { border-top-color: var(--amber); }
+    .kpi-label { color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .kpi-value { margin-top: 13px; font-size: clamp(24px, 2.4vw, 34px); font-weight: 800; letter-spacing: -0.03em; }
+    .kpi-sub { margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .grid { display: grid; grid-template-columns: 1.45fr 1fr; gap: 18px; }
+    .panel { background: var(--white); border: 1px solid var(--line); padding: 20px; min-width: 0; }
+    .panel.wide { grid-column: 1 / -1; }
+    .panel-head { display: flex; justify-content: space-between; gap: 18px; align-items: baseline; border-bottom: 1px solid var(--line); padding-bottom: 12px; margin-bottom: 14px; }
+    .panel h2 { margin: 0; font-size: 17px; } .panel-head span { color: var(--muted); font-size: 12px; }
+    canvas { display: block; width: 100%; height: 270px; } .chart-tall { height: 320px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { display: inline-block; width: 10px; height: 10px; }
+    .swatch.teal { background: var(--teal); } .swatch.coral { background: var(--coral); } .swatch.amber { background: var(--amber); } .swatch.ink { background: var(--ink); }
+    .metric-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .metric-table th, .metric-table td { padding: 11px 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .metric-table th { color: var(--muted); font-weight: 400; width: 52%; } .metric-table td { font-weight: 700; text-align: right; }
+    .metric-table .risk { color: var(--coral); } .metric-table .good { color: var(--teal); } .metric-table .warn { color: var(--amber); }
+    .footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .footer strong { color: var(--ink); }
+    @media (max-width: 980px) {
+      main { padding: 24px 16px 38px; } .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .grid { grid-template-columns: 1fr; } .panel.wide { grid-column: auto; }
+    }
+    @media (max-width: 560px) {
+      .topline { display: block; } .run-meta { margin-top: 18px; text-align: left; }
+      .notice { grid-template-columns: 8px 1fr; } .notice-stat { grid-column: 2; font-size: 24px; }
+      .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .panel { padding: 15px; }
+      canvas { height: 240px; } .chart-tall { height: 290px; } .footer { display: block; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="topline">
+    <div><p class="eyebrow">AUDIT RUN / QUANTIFIED VIEW</p><h1>审核运行量化</h1></div>
+    <div class="run-meta"><strong>764 单</strong>截图汇报数据 · 口径校验开启</div>
+  </header>
+  <section class="notice" aria-label="数据口径校验">
+    <div class="notice-mark"></div>
+    <div>
+      <h2>发现一处订单总量不一致</h2>
+      <p>汇报中的转人工120 + 自动通过647 = <b>767单</b>，与样本总数764单相差<b>3单</b>。拦截率10/11按分子分母计算为90.9%，截图填写为90.0%。</p>
+    </div>
+    <div class="notice-stat">+3</div>
+  </section>
+  <section class="kpis" aria-label="关键指标">
+    <article class="kpi"><div class="kpi-label">样本总数</div><div class="kpi-value">764</div><div class="kpi-sub">汇报口径</div></article>
+    <article class="kpi coral"><div class="kpi-label">转人工总数</div><div class="kpi-value">120</div><div class="kpi-sub">截图数据</div></article>
+    <article class="kpi teal"><div class="kpi-label">自动通过总数</div><div class="kpi-value">647</div><div class="kpi-sub">截图数据</div></article>
+    <article class="kpi coral"><div class="kpi-label">未通过拦截率</div><div class="kpi-value">90.0%</div><div class="kpi-sub">10 / 11 · 数学值90.9%</div></article>
+    <article class="kpi coral"><div class="kpi-label">已通过误判率</div><div class="kpi-value">14.4%</div><div class="kpi-sub">108 / 751</div></article>
+    <article class="kpi amber"><div class="kpi-label">Token总消耗</div><div class="kpi-value">10.42M</div><div class="kpi-sub">输入9.55M · 输出0.86M</div></article>
+  </section>
+  <section class="grid">
+    <article class="panel wide">
+      <div class="panel-head"><h2>订单去向</h2><span>报告值 / 总量校验</span></div>
+      <canvas id="disposition" class="chart-tall" aria-label="转人工与自动通过订单数量图"></canvas>
+      <div class="legend"><span><i class="swatch coral"></i>转人工 120</span><span><i class="swatch teal"></i>自动通过 647</span><span><i class="swatch amber"></i>口径差异 3</span><span><i class="swatch ink"></i>样本总数基准 764</span></div>
+    </article>
+    <article class="panel">
+      <div class="panel-head"><h2>风险质量</h2><span>比例指标</span></div>
+      <canvas id="quality" aria-label="拦截率与误判率图"></canvas>
+      <div class="legend"><span><i class="swatch coral"></i>风险 / 拦截</span><span><i class="swatch teal"></i>质量 / 通过</span></div>
+    </article>
+    <article class="panel">
+      <div class="panel-head"><h2>效率对比</h2><span>单 / 小时</span></div>
+      <canvas id="throughput" aria-label="人工与模型每小时审核量图"></canvas>
+      <div class="legend"><span><i class="swatch ink"></i>人工 73.33</span><span><i class="swatch teal"></i>模型 137.21</span></div>
+    </article>
+    <article class="panel">
+      <div class="panel-head"><h2>Token结构</h2><span>累计消耗</span></div>
+      <canvas id="tokens" aria-label="输入与输出Token图"></canvas>
+      <div class="legend"><span><i class="swatch ink"></i>输入 9,552,868</span><span><i class="swatch amber"></i>输出 864,385</span></div>
+    </article>
+    <article class="panel">
+      <div class="panel-head"><h2>时间价值</h2><span>小时</span></div>
+      <table class="metric-table">
+        <tr><th>有效审核总用时</th><td>5.57 小时</td></tr>
+        <tr><th>人工预计用时</th><td>10.42 小时</td></tr>
+        <tr><th>预计节省人工时间</th><td class="good">4.85 小时</td></tr>
+        <tr><th>效率倍数</th><td class="good">1.87 倍</td></tr>
+        <tr><th>效率提升率</th><td class="good">87.1%</td></tr>
+        <tr><th>Token预计成本</th><td class="warn">待配置</td></tr>
+      </table>
+    </article>
+    <article class="panel wide">
+      <div class="panel-head"><h2>量化结论</h2><span>按截图数据计算</span></div>
+      <table class="metric-table">
+        <tr><th>自动处理覆盖</th><td>647 / 764 = 84.7%</td></tr>
+        <tr><th>转人工占样本</th><td>120 / 764 = 15.7%</td></tr>
+        <tr><th>报告去向合计</th><td class="warn">767 单，超过样本总数3单</td></tr>
+        <tr><th>模型相对人工吞吐</th><td class="good">137.21 / 73.33 = 1.87 倍</td></tr>
+        <tr><th>输入Token占比</th><td>91.7%</td></tr>
+        <tr><th>输出Token占比</th><td>8.3%</td></tr>
+      </table>
+    </article>
+  </section>
+  <footer class="footer"><div><strong>数据来源：</strong>用户提供的764单汇总截图</div><div><strong>计算原则：</strong>保留原始汇报值；发现冲突时同时展示数学校验值</div></footer>
+</main>
+<script>
+  const colors = { ink: "#17324d", muted: "#647486", line: "#d7e0e7", teal: "#238a83", coral: "#cb5a50", amber: "#b47b1d" };
+  function setupCanvas(canvas) {
+    const ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const box = canvas.getBoundingClientRect();
+    canvas.width = Math.floor(box.width * ratio); canvas.height = Math.floor(box.height * ratio);
+    const ctx = canvas.getContext("2d"); ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    return { ctx: ctx, width: box.width, height: box.height };
+  }
+  function text(ctx, value, x, y, size, color, align, weight) {
+    ctx.font = (weight || "400") + " " + (size || 12) + "px Arial, \"Microsoft YaHei\", sans-serif";
+    ctx.fillStyle = color || colors.muted; ctx.textAlign = align || "left"; ctx.textBaseline = "middle"; ctx.fillText(value, x, y);
+  }
+  function grid(ctx, x, y, w, h, rows) {
+    ctx.strokeStyle = colors.line; ctx.lineWidth = 1;
+    for (let i = 0; i <= rows; i++) { const yy = y + (h / rows) * i; ctx.beginPath(); ctx.moveTo(x, yy); ctx.lineTo(x + w, yy); ctx.stroke(); }
+  }
+  function drawDisposition() {
+    const p = setupCanvas(document.querySelector("#disposition")), ctx = p.ctx, width = p.width, height = p.height;
+    const left = 92, right = 24, top = 34, bottom = 42, chartW = width - left - right, chartH = height - top - bottom, max = 767;
+    const rows = [["转人工", 120, colors.coral], ["自动通过", 647, colors.teal], ["报告合计", 767, colors.amber]];
+    text(ctx, "订单数", left, 12, 11, colors.muted); text(ctx, "764样本基准", left + chartW * 764 / max, 12, 11, colors.ink, "center", "700");
+    grid(ctx, left, top, chartW, chartH, 4);
+    const baseX = left + chartW * 764 / max; ctx.strokeStyle = colors.ink; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(baseX, top - 8); ctx.lineTo(baseX, top + chartH + 8); ctx.stroke(); ctx.setLineDash([]);
+    rows.forEach((row, index) => {
+      const yy = top + chartH * (index + .5) / rows.length, barH = Math.min(42, chartH / rows.length * .42), w = chartW * row[1] / max;
+      ctx.fillStyle = row[2]; ctx.fillRect(left, yy - barH / 2, w, barH);
+      text(ctx, row[0], left - 14, yy, 13, colors.ink, "right", "700"); text(ctx, row[1].toLocaleString("zh-CN"), left + w + 10, yy, 14, row[2], "left", "700");
+    });
+    text(ctx, "0", left, height - 16, 11); text(ctx, "400", left + chartW * 400 / max, height - 16, 11, colors.muted, "center"); text(ctx, "764", baseX, height - 16, 11, colors.ink, "center", "700"); text(ctx, "767", left + chartW, height - 16, 11, colors.amber, "right", "700");
+  }
+  function drawQuality() {
+    const p = setupCanvas(document.querySelector("#quality")), ctx = p.ctx, width = p.width, height = p.height;
+    const left = 108, right = 28, top = 28, bottom = 34, chartW = width - left - right, chartH = height - top - bottom;
+    grid(ctx, left, top, chartW, chartH, 4);
+    const rows = [["拦截率", 90.0, 90.9, colors.coral], ["误判率", 14.4, 14.4, colors.teal]];
+    rows.forEach((row, i) => {
+      const yy = top + chartH * (i + .5) / 2, barH = 24;
+      ctx.fillStyle = "#edf1f4"; ctx.fillRect(left, yy - barH / 2, chartW, barH); ctx.fillStyle = row[3]; ctx.fillRect(left, yy - barH / 2, chartW * row[1] / 100, barH);
+      text(ctx, row[0], left - 13, yy, 13, colors.ink, "right", "700"); text(ctx, row[1].toFixed(1) + "%", left + chartW * row[1] / 100 + 8, yy, 13, row[3], "left", "700");
+      if (row[2] !== row[1]) text(ctx, "数学值 " + row[2].toFixed(1) + "%", width - 10, yy, 11, colors.amber, "right");
+    });
+    [0, 25, 50, 75, 100].forEach(v => text(ctx, v + "%", left + chartW * v / 100, height - 14, 10, colors.muted, "center"));
+  }
+  function drawThroughput() {
+    const p = setupCanvas(document.querySelector("#throughput")), ctx = p.ctx, width = p.width, height = p.height;
+    const left = 100, right = 26, top = 30, bottom = 34, chartW = width - left - right, chartH = height - top - bottom, max = 150;
+    grid(ctx, left, top, chartW, chartH, 4);
+    [["人工", 73.33, colors.ink], ["模型", 137.21, colors.teal]].forEach((row, i) => {
+      const yy = top + chartH * (i + .5) / 2, w = chartW * row[1] / max;
+      ctx.fillStyle = row[2]; ctx.fillRect(left, yy - 20, w, 40); text(ctx, row[0], left - 12, yy, 13, colors.ink, "right", "700"); text(ctx, row[1].toFixed(2), left + w + 8, yy, 14, row[2], "left", "700");
+    });
+    [0, 50, 100, 150].forEach(v => text(ctx, String(v), left + chartW * v / max, height - 14, 10, colors.muted, "center"));
+  }
+  function drawTokens() {
+    const p = setupCanvas(document.querySelector("#tokens")), ctx = p.ctx, width = p.width, height = p.height;
+    const left = 100, right = 28, top = 30, bottom = 34, chartW = width - left - right, chartH = height - top - bottom, max = 9552868;
+    grid(ctx, left, top, chartW, chartH, 4);
+    [["输入", 9552868, colors.ink], ["输出", 864385, colors.amber]].forEach((row, i) => {
+      const yy = top + chartH * (i + .5) / 2, w = chartW * row[1] / max;
+      ctx.fillStyle = row[2]; ctx.fillRect(left, yy - 20, Math.max(w, 5), 40); text(ctx, row[0], left - 12, yy, 13, colors.ink, "right", "700"); text(ctx, row[1].toLocaleString("zh-CN"), left + Math.max(w, 5) + 8, yy, 13, row[2], "left", "700");
+    });
+    text(ctx, "0", left, height - 14, 10, colors.muted); text(ctx, "9.55M", left + chartW, height - 14, 10, colors.muted, "right");
+  }
+  function render() { drawDisposition(); drawQuality(); drawThroughput(); drawTokens(); }
+  window.addEventListener("resize", render); render();
+</script>
+</body>
+</html>

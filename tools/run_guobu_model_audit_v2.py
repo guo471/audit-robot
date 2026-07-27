@@ -7,11 +7,11 @@ import http.client
 import hashlib
 import base64
 import json
-import math
 import mimetypes
 import os
 import re
 import sys
+import tempfile
 import time
 import traceback
 import threading
@@ -37,6 +37,20 @@ from tools.photo_authenticity_mainline import (
     apply_photo_authenticity_gate,
     validate_image_observations,
 )
+from tools.guobu_sn_policy_v2 import (
+    SnCategory as SnV2Category,
+    build_model_payload as build_sn_v2_payload,
+    build_sn_prompt as build_sn_v2_prompt,
+    classify_sn_category as classify_sn_v2_category,
+    decide_sn as decide_sn_v2,
+)
+
+
+def resolve_sn_policy_version(value: Any = None) -> str:
+    selected = str(value if value is not None else os.environ.get("SN_POLICY_VERSION", "v1")).strip().lower()
+    if selected not in {"v1", "v2"}:
+        raise ValueError("SN_POLICY_VERSION must be v1 or v2")
+    return selected
 
 
 SN_PROMPT = """你是国补审核的 SN 专项识别员。只输出严格 JSON 对象。
@@ -60,6 +74,358 @@ SN 等价文字包括：SN、S/N、SN码、序列号、Serial No.、条形码下
 输出字段：sn_match, observed_sn, normalized_observed_sn, sn_candidates, manual_reason_code, manual_reason, confidence。
 sn_candidates 是数组，每项包含 source, field_type, raw_text, normalized_text, readable, confidence。可额外输出 uncertain_positions 或 visual_ambiguity_notes。
 """
+
+
+SN_SIMILAR_CHAR_REVIEW_PROMPT = (
+    PROJECT_ROOT / "prompts" / "sn_similar_char_review.txt"
+).read_text(encoding="utf-8").strip()
+SN_SIMILAR_CHAR_REVIEW_V2_PROMPT = (
+    PROJECT_ROOT / "prompts" / "sn_similar_char_review_v2.txt"
+).read_text(encoding="utf-8").strip()
+SN_CHAR_REVIEW_MODES = {"off", "on", "v2"}
+
+
+def resolve_sn_char_review_mode(value: str | None = None) -> str:
+    mode = str(value if value is not None else os.environ.get("SN_CHAR_REVIEW_MODE", "off")).strip().lower()
+    if mode not in SN_CHAR_REVIEW_MODES:
+        raise ValueError(f"invalid SN character review mode: {mode}")
+    return mode
+
+
+def build_sn_prompt(mode: str | None = None) -> str:
+    resolved_mode = resolve_sn_char_review_mode(mode)
+    if resolved_mode == "off":
+        return SN_PROMPT
+    fragment = (
+        SN_SIMILAR_CHAR_REVIEW_PROMPT
+        if resolved_mode == "on"
+        else SN_SIMILAR_CHAR_REVIEW_V2_PROMPT
+    )
+    return SN_PROMPT + "\n\n" + fragment
+
+
+SN_LABEL_AUTH_REVIEW_PROMPT_PATH = PROJECT_ROOT / "prompts" / "sn_label_authenticity_review.txt"
+_SN_LABEL_AUTH_REVIEW_PROMPT_CACHE: str | None = None
+SN_LABEL_AUTH_REVIEW_MODES = {"off", "on"}
+PHOTO_AUTH_EDGE_MAPPING_PROMPT_PATH = PROJECT_ROOT / "prompts" / "photo_auth_edge_mapping_review.txt"
+_PHOTO_AUTH_EDGE_MAPPING_PROMPT_CACHE: str | None = None
+PHOTO_AUTH_EDGE_MAPPING_MODES = {"off", "on"}
+PHOTO_AUTH_EDGE_DIAGNOSTIC_PREFIX = "edge_candidate__"
+DIGITAL_ACTIVATION_EVIDENCE_PROMPT_PATH = PROJECT_ROOT / "prompts" / "digital_activation_evidence_review.txt"
+_DIGITAL_ACTIVATION_EVIDENCE_PROMPT_CACHE: str | None = None
+DIGITAL_ACTIVATION_EVIDENCE_MODES = {"off", "on"}
+
+
+def resolve_sn_label_auth_review_mode(value: str | None = None) -> str:
+    mode = str(value if value is not None else os.environ.get("SN_LABEL_AUTH_REVIEW_MODE", "off")).strip().lower()
+    if mode not in SN_LABEL_AUTH_REVIEW_MODES:
+        raise ValueError(f"invalid SN label authenticity review mode: {mode}")
+    return mode
+
+
+def read_sn_label_auth_review_prompt() -> str:
+    global _SN_LABEL_AUTH_REVIEW_PROMPT_CACHE
+    if _SN_LABEL_AUTH_REVIEW_PROMPT_CACHE is None:
+        _SN_LABEL_AUTH_REVIEW_PROMPT_CACHE = SN_LABEL_AUTH_REVIEW_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    return _SN_LABEL_AUTH_REVIEW_PROMPT_CACHE
+
+
+def resolve_photo_auth_edge_mapping_mode(value: str | None = None) -> str:
+    mode = str(
+        value if value is not None else os.environ.get("PHOTO_AUTH_EDGE_MAPPING_MODE", "off")
+    ).strip().lower()
+    if mode not in PHOTO_AUTH_EDGE_MAPPING_MODES:
+        raise ValueError(f"invalid photo authenticity edge mapping mode: {mode}")
+    return mode
+
+
+def read_photo_auth_edge_mapping_prompt() -> str:
+    global _PHOTO_AUTH_EDGE_MAPPING_PROMPT_CACHE
+    if _PHOTO_AUTH_EDGE_MAPPING_PROMPT_CACHE is None:
+        _PHOTO_AUTH_EDGE_MAPPING_PROMPT_CACHE = PHOTO_AUTH_EDGE_MAPPING_PROMPT_PATH.read_text(
+            encoding="utf-8"
+        ).strip()
+    return _PHOTO_AUTH_EDGE_MAPPING_PROMPT_CACHE
+
+
+def scan_photo_auth_edge_candidates(images: list[dict[str, Any]]) -> dict[str, Any]:
+    from tools.black_edge_shadow_detector import scan_image
+
+    scans: dict[str, Any] = {}
+    for image in images:
+        image_id = str(image.get("image_id") or "").strip()
+        local_path = str(image.get("local_path") or "").strip()
+        if not image_id or not local_path:
+            continue
+        path = Path(local_path)
+        if not path.is_file():
+            continue
+        try:
+            scans[image_id] = scan_image(path)
+        except Exception:
+            continue
+    return scans
+
+
+def annotate_photo_auth_edge_candidates(source: Path, destination: Path, scan: Any) -> Path:
+    from tools.black_edge_shadow_detector import annotate_strong_candidates
+
+    return annotate_strong_candidates(source, destination, scan)
+
+
+def _strong_edge_candidate_payload(image_id: str, diagnostic_image_id: str, scan: Any) -> list[dict[str, Any]]:
+    candidates = []
+    for side, evidence in scan.sides.items():
+        if str(getattr(evidence, "status", "")) != "strong_candidate":
+            continue
+        candidates.append({
+            "candidate_id": f"{image_id}:{side}",
+            "image_id": image_id,
+            "diagnostic_image_id": diagnostic_image_id,
+            "side": side,
+            "tangent_start_fraction": round(float(getattr(evidence, "tangent_start_fraction", 0.0)), 4),
+            "tangent_end_fraction": round(float(getattr(evidence, "tangent_end_fraction", 0.0)), 4),
+            "boundary_depth_fraction": round(float(getattr(evidence, "boundary_depth_fraction", 0.0)), 4),
+            "marker": "magenta_line_at_detected_inner_boundary",
+        })
+    return candidates
+
+
+def prepare_photo_auth_edge_mapping_inputs(
+    images: list[dict[str, Any]],
+    payload: dict[str, Any],
+    *,
+    mode: str | None = None,
+    output_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if resolve_photo_auth_edge_mapping_mode(mode) == "off":
+        return images, payload
+
+    try:
+        scans = scan_photo_auth_edge_candidates(images)
+    except Exception:
+        return images, payload
+
+    from tools.black_edge_shadow_detector import ANNOTATION_VERSION, DETECTOR_VERSION
+
+    candidates: list[dict[str, Any]] = []
+    replacements: dict[str, dict[str, Any]] = {}
+    for image in images:
+        image_id = str(image.get("image_id") or "").strip()
+        source_text = str(image.get("local_path") or "").strip()
+        scan = scans.get(image_id)
+        if not image_id or not source_text or scan is None or getattr(scan, "status", "") != "strong_candidate":
+            continue
+        source = Path(source_text)
+        if not source.is_file():
+            continue
+        diagnostic_image_id = f"{PHOTO_AUTH_EDGE_DIAGNOSTIC_PREFIX}{image_id}"
+        image_candidates = _strong_edge_candidate_payload(image_id, diagnostic_image_id, scan)
+        if not image_candidates:
+            continue
+        try:
+            original_digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+            geometry_digest = hashlib.sha256(
+                json.dumps(image_candidates, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:12]
+            destination = Path(output_dir) / "photo_auth_edge_mapping" / (
+                f"{image_id}-{original_digest}-{DETECTOR_VERSION}-{ANNOTATION_VERSION}-{geometry_digest}.png"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            annotate_photo_auth_edge_candidates(source, destination, scan)
+        except Exception:
+            continue
+        diagnostic = dict(image)
+        diagnostic.pop("source_url", None)
+        diagnostic.pop("url", None)
+        diagnostic["title"] = f"EDGE_CANDIDATE_DIAGNOSTIC:{image_id}"
+        diagnostic["local_path"] = str(destination)
+        diagnostic["_detail"] = "low"
+        replacements[image_id] = diagnostic
+        candidates.extend(image_candidates)
+
+    if not candidates:
+        return images, payload
+    # Keep one model image per original image_id. Candidate images use the
+    # annotated local copy, so the diagnostic copy cannot drift other fields
+    # through duplicate image coverage.
+    prepared_images = [
+        replacements.get(str(image.get("image_id") or ""), image)
+        for image in images
+    ]
+    prepared_payload = dict(payload)
+    diagnostic_positions = {
+        str(image.get("image_id") or ""): index
+        for index, image in enumerate(prepared_images, start=1)
+        if str(image.get("image_id") or "") in replacements
+    }
+    for candidate in candidates:
+        candidate["diagnostic_image_position"] = diagnostic_positions[candidate["image_id"]]
+    prepared_payload["photo_auth_edge_candidates"] = candidates
+    return prepared_images, prepared_payload
+
+
+def _edge_evidence_is_unbound_or_image_edge(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    regions = item.get("regions")
+    if not isinstance(regions, list) or not regions:
+        return True
+    return "image_edge" in {str(region) for region in regions}
+
+
+def _filter_unconfirmed_edge_evidence(
+    observation: dict[str, Any],
+    unconfirmed_sides: set[str],
+) -> dict[str, Any]:
+    mapped = dict(observation)
+    changed = False
+    edges = dict(mapped.get("edges") or {})
+    for side in unconfirmed_sides:
+        if edges.get(side) == "carrier_boundary":
+            edges[side] = "scene_continues"
+            changed = True
+    if edges != mapped.get("edges"):
+        mapped["edges"] = edges
+
+    strong = list(mapped.get("strong_evidence") or [])
+    filtered_strong = [
+        item for item in strong
+        if not (
+            isinstance(item, dict)
+            and item.get("code") == "EXTERNAL_PHOTO_CARRIER"
+            and _edge_evidence_is_unbound_or_image_edge(item)
+        )
+    ]
+    if filtered_strong != strong:
+        mapped["strong_evidence"] = filtered_strong
+        changed = True
+
+    weak = list(mapped.get("weak_evidence") or [])
+    filtered_weak = [
+        item for item in weak
+        if not (
+            isinstance(item, dict)
+            and item.get("code") == "EDGE_CUTOFF"
+            and _edge_evidence_is_unbound_or_image_edge(item)
+        )
+    ]
+    if filtered_weak != weak:
+        mapped["weak_evidence"] = filtered_weak
+        changed = True
+    return mapped if changed else observation
+
+
+def apply_photo_auth_edge_candidate_reviews(
+    compliance: dict[str, Any], candidate_payload: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if resolve_photo_auth_edge_mapping_mode() == "off" or not candidate_payload:
+        return compliance
+    reviews = compliance.get("photo_auth_edge_candidate_reviews")
+    observations = compliance.get("photo_authenticity_by_image")
+    if not isinstance(observations, list):
+        return compliance
+
+    candidates = {
+        str(item.get("candidate_id") or ""): item
+        for item in candidate_payload
+        if isinstance(item, dict) and item.get("candidate_id") and item.get("image_id") and item.get("side")
+    }
+    diagnostic_ids = {
+        str(item.get("diagnostic_image_id") or "")
+        for item in candidate_payload
+        if isinstance(item, dict) and item.get("diagnostic_image_id")
+    }
+    original_observations = [
+        item for item in observations
+        if not isinstance(item, dict) or str(item.get("image_id") or "") not in diagnostic_ids
+    ]
+    if len(original_observations) != len(observations):
+        compliance = dict(compliance)
+        compliance["photo_authenticity_by_image"] = original_observations
+        observations = original_observations
+    if not isinstance(reviews, list):
+        reviews = []
+
+    candidate_sides: dict[str, set[str]] = defaultdict(set)
+    for candidate in candidates.values():
+        candidate_sides[str(candidate["image_id"])].add(str(candidate["side"]))
+    confirmed: dict[str, set[str]] = {}
+    physical_features = {"screen_frame", "display_boundary", "screen_corner"}
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        candidate_id = str(review.get("candidate_id") or "")
+        candidate = candidates.get(candidate_id)
+        image_id = str(review.get("image_id") or "")
+        diagnostic_image_id = str(review.get("diagnostic_image_id") or "")
+        expected_diagnostic_image_id = str(candidate.get("diagnostic_image_id") or "") if candidate else ""
+        features = review.get("supporting_features")
+        feature_set = {str(value) for value in features} if isinstance(features, list) else set()
+        if (
+            candidate is not None
+            and image_id == str(candidate.get("image_id") or "")
+            and (
+                not expected_diagnostic_image_id
+                or diagnostic_image_id == expected_diagnostic_image_id
+            )
+            and str(review.get("side") or "") == str(candidate.get("side") or "")
+            and review.get("confirmed_external_screen") is True
+            and review.get("classification") == "external_screen"
+            and feature_set & physical_features
+        ):
+            confirmed.setdefault(image_id, set()).add(str(candidate["side"]))
+
+    updated = dict(compliance)
+    updated_observations: list[Any] = []
+    for observation in observations:
+        if not isinstance(observation, dict):
+            updated_observations.append(observation)
+            continue
+        image_id = str(observation.get("image_id") or "")
+        unconfirmed_sides = candidate_sides.get(image_id, set()) - confirmed.get(image_id, set())
+        mapped = (
+            _filter_unconfirmed_edge_evidence(observation, unconfirmed_sides)
+            if unconfirmed_sides
+            else observation
+        )
+        if image_id not in confirmed:
+            updated_observations.append(mapped)
+            continue
+        mapped = dict(mapped)
+        edges = dict(mapped.get("edges") or {})
+        for side_name in confirmed[image_id]:
+            if side_name in {"top", "right", "bottom", "left"}:
+                edges[side_name] = "carrier_boundary"
+        mapped["edges"] = edges
+        mapped["screen_owner"] = "external_screen"
+        strong = list(mapped.get("strong_evidence") or [])
+        if not any(isinstance(item, dict) and item.get("code") == "EXTERNAL_PHOTO_CARRIER" for item in strong):
+            strong.append({"code": "EXTERNAL_PHOTO_CARRIER", "regions": ["image_edge"]})
+        mapped["strong_evidence"] = strong
+        updated_observations.append(mapped)
+    updated["photo_authenticity_by_image"] = updated_observations
+    if updated["photo_authenticity_by_image"] == observations:
+        return compliance
+    return updated
+
+
+def resolve_digital_activation_evidence_mode(value: str | None = None) -> str:
+    mode = str(
+        value if value is not None else os.environ.get("DIGITAL_ACTIVATION_EVIDENCE_MODE", "on")
+    ).strip().lower()
+    if mode not in DIGITAL_ACTIVATION_EVIDENCE_MODES:
+        raise ValueError(f"invalid digital activation evidence mode: {mode}")
+    return mode
+
+
+def read_digital_activation_evidence_prompt() -> str:
+    global _DIGITAL_ACTIVATION_EVIDENCE_PROMPT_CACHE
+    if _DIGITAL_ACTIVATION_EVIDENCE_PROMPT_CACHE is None:
+        _DIGITAL_ACTIVATION_EVIDENCE_PROMPT_CACHE = DIGITAL_ACTIVATION_EVIDENCE_PROMPT_PATH.read_text(
+            encoding="utf-8"
+        ).strip()
+    return _DIGITAL_ACTIVATION_EVIDENCE_PROMPT_CACHE
 
 
 SN_TARGETED_REVIEW_PROMPT = """你是国补审核的 SN 目标复核员。只输出严格 JSON 对象。
@@ -150,13 +516,13 @@ COMPLIANCE_PROMPT = """你是国补订单图片合规审核员。只输出严格
 家电范围：
 冰箱、冰柜、冷吧、洗衣机、烘干机、电视、空调、热水器、燃气热水器、电热水器、壁挂炉等。
 家电拆封/安装照片合格：
-- 拆封后商品和包装合照。
-- 商品已安装在家庭、店铺或使用场景中，能清楚看到商品本体。
-- 商品照片和拆封/安装照片均显示商品已到家，且背景一致。
-- 不要求每一张拆封图都同时出现包装和商品，只要整组证据能证明商品已交付、拆封或安装即可。
+- 拆封/安装照片组自身能看到商品本体，并且能看到包装、外箱、拆封关系、安装/到家/使用场景中的任一证据。
+- 有包装时，不能只有纸箱、箱体内部、泡沫、塑料袋、标签或说明书；必须同时能看到商品本体。
+- 无包装时，必须能看到商品本体已经到家、安装、摆放或处于使用场景。
+- 不得用商品照片中的商品本体去补拆封/安装照片缺失的商品本体。
 家电拆封/安装照片不合格，返回 UNBOXING_PHOTO_INVALID：
 - 看不到拆封、安装、交付或商品本体。
-- 只有包装局部，无法证明商品已交付。
+- 只有包装箱、纸箱内部、泡沫、塑料袋、标签、说明书或无关环境，无法看到商品本体。
 - 只有无关环境照片。
 家电激活/SN证据合格：
 - 机身 SN 照片。
@@ -332,7 +698,7 @@ COMPLIANCE_COMMON_PROMPT = """你是国补订单图片合规审核员。只输�
 3. 每张照片都要检查是否为真实拍摄。
 4. 截图、相册图、电子屏二次翻拍、拼图、P图、SN/IMEI区域篡改，转人工 IMAGE_STRONG_RISK。
 5. 发票编号旁有橘色感叹号，转人工 INVOICE_ORANGE_WARNING。
-6. 三张证据位完全重复，转人工 DUPLICATE_IMAGE_EVIDENCE。
+6. 只有至少三张照片为完全相同的原始文件、画面没有任何差异，才返回 DUPLICATE_IMAGE_EVIDENCE。只有两张重复不得拦截；角度、位置、裁切、透视、背景、光线或屏幕内容任一不同，都不属于完全重复。
 7. 分类由系统完成，不要改判品类，不要输出自造原因码。
 8. 即使 SN 一致性已由前置阶段判断，也必须客观填写 activation_screen；本阶段不要重复提取包装或机身 SN 候选。"""
 
@@ -343,11 +709,12 @@ HOME_APPLIANCE_COMPLIANCE_PROMPT = COMPLIANCE_COMMON_PROMPT + """
 
 审核规则：
 1. 商品照片应能看到商品本体或外包装。
-2. 拆封/安装照片可由两种证据满足：可识别外箱或包装结构，并与商品本体形成同一商品证据链；或无包装但商品已安装在家庭、店铺或使用场景中，且能清楚看到商品本体，也可判定拆封/安装照片合格。
-3. 只有商品内部、机身铭牌、保护膜、胶带、泡沫或局部零件，且不能证明商品已交付、拆封或安装，返回 UNBOXING_PHOTO_INVALID。
-4. package_visible 只在拆封照片中出现可识别外箱或包装结构时返回 true；无包装但已安装到家/店/使用场景时，package_visible=false，同时 whole_product_visible=true 且 home_or_installation_scene_visible=true。
-5. 激活/SN照片只检查是否真实拍摄，以及是否存在翻拍、截图、拼图、P图、篡改风险。
-6. 若商品类型与订单类型明显不一致，返回 PRODUCT_TYPE_MISMATCH。
+2. 拆封/安装照片组自身必须看到商品本体；不得用商品照片中的商品本体去补拆封/安装照片缺失的商品本体。
+3. 有包装时，拆封/安装照片组必须同时看到商品本体和包装/外箱/拆封关系；只有纸箱、箱体内部、泡沫、塑料袋、标签或说明书，返回 UNBOXING_PHOTO_INVALID。
+4. 无包装时，必须能看到商品本体已经到家、安装、摆放或处于家庭/店铺/使用场景中，才可判定拆封/安装照片合格。
+5. package_visible 只在拆封/安装照片组中出现可识别外箱或包装结构时返回 true；whole_product_visible 只根据拆封/安装照片组判断，不能根据商品照片判断；无包装但已安装到家/店/使用场景时，package_visible=false，同时 whole_product_visible=true 且 home_or_installation_scene_visible=true。
+6. SN 已由第一阶段核验后，家电不要求亮屏或开机证据；激活/SN照片只检查是否真实拍摄，以及是否存在翻拍、截图、拼图、P图、篡改风险。
+7. 仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。
 
 """ + HOME_APPLIANCE_OUTPUT_SCHEMA
 
@@ -361,7 +728,7 @@ ORDINARY_3C_COMPLIANCE_PROMPT = COMPLIANCE_COMMON_PROMPT + """
 2. 拆封照片应能看到设备本体，并能与包装形成同一商品证据链。
 3. 激活照片应为设备真实亮屏页面，并显示 SN、序列号、IMEI1、IMEI2 等身份信息之一。
 4. 只有亮屏、锁屏、桌面、开机画面，但没有身份信息，返回 ACTIVATION_PHOTO_INVALID。
-5. 若商品类型与订单类型明显不一致，返回 PRODUCT_TYPE_MISMATCH。
+5. 仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。
 6. 禁止把 3C 产品正常亮屏激活页、设置页、关于本机页误判为二次翻拍。
 7. 智能手表/手环的配对页、设备名称、开机标志、二维码不属于 SN/IMEI/序列号身份信息；屏幕没有身份信息时，即使包装 SN 清晰也返回 ACTIVATION_PHOTO_INVALID。
 8. 必须在 activation_screen 中区分 PAIRING_OR_SETUP 与 ABOUT_DEVICE_SN/DEVICE_INFO_WITH_ID。
@@ -381,7 +748,7 @@ COMPUTER_COMPLIANCE_PROMPT = COMPLIANCE_COMMON_PROMPT + """
 4. 台式机必须出现主机机身 SN/铭牌与外包装 SN 证据链。
 5. 电脑不得套用普通3C或家电规则。
 6. 电脑正常亮屏 BIOS、系统信息页、设备信息页不属于二次翻拍。
-7. 若商品类型与订单类型明显不一致，返回 PRODUCT_TYPE_MISMATCH。
+7. 仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。
 
 """ + COMPLIANCE_OUTPUT_SCHEMA
 
@@ -478,6 +845,9 @@ CSV_COLUMNS = [
     ("photo_authenticity_incremental_tokens", "真实性可计算增量token"),
     ("photo_authenticity_incremental_elapsed_sec", "真实性可计算增量耗时秒"),
     ("photo_authenticity_incremental_available", "真实性增量是否可计算"),
+    ("sn_char_review_mode", "SN相似字符复核模式"),
+    ("sn_label_auth_review_mode", "SN标签真实性插件模式"),
+    ("digital_activation_evidence_mode", "普通3C激活证据插件模式"),
 ]
 
 
@@ -557,6 +927,9 @@ def finalize_photo_authenticity_report_fields(
 ) -> dict[str, Any]:
     """Record the configured mode even when the authenticity stage was skipped."""
     row["photo_authenticity_mode"] = config.mode
+    row["sn_label_auth_review_mode"] = (
+        "on" if config.mode != "off" and config.sn_label_auth_review_enabled else "off"
+    )
     apply_optional_compliance_baseline(row, os.environ)
     return prepare_photo_authenticity_report_fields(row)
 
@@ -603,6 +976,10 @@ _last_model_request_at: float | None = None
 
 
 class ModelConnectionError(RuntimeError):
+    pass
+
+
+class OrderBudgetExceeded(TimeoutError):
     pass
 
 
@@ -747,13 +1124,39 @@ def is_activation_title(title: str) -> bool:
 
 
 ADDRESS_PASS_KEYWORDS = ("商贸", "京东家电", "楼")
+ADDRESS_LONG_ALNUM_SUFFIX_RE = re.compile(r"(?i)[a-z0-9]{11,}$")
+ADDRESS_DETAIL_MARKERS = (
+    "号",
+    "栋",
+    "幢",
+    "单元",
+    "室",
+    "户",
+    "门牌",
+    "店铺",
+    "门店",
+    "商铺",
+    "村",
+    "组",
+    "市场",
+    "商场",
+    "建材",
+    "商城",
+    "楼",
+)
 
 
 def is_address_precise_enough(address: str | None) -> bool:
     text = str(address or "").strip()
+    if ADDRESS_LONG_ALNUM_SUFFIX_RE.search(text) and not any(
+        marker in text for marker in ADDRESS_DETAIL_MARKERS
+    ):
+        return False
     if any(keyword in text for keyword in ADDRESS_PASS_KEYWORDS):
         return True
-    if "村" in text and re.search(r"\d", text):
+    if "村" in text:
+        return True
+    if re.search(r"\d\s*$", text):
         return True
     if re.search(r"(?:\d+|[零〇一二三四五六七八九十百两]+)\s*组$", text):
         return True
@@ -786,29 +1189,40 @@ def is_address_precise_enough(address: str | None) -> bool:
 
 
 def _image_identity(image: dict[str, Any]) -> str:
-    return str(image.get("source_url") or image.get("url") or image.get("local_path") or "")
+    local_path = str(image.get("local_path") or "").strip()
+    if local_path:
+        path = Path(local_path)
+        if path.is_file():
+            digest = hashlib.sha256()
+            try:
+                with path.open("rb") as file:
+                    for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                return "sha256:" + digest.hexdigest()
+            except OSError:
+                pass
+    source = str(image.get("source_url") or image.get("url") or "").strip()
+    return "url:" + source if source else ""
 
 
 def has_duplicate_cross_group_images(groups: dict[str, list[dict[str, Any]]]) -> bool:
-    seen: dict[str, str] = {}
-    for title, images in groups.items():
-        for image in images:
-            identity = _image_identity(image)
-            if not identity:
-                continue
-            if identity in seen and seen[identity] != title:
-                return True
-            seen[identity] = title
-    return False
+    return bool(exact_duplicate_image_groups(groups))
 
 
 def all_image_groups_share_duplicate(groups: dict[str, list[dict[str, Any]]]) -> bool:
-    identities = [
-        {_image_identity(image) for image in images if _image_identity(image)}
-        for images in groups.values()
-        if images
-    ]
-    return len(identities) >= 3 and bool(set.intersection(*identities))
+    return bool(exact_duplicate_image_groups(groups))
+
+
+def exact_duplicate_image_groups(groups: dict[str, list[dict[str, Any]]]) -> list[list[str]]:
+    buckets: dict[str, set[str]] = defaultdict(set)
+    for title, images in groups.items():
+        for index, image in enumerate(images):
+            image_id = str(image.get("image_id") or "").strip() or f"{title}:{index}"
+            identity = _image_identity(image)
+            if identity:
+                buckets[identity].add(image_id)
+    duplicate_groups = [sorted(image_ids) for image_ids in buckets.values() if len(image_ids) >= 3]
+    return sorted(duplicate_groups)
 
 
 def category_name_from_fields(fields: dict[str, Any]) -> str:
@@ -889,7 +1303,15 @@ def effective_product_category(fields: dict[str, Any]) -> str:
     return "unknown"
 
 
-def compliance_prompt_for_category(category: str, *, include_photo_authenticity: bool = False) -> str:
+def compliance_prompt_for_category(
+    category: str,
+    *,
+    product_type: str | None = None,
+    include_photo_authenticity: bool = False,
+    sn_label_auth_review_mode: str | None = None,
+    photo_auth_edge_mapping_mode: str | None = None,
+    digital_activation_evidence_mode: str | None = None,
+) -> str:
     normalized = str(category or "").strip().lower()
     if normalized == "home_appliance":
         prompt = HOME_APPLIANCE_COMPLIANCE_PROMPT
@@ -900,7 +1322,35 @@ def compliance_prompt_for_category(category: str, *, include_photo_authenticity:
     else:
         prompt = UNKNOWN_COMPLIANCE_PROMPT
     if include_photo_authenticity:
-        return prompt + PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
+        prompt = prompt + PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
+    if include_photo_authenticity and resolve_sn_label_auth_review_mode(sn_label_auth_review_mode) == "on":
+        prompt = prompt + "\n\n" + read_sn_label_auth_review_prompt()
+    product_text = str(product_type or "").strip().upper()
+    digital_product_supported = (
+        any(marker in product_text for marker in ("手机", "平板", "手表", "手环"))
+        or bool(re.search(r"\b(?:PHONE|SMARTPHONE|TABLET|WATCH|SMARTWATCH|WRISTBAND)\b", product_text))
+    )
+    if (
+        normalized in {"ordinary_3c", "3c"}
+        and digital_product_supported
+        and resolve_digital_activation_evidence_mode(digital_activation_evidence_mode) == "on"
+    ):
+        legacy_rules = """3. 激活照片应为设备真实亮屏页面，并显示 SN、序列号、IMEI1、IMEI2 等身份信息之一。
+4. 只有亮屏、锁屏、桌面、开机画面，但没有身份信息，返回 ACTIVATION_PHOTO_INVALID。
+5. 仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。
+6. 禁止把 3C 产品正常亮屏激活页、设置页、关于本机页误判为二次翻拍。
+7. 智能手表/手环的配对页、设备名称、开机标志、二维码不属于 SN/IMEI/序列号身份信息；屏幕没有身份信息时，即使包装 SN 清晰也返回 ACTIVATION_PHOTO_INVALID。
+8. 必须在 activation_screen 中区分 PAIRING_OR_SETUP 与 ABOUT_DEVICE_SN/DEVICE_INFO_WITH_ID。
+9. screen_sn_visible 和 screen_sn_text 只用于明确标注为 SN、S/N、Serial Number、序列号的内容；屏幕只有 IMEI 时，screen_sn_visible=false、screen_sn_text=""，IMEI 写入 screen_identity_text。"""
+        plugin_bridge = """3. 普通3C激活照片按文末《普通3C激活证据统一口径插件》逐图记录并由本地程序裁决。
+4. activation_photo_ok、activation_evidence_type、activation_screen 和自由文本只作兼容输出，不能替代 activation_identity_by_image。
+5. 仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。"""
+        if legacy_rules not in prompt:
+            raise RuntimeError("ordinary 3C activation rules changed without updating the digital activation plugin bridge")
+        prompt = prompt.replace(legacy_rules, plugin_bridge)
+        prompt = prompt + "\n\n" + read_digital_activation_evidence_prompt()
+    if include_photo_authenticity and resolve_photo_auth_edge_mapping_mode(photo_auth_edge_mapping_mode) == "on":
+        prompt = prompt + "\n\n" + read_photo_auth_edge_mapping_prompt()
     return prompt
 
 
@@ -1029,6 +1479,49 @@ def normalize_compliance_reason_codes(value: Any) -> list[str]:
     return sorted(normalized_codes, key=lambda item: priority.index(item) if item in priority else len(priority))
 
 
+def _local_image_content_digest(image: dict[str, Any]) -> str:
+    local_path = str(image.get("local_path") or "").strip()
+    if not local_path:
+        return ""
+    try:
+        return hashlib.sha256(Path(local_path).read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return ""
+
+
+def _write_json_atomically(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=path.name + ".",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _read_json_cache(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        path.unlink(missing_ok=True)
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _cache_key(model: str, stage: str, prompt: str, payload: dict[str, Any], images: list[dict[str, Any]]) -> str:
     image_refs = [
         {
@@ -1036,6 +1529,7 @@ def _cache_key(model: str, stage: str, prompt: str, payload: dict[str, Any], ima
             "title": image.get("title"),
             "source_url": image.get("source_url") or image.get("url"),
             "local_path": image.get("local_path"),
+            "local_content_sha256": _local_image_content_digest(image),
             "detail": image.get("_detail"),
         }
         for image in images
@@ -1062,10 +1556,23 @@ def _is_cacheable_model_result(stage: str, prompt: str, parsed: dict[str, Any], 
             return False
     if stage != "hybrid_compliance" or PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM not in prompt:
         return True
+    expected_image_ids = [str(image.get("image_id") or "") for image in images]
+    observations = parsed.get("photo_authenticity_by_image")
+    if "【外部屏幕边缘候选复核插件】" in prompt:
+        expected_image_ids = [
+            image_id for image_id in expected_image_ids
+            if not image_id.startswith(PHOTO_AUTH_EDGE_DIAGNOSTIC_PREFIX)
+        ]
+        if isinstance(observations, list):
+            observations = [
+                item for item in observations
+                if not isinstance(item, dict)
+                or not str(item.get("image_id") or "").startswith(PHOTO_AUTH_EDGE_DIAGNOSTIC_PREFIX)
+            ]
     try:
         validate_image_observations(
-            parsed.get("photo_authenticity_by_image"),
-            [str(image.get("image_id") or "") for image in images],
+            observations,
+            expected_image_ids,
         )
         return True
     except PhotoAuthenticitySchemaError:
@@ -1077,18 +1584,38 @@ def _should_disable_qwen_thinking(model: str, stage: str) -> bool:
     return normalized.startswith("qwen3.") or normalized.startswith("qwen-")
 
 
-def _wait_before_model_request() -> None:
+def _wait_before_model_request(stage_deadline_at: float | None = None) -> None:
     global _last_model_request_at
     if MODEL_REQUEST_BUFFER_SEC <= 0:
         return
-    with _model_request_lock:
+
+    if stage_deadline_at is None:
+        _model_request_lock.acquire()
+    else:
+        remaining = stage_deadline_at - time.time()
+        if remaining <= 0:
+            raise OrderBudgetExceeded(_order_timeout_reason())
+        if not _model_request_lock.acquire(timeout=remaining):
+            raise OrderBudgetExceeded(_order_timeout_reason())
+    try:
+        if stage_deadline_at is not None and stage_deadline_at - time.time() <= 0:
+            raise OrderBudgetExceeded(_order_timeout_reason())
         now = time.monotonic()
         if _last_model_request_at is not None:
             wait_sec = (_last_model_request_at + MODEL_REQUEST_BUFFER_SEC) - now
             if wait_sec > 0:
+                if stage_deadline_at is not None:
+                    remaining = stage_deadline_at - time.time()
+                    if remaining <= 0:
+                        raise OrderBudgetExceeded(_order_timeout_reason())
+                    if wait_sec > remaining:
+                        time.sleep(remaining)
+                        raise OrderBudgetExceeded(_order_timeout_reason())
                 time.sleep(wait_sec)
                 now = time.monotonic()
         _last_model_request_at = now
+    finally:
+        _model_request_lock.release()
 
 
 def _http_connection_for_url(parsed_url: urllib.parse.ParseResult, timeout: float) -> http.client.HTTPConnection:
@@ -1111,46 +1638,115 @@ def _post_chat_completion_json(
     api_key: str,
     body: dict[str, Any],
     *,
-    read_timeout_sec: int = MODEL_TIMEOUT_SEC,
+    read_timeout_sec: float = MODEL_TIMEOUT_SEC,
 ) -> dict[str, Any]:
+    stage_timeout_sec = float(read_timeout_sec)
+    if stage_timeout_sec <= 0:
+        raise OrderBudgetExceeded(_order_timeout_reason())
+    stage_deadline_at = time.time() + stage_timeout_sec
+    deadline_expired = threading.Event()
+    active_connection: dict[str, http.client.HTTPConnection | None] = {"connection": None}
+
+    def deadline_reached() -> bool:
+        return deadline_expired.is_set() or stage_deadline_at - time.time() <= 0
+
+    def remaining_stage_timeout() -> float:
+        if deadline_expired.is_set():
+            raise OrderBudgetExceeded(_order_timeout_reason())
+        remaining = stage_deadline_at - time.time()
+        if remaining <= 0:
+            deadline_expired.set()
+            raise OrderBudgetExceeded(_order_timeout_reason())
+        return remaining
+
+    def close_connection_on_deadline() -> None:
+        deadline_expired.set()
+        connection = active_connection.get("connection")
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    def read_response_body(
+        response: http.client.HTTPResponse,
+        connection: http.client.HTTPConnection,
+    ) -> bytes:
+        read1 = getattr(response, "read1", None)
+        if callable(read1):
+            chunks: list[bytes] = []
+            while True:
+                if connection.sock is not None:
+                    connection.sock.settimeout(remaining_stage_timeout())
+                else:
+                    remaining_stage_timeout()
+                chunk = read1(65536)
+                if not chunk:
+                    remaining_stage_timeout()
+                    return b"".join(chunks)
+                chunks.append(chunk)
+                remaining_stage_timeout()
+        remaining_stage_timeout()
+        raw = response.read()
+        remaining_stage_timeout()
+        return raw
+
+    deadline_timer = threading.Timer(stage_timeout_sec, close_connection_on_deadline)
+    deadline_timer.daemon = True
+    deadline_timer.start()
     url = base_url.rstrip("/") + "/chat/completions"
     parsed_url = urllib.parse.urlparse(url)
     request_body = json.dumps(body).encode("utf-8")
     headers = {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}
     last_exc: Exception | None = None
 
-    for attempt in range(MODEL_CONNECT_RETRIES + 1):
-        connection: http.client.HTTPConnection | None = None
-        phase = "connect"
-        try:
-            _wait_before_model_request()
-            connection = _http_connection_for_url(parsed_url, MODEL_CONNECT_TIMEOUT_SEC)
-            connection.request("POST", _request_path(parsed_url), body=request_body, headers=headers)
-            if connection.sock is not None:
-                connection.sock.settimeout(read_timeout_sec)
-            phase = "read"
-            response = connection.getresponse()
-            raw = response.read().decode("utf-8")
-            if response.status >= 400:
-                raise urllib.error.HTTPError(url, response.status, response.reason, response.headers, None)
-            return json.loads(raw)
-        except (TimeoutError, OSError, http.client.HTTPException) as exc:
-            last_exc = exc
-            if phase == "connect" and attempt < MODEL_CONNECT_RETRIES:
-                continue
-            if phase == "connect":
-                raise ModelConnectionError(
-                    f"connect failed after {MODEL_CONNECT_RETRIES + 1} attempts "
-                    f"with {MODEL_CONNECT_TIMEOUT_SEC}s timeout"
-                ) from exc
-            raise
-        finally:
-            if connection is not None:
-                connection.close()
+    try:
+        for attempt in range(MODEL_CONNECT_RETRIES + 1):
+            connection: http.client.HTTPConnection | None = None
+            phase = "connect"
+            try:
+                _wait_before_model_request(stage_deadline_at)
+                connect_timeout_sec = min(MODEL_CONNECT_TIMEOUT_SEC, remaining_stage_timeout())
+                connection = _http_connection_for_url(parsed_url, connect_timeout_sec)
+                active_connection["connection"] = connection
+                connection.request("POST", _request_path(parsed_url), body=request_body, headers=headers)
+                if connection.sock is not None:
+                    connection.sock.settimeout(remaining_stage_timeout())
+                phase = "read"
+                response = connection.getresponse()
+                remaining_stage_timeout()
+                if response.status >= 400:
+                    raise urllib.error.HTTPError(url, response.status, response.reason, response.headers, None)
+                raw = read_response_body(response, connection).decode("utf-8")
+                result = json.loads(raw)
+                remaining_stage_timeout()
+                return result
+            except OrderBudgetExceeded:
+                raise
+            except (TimeoutError, OSError, http.client.HTTPException) as exc:
+                if deadline_reached():
+                    raise OrderBudgetExceeded(_order_timeout_reason()) from exc
+                last_exc = exc
+                if phase == "connect" and attempt < MODEL_CONNECT_RETRIES:
+                    continue
+                if phase == "connect":
+                    raise ModelConnectionError(
+                        f"connect failed after {MODEL_CONNECT_RETRIES + 1} attempts "
+                        f"with {MODEL_CONNECT_TIMEOUT_SEC}s timeout"
+                    ) from exc
+                raise
+            finally:
+                active_connection["connection"] = None
+                if connection is not None:
+                    connection.close()
 
-    raise ModelConnectionError(
-        f"connect failed after {MODEL_CONNECT_RETRIES + 1} attempts with {MODEL_CONNECT_TIMEOUT_SEC}s timeout"
-    ) from last_exc
+        raise ModelConnectionError(
+            f"connect failed after {MODEL_CONNECT_RETRIES + 1} attempts with {MODEL_CONNECT_TIMEOUT_SEC}s timeout"
+        ) from last_exc
+    finally:
+        deadline_timer.cancel()
+        if deadline_timer.is_alive():
+            deadline_timer.join(timeout=0.1)
 
 
 def _image_url_for_model(image: dict[str, Any]) -> str:
@@ -1190,7 +1786,7 @@ def call_direct_sn_ocr(
     images: list[dict[str, Any]],
     *,
     cache_dir: Path | None = None,
-    timeout_sec: int = MODEL_TIMEOUT_SEC,
+    timeout_sec: float = MODEL_TIMEOUT_SEC,
 ) -> tuple[str, float, dict[str, Any], bool]:
     image_refs = [
         {
@@ -1198,6 +1794,7 @@ def call_direct_sn_ocr(
             "title": image.get("title"),
             "source_url": image.get("source_url") or image.get("url"),
             "local_path": image.get("local_path"),
+            "local_content_sha256": _local_image_content_digest(image),
             "detail": image.get("_detail"),
         }
         for image in images
@@ -1211,8 +1808,9 @@ def call_direct_sn_ocr(
         )
         cache_path = cache_dir / f"{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()}.json"
         if cache_path.exists():
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            return cached["observed_sn"], 0.0, cached.get("usage") or {}, True
+            cached = _read_json_cache(cache_path)
+            if cached is not None and "observed_sn" in cached:
+                return cached["observed_sn"], 0.0, cached.get("usage") or {}, True
 
     content: list[dict[str, Any]] = [{"type": "text", "text": "只输出图片中最完整的 SN。"}]
     for image in images:
@@ -1231,18 +1829,14 @@ def call_direct_sn_ocr(
     observed_sn = clean_direct_sn_text(response_data["choices"][0]["message"]["content"])
     usage = response_data.get("usage") or {}
     if cache_dir is not None:
-        cache_path.write_text(
-            json.dumps(
-                {
-                    "stage": "direct_sn_ocr",
-                    "cached_at": datetime.now().isoformat(),
-                    "observed_sn": observed_sn,
-                    "usage": usage,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        _write_json_atomically(
+            cache_path,
+            {
+                "stage": "direct_sn_ocr",
+                "cached_at": datetime.now().isoformat(),
+                "observed_sn": observed_sn,
+                "usage": usage,
+            },
         )
     return observed_sn, elapsed, usage, False
 
@@ -1258,16 +1852,17 @@ def call_model(
     stage: str,
     cache_dir: Path | None = None,
     detail: str = "auto",
-    timeout_sec: int = MODEL_TIMEOUT_SEC,
+    timeout_sec: float = MODEL_TIMEOUT_SEC,
 ) -> tuple[dict[str, Any], str, float, dict[str, Any], bool]:
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / f"{_cache_key(model, stage, prompt, payload, images)}.json"
         if cache_path.exists():
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if _is_cacheable_model_result(stage, prompt, cached["parsed"], images):
+            cached = _read_json_cache(cache_path)
+            if cached is not None and isinstance(cached.get("parsed"), dict) and _is_cacheable_model_result(stage, prompt, cached["parsed"], images):
                 return cached["parsed"], cached["content_text"], 0.0, cached.get("usage") or {}, True
-            cache_path.unlink(missing_ok=True)
+            if cached is not None:
+                cache_path.unlink(missing_ok=True)
 
     content: list[dict[str, Any]] = [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}]
     for image in images:
@@ -1296,19 +1891,15 @@ def call_model(
         raise ValueError("model JSON is not an object")
     usage = response_data.get("usage") or {}
     if cache_dir is not None and _is_cacheable_model_result(stage, prompt, parsed, images):
-        cache_path.write_text(
-            json.dumps(
-                {
-                    "stage": stage,
-                    "cached_at": datetime.now().isoformat(),
-                    "parsed": parsed,
-                    "content_text": content_text,
-                    "usage": usage,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        _write_json_atomically(
+            cache_path,
+            {
+                "stage": stage,
+                "cached_at": datetime.now().isoformat(),
+                "parsed": parsed,
+                "content_text": content_text,
+                "usage": usage,
+            },
         )
     return parsed, content_text, elapsed, usage, False
 
@@ -1334,13 +1925,15 @@ def call_model_with_retry(
     stage: str,
     cache_dir: Path | None = None,
     detail: str = "auto",
-    timeout_sec: int = MODEL_TIMEOUT_SEC,
-    retry_timeout_sec: int = MODEL_RETRY_TIMEOUT_SEC,
+    timeout_sec: float = MODEL_TIMEOUT_SEC,
+    retry_timeout_sec: float = MODEL_RETRY_TIMEOUT_SEC,
+    order_deadline_at: float | None = None,
 ) -> tuple[dict[str, Any], str, float, dict[str, Any], bool]:
+    effective_timeout_sec = _timeout_within_order_deadline(timeout_sec, order_deadline_at)
     kwargs = {
         "stage": stage,
         "cache_dir": cache_dir,
-        "timeout_sec": timeout_sec,
+        "timeout_sec": effective_timeout_sec,
     }
     if detail != "auto":
         kwargs["detail"] = detail
@@ -1355,12 +1948,14 @@ def call_model_with_retry(
             **kwargs,
         )
     except Exception as exc:
+        if isinstance(exc, OrderBudgetExceeded):
+            raise
         if not _is_retryable_model_error(exc):
             raise
         if retry_timeout_sec <= 0:
             raise
         retry_kwargs = dict(kwargs)
-        retry_kwargs["timeout_sec"] = retry_timeout_sec
+        retry_kwargs["timeout_sec"] = _timeout_within_order_deadline(retry_timeout_sec, order_deadline_at)
         retry_result = call_model(
             base_url,
             api_key,
@@ -1371,24 +1966,64 @@ def call_model_with_retry(
             **retry_kwargs,
         )
         parsed, content_text, retry_elapsed, usage, cached = retry_result
-        return parsed, content_text, timeout_sec + retry_elapsed, usage, cached
+        return parsed, content_text, effective_timeout_sec + retry_elapsed, usage, cached
 
 
 def _usage_total(*usages: dict[str, Any]) -> int:
     return sum(int(usage.get("total_tokens") or 0) for usage in usages if usage)
 
 
+def _order_deadline(started: float, order_timeout_sec: int = ORDER_TIMEOUT_SEC) -> float:
+    return float(started) + float(order_timeout_sec)
+
+
+def _order_timeout_reason(context: str = "") -> str:
+    context_text = f"（{context}）" if context else ""
+    return f"模型审核超过每单{ORDER_TIMEOUT_SEC}秒总期限{context_text}，已转人工复核"
+
+
+def _order_timeout_manual(precheck: dict[str, Any], context: str = "") -> dict[str, Any]:
+    return {
+        "manual_required": True,
+        "manual_reason_codes": ["MODEL_UNCERTAIN"],
+        "manual_reason": _order_timeout_reason(context),
+        "address_ok": precheck.get("address_ok", ""),
+    }
+
+
 def _remaining_order_timeout(started: float, order_timeout_sec: int = ORDER_TIMEOUT_SEC) -> float:
     return max(0.0, float(order_timeout_sec) - (time.time() - started))
 
 
-def _stage_timeout_from_budget(started: float, order_timeout_sec: int = ORDER_TIMEOUT_SEC) -> int:
+def _remaining_deadline_timeout(order_deadline_at: float | None) -> float:
+    if order_deadline_at is None:
+        return float(MODEL_TIMEOUT_SEC)
+    return max(0.0, float(order_deadline_at) - time.time())
+
+
+def _timeout_within_order_deadline(timeout_sec: float, order_deadline_at: float | None = None) -> float:
+    requested = float(timeout_sec)
+    if order_deadline_at is None:
+        return requested
+    remaining = _remaining_deadline_timeout(order_deadline_at)
+    if remaining <= 0:
+        raise OrderBudgetExceeded(_order_timeout_reason())
+    return min(requested, remaining)
+
+
+def _stage_timeout_from_budget(started: float, order_timeout_sec: int = ORDER_TIMEOUT_SEC) -> float:
     remaining = _remaining_order_timeout(started, order_timeout_sec)
-    return max(MIN_STAGE_TIMEOUT_SEC, min(MODEL_TIMEOUT_SEC, int(math.ceil(remaining))))
+    if remaining <= 0:
+        raise OrderBudgetExceeded(_order_timeout_reason())
+    return min(float(MODEL_TIMEOUT_SEC), remaining)
 
 
 def _order_budget_exhausted(started: float, order_timeout_sec: int = ORDER_TIMEOUT_SEC) -> bool:
     return _remaining_order_timeout(started, order_timeout_sec) <= MIN_STAGE_TIMEOUT_SEC
+
+
+def _order_deadline_reached(started: float, order_timeout_sec: int = ORDER_TIMEOUT_SEC) -> bool:
+    return _remaining_order_timeout(started, order_timeout_sec) <= 0
 
 
 def _confidence_value(value: Any) -> float:
@@ -1615,6 +2250,7 @@ def _normalize_sn_result(fields: dict[str, Any], result: dict[str, Any], *, requ
         "system_sn": system,
         "imei1": fields.get("imei1", ""),
         "imei2": fields.get("imei2", ""),
+        "effective_category": fields.get("effective_category") or effective_product_category(fields),
     }
     state, observed_source, observed = _evaluate_sn_evidence(decision)
     code = str(result.get("manual_reason_code") or "").strip().upper()
@@ -1645,6 +2281,15 @@ def _normalize_sn_result(fields: dict[str, Any], result: dict[str, Any], *, requ
     else:
         normalized["manual_reason_code"] = ""
         normalized["manual_reason_codes"] = []
+    return normalized
+
+
+def _normalize_sn_v2_result(evidence: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    normalized = {**evidence, **decision}
+    code = str(decision.get("manual_reason_code") or "").strip().upper()
+    normalized["manual_reason_codes"] = [code] if code else []
+    normalized["raw_observed_sn"] = str(decision.get("observed_sn") or "")
+    normalized["confidence"] = evidence.get("confidence", "")
     return normalized
 
 
@@ -1695,6 +2340,14 @@ _SN_BINDING_LABEL_RE = re.compile(
     r"(?<![0-9A-Z])(?:S\s*/\s*N|SN|(?:\(S\)\s*)?SERIAL(?:\s+(?:NO\.?|NUMBER))?|序列号)(?![0-9A-Z])",
     re.IGNORECASE,
 )
+_MODEL_BINDING_LABEL_RE = re.compile(
+    r"(?<![0-9A-Z])(?:MODEL(?:[\s_/-]+(?:NO\.?|NUMBER))?|型号|产品型号)(?![0-9A-Z])",
+    re.IGNORECASE,
+)
+_STRUCTURED_IDENTITY_LABEL_RE = re.compile(
+    r"(?<![0-9A-Z])(?:I[\s_/-]*M[\s_/-]*E[\s_/-]*I(?:[\s_/-]*[12])?|E[\s_/-]*I[\s_/-]*D)(?![0-9A-Z])",
+    re.IGNORECASE,
+)
 _SN_SOURCE_ORDER = {
     "DEVICE_SCREEN": 0,
     "SCREEN": 0,
@@ -1714,6 +2367,10 @@ def _candidate_texts(candidate: dict[str, Any]) -> list[str]:
 
 def _compact_field_type(value: Any) -> str:
     return re.sub(r"[ _]", "", str(value or "").strip().upper())
+
+
+def _punctuation_free_field_type(value: Any) -> str:
+    return re.sub(r"[^0-9A-Z]", "", str(value or "").strip().upper())
 
 
 def _order_imeis(decision: dict[str, Any]) -> set[str]:
@@ -1799,6 +2456,72 @@ def _is_readable_non_imei_candidate(candidate: dict[str, Any], decision: dict[st
     )
 
 
+def _is_explicit_model_candidate(candidate: dict[str, Any]) -> bool:
+    if _punctuation_free_field_type(candidate.get("field_type")) in {
+        "MODEL",
+        "MODELNO",
+        "MODELNUMBER",
+    }:
+        return True
+    if any(
+        _MODEL_BINDING_LABEL_RE.search(str(candidate.get(key) or ""))
+        for key in ("label", "label_text")
+    ):
+        return True
+    candidate_sn = _candidate_sn(candidate)
+    return any(
+        _label_binds_candidate_value(candidate.get(key), candidate_sn, _MODEL_BINDING_LABEL_RE)
+        for key in ("raw_context", "raw_text")
+    )
+
+
+def _is_explicit_identity_candidate(candidate: dict[str, Any]) -> bool:
+    if _punctuation_free_field_type(candidate.get("field_type")) in {
+        "IMEI",
+        "IMEI1",
+        "IMEI2",
+        "EID",
+    }:
+        return True
+    if any(
+        _STRUCTURED_IDENTITY_LABEL_RE.search(str(candidate.get(key) or ""))
+        for key in ("label", "label_text")
+    ):
+        return True
+    candidate_sn = _candidate_sn(candidate)
+    return any(
+        _label_binds_candidate_value(
+            candidate.get(key), candidate_sn, _STRUCTURED_IDENTITY_LABEL_RE
+        )
+        for key in ("raw_context", "raw_text")
+    )
+
+
+def _authoritative_home_appliance_sn(decision: dict[str, Any]) -> str:
+    category = str(decision.get("effective_category") or "").strip().lower()
+    if category:
+        if category != "home_appliance":
+            return ""
+    elif not as_bool(decision.get("is_home_appliance")):
+        return ""
+
+    system_sn = normalize_sn(decision.get("system_sn") or decision.get("normalized_system_sn") or "")
+    if not system_sn:
+        return ""
+
+    for candidate in _list_value(decision.get("sn_candidates")):
+        if (
+            not isinstance(candidate, dict)
+            or _is_explicit_identity_candidate(candidate)
+            or not _is_readable_non_imei_candidate(candidate, decision)
+            or _is_explicit_model_candidate(candidate)
+        ):
+            continue
+        if _candidate_sn(candidate) == system_sn:
+            return system_sn
+    return ""
+
+
 def _trustworthy_sn_candidates(
     decision: dict[str, Any],
     *,
@@ -1874,6 +2597,10 @@ def _preferred_sn_conflict(
 
 def _evaluate_sn_evidence(decision: dict[str, Any]) -> tuple[str, str, str]:
     system_sn = normalize_sn(decision.get("system_sn") or decision.get("normalized_system_sn") or "")
+    authoritative_sn = _authoritative_home_appliance_sn(decision)
+    if authoritative_sn:
+        return "match", authoritative_sn, authoritative_sn
+
     observed_source, observed_sn, _has_identity_value, top_level_readings = _top_level_observed_group(decision)
     candidates = _trustworthy_sn_candidates(decision)
     unique_candidate_values = {candidate_sn for _rank, candidate_sn, _raw in candidates}
@@ -1929,6 +2656,8 @@ def _conflicting_observed_sn(decision: dict[str, Any]) -> str:
     system_sn = normalize_sn(decision.get("system_sn") or decision.get("normalized_system_sn") or "")
     if not system_sn:
         return ""
+    if _authoritative_home_appliance_sn(decision):
+        return ""
 
     _observed_source, observed_sn, _has_identity_value, top_level_readings = _top_level_observed_group(decision)
     candidates = _trustworthy_sn_candidates(decision)
@@ -1978,7 +2707,94 @@ def _is_watch_product(decision: dict[str, Any]) -> bool:
         str(decision.get(key) or "")
         for key in ("product_type", "cate_code_name", "goods_name", "product_name", "model")
     ).upper()
-    return any(marker in text for marker in ("手表", "手环", "WATCH", "WRISTBAND"))
+    return (
+        any(marker in text for marker in ("手表", "手环"))
+        or bool(re.search(r"\b(?:WATCH|SMARTWATCH|WRISTBAND)\b", text))
+    )
+
+
+def _is_phone_or_tablet_product(decision: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(decision.get(key) or "")
+        for key in ("product_type", "cate_code_name", "goods_name", "product_name", "model")
+    ).upper()
+    return (
+        any(marker in text for marker in ("手机", "平板"))
+        or bool(re.search(r"\b(?:PHONE|SMARTPHONE|TABLET)\b", text))
+    )
+
+
+def _is_phone_product(decision: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(decision.get(key) or "")
+        for key in ("product_type", "cate_code_name", "goods_name", "product_name", "model")
+    ).upper()
+    return (
+        "手机" in text
+        or bool(re.search(r"\b(?:PHONE|SMARTPHONE)\b", text))
+    )
+
+
+def _digital_activation_evidence_reason(decision: dict[str, Any]) -> str | None:
+    if str(decision.get("digital_activation_evidence_mode") or "off").strip().lower() != "on":
+        return None
+    if str(decision.get("effective_category") or "").strip().lower() != "ordinary_3c":
+        return None
+    is_watch = _is_watch_product(decision)
+    if not is_watch and not _is_phone_or_tablet_product(decision):
+        return None
+
+    expected_image_ids = {
+        str(image_id).strip()
+        for image_id in _list_value(decision.get("_activation_image_ids"))
+        if str(image_id).strip()
+    }
+    raw_observations = decision.get("activation_identity_by_image")
+    if not expected_image_ids or not isinstance(raw_observations, list) or not raw_observations:
+        return "MODEL_UNCERTAIN"
+
+    raw_image_ids = [
+        str(raw.get("image_id") or "").strip() if isinstance(raw, dict) else ""
+        for raw in raw_observations
+    ]
+    if (
+        len(raw_image_ids) != len(expected_image_ids)
+        or len(set(raw_image_ids)) != len(raw_image_ids)
+        or set(raw_image_ids) != expected_image_ids
+    ):
+        return "MODEL_UNCERTAIN"
+
+    observations: list[list[Any]] = []
+    for raw in raw_observations:
+        if not isinstance(raw, dict):
+            return "MODEL_UNCERTAIN"
+        identity_fields = raw.get("identity_fields")
+        if not isinstance(identity_fields, list):
+            return "MODEL_UNCERTAIN"
+        observations.append(identity_fields)
+
+    allowed_types = (
+        {"SN", "SERIAL_NUMBER", "IMEI1", "IMEI2"}
+        if not is_watch and _is_phone_product(decision)
+        else {"SN", "SERIAL_NUMBER"}
+    )
+    aliases = {"SERIAL": "SERIAL_NUMBER", "SERIALNUMBER": "SERIAL_NUMBER", "S/N": "SERIAL_NUMBER"}
+    for identity_fields in observations:
+        for field in identity_fields:
+            if not isinstance(field, dict):
+                return "MODEL_UNCERTAIN"
+            field_type = str(field.get("field_type") or "").strip().upper()
+            field_type = aliases.get(field_type, field_type)
+            if (
+                field_type in allowed_types
+                and isinstance(field.get("readable"), bool)
+                and field["readable"]
+                and isinstance(field.get("complete"), bool)
+                and field["complete"]
+                and bool(str(field.get("raw_value") or "").strip())
+            ):
+                return ""
+    return "ACTIVATION_PHOTO_INVALID"
 
 
 def _is_home_appliance_decision(decision: dict[str, Any]) -> bool:
@@ -2096,6 +2912,9 @@ def _verified_sn_activation_form_reason(decision: dict[str, Any]) -> str:
     evidence_type = str(decision.get("activation_evidence_type") or "").strip().upper()
     if _conflicting_screen_sn(decision):
         return "SN_MISMATCH"
+    digital_reason = _digital_activation_evidence_reason(decision)
+    if digital_reason is not None:
+        return digital_reason
     if category == "ordinary_3c" and _is_watch_product(decision):
         screen = _dict_value(decision.get("activation_screen"))
         screen_content_type = str(screen.get("screen_content_type") or "").strip().upper()
@@ -2129,22 +2948,21 @@ def _verified_sn_activation_form_reason(decision: dict[str, Any]) -> str:
 
 
 def _all_three_duplicate_claim(decision: dict[str, Any]) -> bool:
-    if not as_bool(decision.get("duplicate_image_evidence")):
+    groups = decision.get("_exact_duplicate_image_groups")
+    if not isinstance(groups, list):
         return False
-    text = " ".join(
-        str(decision.get(key) or "")
-        for key in ("manual_reason", "reason", "duplicate_reason")
-    ).lower()
-    patterns = (
-        r"(?:三张|3张|全部|三类).{0,30}(?:重复|相同|同一张)",
-        r"商品.{0,20}拆封.{0,20}激活.{0,30}(?:重复|相同|同一张)",
-        r"all\s+(?:three|3).{0,30}(?:identical|duplicate|same)",
-        r"product.{0,20}unboxing.{0,20}activation.{0,30}(?:identical|duplicate|same)",
+    return any(
+        isinstance(group, list) and len({str(image_id) for image_id in group if str(image_id)}) >= 3
+        for group in groups
     )
-    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
 
-def enforce_photo_noncompliance_manual(decision: dict[str, Any], *, address_ok: bool | None = None) -> dict[str, Any]:
+def enforce_photo_noncompliance_manual(
+    decision: dict[str, Any],
+    *,
+    address_ok: bool | None = None,
+    defer_image_authenticity_to_local: bool = False,
+) -> dict[str, Any]:
     sn_already_verified = as_bool(decision.get("_sn_already_verified_by_system"))
     protected_code_priority = [
         "INVOICE_ORANGE_WARNING",
@@ -2170,6 +2988,10 @@ def enforce_photo_noncompliance_manual(decision: dict[str, Any], *, address_ok: 
             existing_codes.extend(normalize_compliance_reason_codes(normalized.get("manual_reason_code")))
         else:
             existing_codes.append(str(normalized.get("manual_reason_code")))
+    if defer_image_authenticity_to_local:
+        protected_code_priority = [code for code in protected_code_priority if code != "IMAGE_STRONG_RISK"]
+        protected_codes.discard("IMAGE_STRONG_RISK")
+        existing_codes = [code for code in existing_codes if code != "IMAGE_STRONG_RISK"]
 
     all_three_duplicate = _all_three_duplicate_claim(normalized)
     if not all_three_duplicate:
@@ -2188,7 +3010,11 @@ def enforce_photo_noncompliance_manual(decision: dict[str, Any], *, address_ok: 
         and not as_bool(normalized.get("package_visible"))
         and not _strict_home_no_box_evidence(normalized)
     )
-    if home_package_missing and code not in {
+    home_unboxing_product_missing = (
+        _is_home_appliance_decision(normalized)
+        and is_explicit_false(normalized.get("whole_product_visible"))
+    )
+    if (home_package_missing or home_unboxing_product_missing) and code not in {
         "INVOICE_ORANGE_WARNING",
         "IMAGE_STRONG_RISK",
         "DUPLICATE_IMAGE_EVIDENCE",
@@ -2196,12 +3022,26 @@ def enforce_photo_noncompliance_manual(decision: dict[str, Any], *, address_ok: 
         "PRODUCT_PHOTO_INVALID",
     }:
         code = "UNBOXING_PHOTO_INVALID"
-    activation_gate_code = _verified_sn_activation_form_reason(normalized) if sn_already_verified else _activation_pass_gate_reason(normalized)
-    if code == "ACTIVATION_PHOTO_INVALID" and not activation_gate_code and not sn_already_verified:
+    verified_home_activation_fallback = sn_already_verified and _is_home_appliance_decision(normalized)
+    digital_activation_reason = _digital_activation_evidence_reason(normalized) if sn_already_verified else None
+    if digital_activation_reason is not None:
+        activation_gate_code = digital_activation_reason
+    else:
+        activation_gate_code = (
+            _verified_sn_activation_form_reason(normalized)
+            if sn_already_verified
+            else _activation_pass_gate_reason(normalized)
+        )
+    if digital_activation_reason == "IMAGE_STRONG_RISK" and code != "INVOICE_ORANGE_WARNING":
+        code = "IMAGE_STRONG_RISK"
+    elif code == "ACTIVATION_PHOTO_INVALID" and not activation_gate_code and (
+        verified_home_activation_fallback or not sn_already_verified or digital_activation_reason == ""
+    ):
         code = ""
+        existing_codes = [item for item in existing_codes if item != "ACTIVATION_PHOTO_INVALID"]
     if not code:
         evidence_type = str(normalized.get("activation_evidence_type") or "").strip().upper()
-        if _has_photo_integrity_risk(normalized, evidence_type):
+        if not defer_image_authenticity_to_local and _has_photo_integrity_risk(normalized, evidence_type):
             code = "IMAGE_STRONG_RISK"
         elif existing_codes and not (existing_codes[0] == "ACTIVATION_PHOTO_INVALID" and not activation_gate_code and not sn_already_verified):
             code = existing_codes[0]
@@ -2217,7 +3057,12 @@ def enforce_photo_noncompliance_manual(decision: dict[str, Any], *, address_ok: 
             code = "UNBOXING_PHOTO_INVALID"
         elif activation_gate_code:
             code = activation_gate_code
-        elif is_explicit_false(normalized.get("activation_photo_ok")) and (sn_already_verified or activation_gate_code):
+        elif (
+            digital_activation_reason is None
+            and not verified_home_activation_fallback
+            and is_explicit_false(normalized.get("activation_photo_ok"))
+            and (sn_already_verified or activation_gate_code)
+        ):
             code = "ACTIVATION_PHOTO_INVALID"
         elif _confidence_value(normalized.get("sn_confidence")) and _confidence_value(normalized.get("sn_confidence")) < AUTO_PASS_MIN_CONFIDENCE:
             code = "MODEL_UNCERTAIN"
@@ -2252,6 +3097,7 @@ def audit_task_fast(
     allow_review: bool = True,
 ) -> dict[str, Any]:
     started = time.time()
+    order_deadline = _order_deadline(started)
     pre_started = time.time()
     precheck = precheck_task(task)
     pre_elapsed = time.time() - pre_started
@@ -2269,32 +3115,42 @@ def audit_task_fast(
         base_url,
         api_key,
         model,
-        SN_PROMPT,
+        build_sn_prompt(),
         sn_payload,
         sn_images,
         stage="fast_sn",
         cache_dir=cache_dir,
         detail="high",
-        timeout_sec=MODEL_TIMEOUT_SEC,
+        timeout_sec=_stage_timeout_from_budget(started),
+        order_deadline_at=order_deadline,
     )
     normalized_sn = _normalize_sn_result(fields, sn_result)
     model_calls = 0 if sn_cached else 1
     total_tokens = _usage_total(sn_usage)
 
     if allow_review and needs_high_detail_review(normalized_sn):
+        if _order_deadline_reached(started):
+            manual = _order_timeout_manual(precheck)
+            row = _final_row(task, manual, normalized_sn, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
+            row["strategy"] = "fast_order_timeout_manual"
+            row["model_calls"] = model_calls
+            row["total_tokens"] = total_tokens
+            row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
+            return row
         review_payload = dict(sn_payload)
         review_payload["previous_decision"] = normalized_sn
         review_result, review_raw, review_elapsed, review_usage, review_cached = call_model_with_retry(
             base_url,
             api_key,
             model,
-            SN_PROMPT,
+            build_sn_prompt(),
             review_payload,
             sn_images,
             stage="fast_sn_review",
             cache_dir=cache_dir,
             detail="high",
-            timeout_sec=MODEL_TIMEOUT_SEC,
+            timeout_sec=_stage_timeout_from_budget(started),
+            order_deadline_at=order_deadline,
         )
         normalized_review = _normalize_sn_result(fields, review_result)
         model_calls += 0 if review_cached else 1
@@ -2365,6 +3221,7 @@ def audit_task_sn_only(
     cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     started = time.time()
+    order_deadline = _order_deadline(started)
     fields = task.get("fields") or {}
     system_sn = str(fields.get("system_sn") or "").strip()
     activation_images = _with_detail(_sn_only_activation_images(task), "high")
@@ -2380,7 +3237,7 @@ def audit_task_sn_only(
             model,
             activation_images,
             cache_dir=cache_dir,
-            timeout_sec=MODEL_TIMEOUT_SEC,
+            timeout_sec=_timeout_within_order_deadline(_stage_timeout_from_budget(started), order_deadline),
         )
 
     normalized_system = normalize_sn(system_sn)
@@ -2452,9 +3309,13 @@ def audit_task_hybrid(
     cache_dir: Path | None = None,
     allow_review: bool = True,
     allow_targeted_review: bool = True,
+    sn_policy_version: str | None = None,
 ) -> dict[str, Any]:
     started = time.time()
+    order_deadline = _order_deadline(started)
+    active_sn_policy = resolve_sn_policy_version(sn_policy_version)
     authenticity_config = PhotoAuthenticityConfig.from_env(os.environ)
+    digital_activation_mode = resolve_digital_activation_evidence_mode()
     pre_started = time.time()
     precheck = precheck_task(task)
     pre_elapsed = time.time() - pre_started
@@ -2466,32 +3327,70 @@ def audit_task_hybrid(
         return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     fields = task["fields"]
-    sn_payload = build_sn_payload(task, fields, precheck["activation_images"])
     sn_images = _with_detail(precheck["activation_images"], "high")
-    sn_result, sn_raw, sn_elapsed, sn_usage, sn_cached = call_model_with_retry(
-        base_url,
-        api_key,
-        model,
-        SN_PROMPT,
-        sn_payload,
-        sn_images,
-        stage="hybrid_sn",
-        cache_dir=cache_dir,
-        detail="high",
-        timeout_sec=_stage_timeout_from_budget(started),
-        retry_timeout_sec=0,
-    )
-    normalized_sn = _normalize_sn_result(fields, sn_result)
+    if active_sn_policy == "v2":
+        sn_category = classify_sn_v2_category(
+            fields,
+            effective_category=precheck["effective_category"],
+        )
+        sn_payload = build_sn_v2_payload(
+            task,
+            sn_category,
+            precheck["activation_images"],
+        )
+        if sn_category is SnV2Category.UNSUPPORTED:
+            sn_result = {}
+            sn_raw = ""
+            sn_elapsed = 0.0
+            sn_usage = {}
+            sn_cached = True
+        else:
+            sn_result, sn_raw, sn_elapsed, sn_usage, sn_cached = call_model_with_retry(
+                base_url,
+                api_key,
+                model,
+                build_sn_v2_prompt(sn_category),
+                sn_payload,
+                sn_images,
+                stage="hybrid_sn_v2",
+                cache_dir=cache_dir,
+                detail="high",
+                timeout_sec=_stage_timeout_from_budget(started),
+                retry_timeout_sec=0,
+                order_deadline_at=order_deadline,
+            )
+        sn_decision = decide_sn_v2(
+            fields,
+            sn_result,
+            allowed_image_ids={
+                str(image.get("image_id") or "")
+                for image in precheck["activation_images"]
+            },
+            effective_category=precheck["effective_category"],
+        )
+        normalized_sn = _normalize_sn_v2_result(sn_result, sn_decision)
+    else:
+        sn_payload = build_sn_payload(task, fields, precheck["activation_images"])
+        sn_result, sn_raw, sn_elapsed, sn_usage, sn_cached = call_model_with_retry(
+            base_url,
+            api_key,
+            model,
+            build_sn_prompt(),
+            sn_payload,
+            sn_images,
+            stage="hybrid_sn",
+            cache_dir=cache_dir,
+            detail="high",
+            timeout_sec=_stage_timeout_from_budget(started),
+            retry_timeout_sec=0,
+            order_deadline_at=order_deadline,
+        )
+        normalized_sn = _normalize_sn_result(fields, sn_result)
     model_calls = 0 if sn_cached else 1
     total_tokens = _usage_total(sn_usage)
 
     if _order_budget_exhausted(started):
-        manual = {
-            "manual_required": True,
-            "manual_reason_codes": ["MODEL_UNCERTAIN"],
-            "manual_reason": f"order exceeded {ORDER_TIMEOUT_SEC} second model budget",
-            "address_ok": precheck["address_ok"],
-        }
+        manual = _order_timeout_manual(precheck)
         row = _final_row(task, manual, normalized_sn, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
         row["strategy"] = "hybrid_order_timeout_manual"
         row["model_calls"] = model_calls
@@ -2499,14 +3398,9 @@ def audit_task_hybrid(
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
         return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
-    if allow_review and needs_high_detail_review(normalized_sn):
+    if active_sn_policy == "v1" and allow_review and needs_high_detail_review(normalized_sn):
         if _order_budget_exhausted(started):
-            manual = {
-                "manual_required": True,
-                "manual_reason_codes": ["MODEL_UNCERTAIN"],
-                "manual_reason": f"order exceeded {ORDER_TIMEOUT_SEC} second model budget",
-                "address_ok": precheck["address_ok"],
-            }
+            manual = _order_timeout_manual(precheck)
             row = _final_row(task, manual, normalized_sn, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
             row["strategy"] = "hybrid_order_timeout_manual"
             row["model_calls"] = model_calls
@@ -2519,7 +3413,7 @@ def audit_task_hybrid(
             base_url,
             api_key,
             model,
-            SN_PROMPT,
+            build_sn_prompt(),
             review_payload,
             sn_images,
             stage="hybrid_sn_review",
@@ -2527,6 +3421,7 @@ def audit_task_hybrid(
             detail="high",
             timeout_sec=_stage_timeout_from_budget(started),
             retry_timeout_sec=0,
+            order_deadline_at=order_deadline,
         )
         normalized_review = _normalize_sn_result(fields, review_result)
         model_calls += 0 if review_cached else 1
@@ -2555,14 +3450,9 @@ def audit_task_hybrid(
             }
             return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
-    if allow_targeted_review and _needs_targeted_sn_review(fields, normalized_sn):
+    if active_sn_policy == "v1" and allow_targeted_review and _needs_targeted_sn_review(fields, normalized_sn):
         if _order_budget_exhausted(started):
-            manual = {
-                "manual_required": True,
-                "manual_reason_codes": ["MODEL_UNCERTAIN"],
-                "manual_reason": f"order exceeded {ORDER_TIMEOUT_SEC} second model budget before targeted SN review",
-                "address_ok": precheck["address_ok"],
-            }
+            manual = _order_timeout_manual(precheck, "targeted SN review 前")
             row = _final_row(task, manual, normalized_sn, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
             row["strategy"] = "hybrid_order_timeout_manual"
             row["model_calls"] = model_calls
@@ -2582,6 +3472,7 @@ def audit_task_hybrid(
             detail="high",
             timeout_sec=_stage_timeout_from_budget(started),
             retry_timeout_sec=0,
+            order_deadline_at=order_deadline,
         )
         normalized_target = _normalize_sn_result(fields, target_result, require_positive_system_match=True)
         model_calls += 0 if target_cached else 1
@@ -2620,19 +3511,14 @@ def audit_task_hybrid(
             "address_ok": precheck["address_ok"],
         }
         row = _final_row(task, manual, normalized_sn, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
-        row["strategy"] = "hybrid_sn_manual"
+        row["strategy"] = "hybrid_sn_v2_manual" if active_sn_policy == "v2" else "hybrid_sn_manual"
         row["model_calls"] = model_calls
         row["total_tokens"] = total_tokens
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
         return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     if _order_budget_exhausted(started):
-        manual = {
-            "manual_required": True,
-            "manual_reason_codes": ["MODEL_UNCERTAIN"],
-            "manual_reason": f"order exceeded {ORDER_TIMEOUT_SEC} second model budget",
-            "address_ok": precheck["address_ok"],
-        }
+        manual = _order_timeout_manual(precheck)
         row = _final_row(task, manual, normalized_sn, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
         row["strategy"] = "hybrid_order_timeout_manual"
         row["model_calls"] = model_calls
@@ -2657,9 +3543,25 @@ def audit_task_hybrid(
         },
     }
     compliance_images = _all_grouped_images(precheck["groups"], activation_detail="high", other_detail="low")
+    edge_mapping_mode = (
+        resolve_photo_auth_edge_mapping_mode()
+        if authenticity_config.mode != "off"
+        else "off"
+    )
+    model_compliance_images, compliance_payload = prepare_photo_auth_edge_mapping_inputs(
+        compliance_images,
+        compliance_payload,
+        mode=edge_mapping_mode,
+        output_dir=cache_dir or PROJECT_ROOT / "reports" / "model_audit" / "cache_v2",
+    )
+    photo_auth_edge_candidates = compliance_payload.get("photo_auth_edge_candidates")
+    effective_edge_mapping_mode = "on" if photo_auth_edge_candidates else "off"
     compliance_prompt = compliance_prompt_for_category(
         precheck["effective_category"],
+        product_type=fields.get("product_type", ""),
         include_photo_authenticity=authenticity_config.mode != "off",
+        photo_auth_edge_mapping_mode=effective_edge_mapping_mode,
+        digital_activation_evidence_mode=digital_activation_mode,
     )
     compliance, compliance_raw, compliance_elapsed, compliance_usage, compliance_cached = call_model_with_retry(
         base_url,
@@ -2667,15 +3569,17 @@ def audit_task_hybrid(
         model,
         compliance_prompt,
         compliance_payload,
-        compliance_images,
+        model_compliance_images,
         stage="hybrid_compliance",
         cache_dir=cache_dir,
         detail="low",
         timeout_sec=_stage_timeout_from_budget(started),
         retry_timeout_sec=0,
+        order_deadline_at=order_deadline,
     )
     model_calls += 0 if compliance_cached else 1
     total_tokens += _usage_total(compliance_usage)
+    compliance = apply_photo_auth_edge_candidate_reviews(compliance, photo_auth_edge_candidates)
     model_effective_category = compliance.get("effective_category", "")
     compliance["model_effective_category"] = model_effective_category
     compliance["product_type"] = fields.get("product_type", "")
@@ -2688,7 +3592,16 @@ def audit_task_hybrid(
     compliance["imei2"] = fields.get("imei2", "")
     compliance["sn_confidence"] = normalized_sn.get("confidence", "")
     compliance["_sn_already_verified_by_system"] = True
-    compliance = enforce_photo_noncompliance_manual(compliance, address_ok=precheck["address_ok"])
+    compliance["digital_activation_evidence_mode"] = digital_activation_mode
+    compliance["_activation_image_ids"] = [
+        str(image.get("image_id") or "") for image in precheck["activation_images"]
+    ]
+    compliance["_exact_duplicate_image_groups"] = exact_duplicate_image_groups(precheck["groups"])
+    compliance = enforce_photo_noncompliance_manual(
+        compliance,
+        address_ok=precheck["address_ok"],
+        defer_image_authenticity_to_local=authenticity_config.sn_label_auth_review_enabled,
+    )
 
     row = _final_row(task, compliance, normalized_sn, compliance, time.time() - started, pre_elapsed, sn_elapsed, compliance_elapsed)
     authenticity_postprocess_tokens = 0
@@ -2713,7 +3626,11 @@ def audit_task_hybrid(
         row["compliance_elapsed_sec"] = round(compliance_elapsed, 2)
         row["photo_authenticity_postprocess_elapsed_sec"] = round(time.time() - authenticity_started, 4)
     row["photo_authenticity_postprocess_tokens"] = authenticity_postprocess_tokens
-    row["strategy"] = "hybrid_sn_then_compliance"
+    row["strategy"] = (
+        "hybrid_sn_v2_then_compliance"
+        if active_sn_policy == "v2"
+        else "hybrid_sn_then_compliance"
+    )
     row["model_calls"] = model_calls
     row["total_tokens"] = total_tokens
     row["_raw"] = {
@@ -2742,6 +3659,8 @@ def audit_task_v2(
     cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     started = time.time()
+    order_deadline = _order_deadline(started)
+    digital_activation_mode = resolve_digital_activation_evidence_mode()
     pre_started = time.time()
     precheck = precheck_task(task)
     pre_elapsed = time.time() - pre_started
@@ -2754,11 +3673,13 @@ def audit_task_v2(
         base_url,
         api_key,
         model,
-        SN_PROMPT,
+        build_sn_prompt(),
         sn_payload,
         precheck["activation_images"],
         stage="sn",
         cache_dir=cache_dir,
+        timeout_sec=_stage_timeout_from_budget(started),
+        order_deadline_at=order_deadline,
     )
     normalized_sn_result = _normalize_sn_result(fields, sn_result)
     if not as_bool(normalized_sn_result.get("sn_match")):
@@ -2770,6 +3691,15 @@ def audit_task_v2(
             "address_ok": precheck["address_ok"],
         }
         row = _final_row(task, manual, normalized_sn_result, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
+        row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
+        return row
+
+    if _order_deadline_reached(started):
+        manual = _order_timeout_manual(precheck)
+        row = _final_row(task, manual, normalized_sn_result, {}, time.time() - started, pre_elapsed, sn_elapsed, 0.0)
+        row["strategy"] = "v2_order_timeout_manual"
+        row["model_calls"] = 0 if sn_cached else 1
+        row["total_tokens"] = _usage_total(sn_usage)
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
         return row
 
@@ -2794,11 +3724,17 @@ def audit_task_v2(
         base_url,
         api_key,
         model,
-        compliance_prompt_for_category(precheck["effective_category"]),
+        compliance_prompt_for_category(
+            precheck["effective_category"],
+            product_type=fields.get("product_type", ""),
+            digital_activation_evidence_mode=digital_activation_mode,
+        ),
         compliance_payload,
         all_images,
         stage="compliance",
         cache_dir=cache_dir,
+        timeout_sec=_stage_timeout_from_budget(started),
+        order_deadline_at=order_deadline,
     )
     model_effective_category = compliance.get("effective_category", "")
     compliance["model_effective_category"] = model_effective_category
@@ -2812,6 +3748,11 @@ def audit_task_v2(
     compliance["imei2"] = fields.get("imei2", "")
     compliance["sn_confidence"] = normalized_sn_result.get("confidence", "")
     compliance["_sn_already_verified_by_system"] = True
+    compliance["digital_activation_evidence_mode"] = digital_activation_mode
+    compliance["_activation_image_ids"] = [
+        str(image.get("image_id") or "") for image in precheck["activation_images"]
+    ]
+    compliance["_exact_duplicate_image_groups"] = exact_duplicate_image_groups(precheck["groups"])
     compliance = enforce_photo_noncompliance_manual(compliance, address_ok=precheck["address_ok"])
     row = _final_row(task, compliance, normalized_sn_result, compliance, time.time() - started, pre_elapsed, sn_elapsed, compliance_elapsed)
     row["_raw"] = {
@@ -2835,21 +3776,46 @@ def _final_row(
     sn_elapsed: float,
     compliance_elapsed: float,
 ) -> dict[str, Any]:
-    manual = as_bool(decision.get("manual_required"))
-    reason_codes = as_codes(decision.get("manual_reason_codes"))
-    reason_text = str(decision.get("manual_reason") or "")
-    reason = "" if not manual else ";".join(reason_codes) + ((": " + reason_text) if reason_text else "")
-    primary_reason_code = reason_codes[0] if manual and reason_codes else ""
-    reason_cn = build_chinese_reason(reason_codes, reason_text) if manual else ""
     fields = task.get("fields") or {}
+    trusted_category = effective_product_category(fields)
     display_decision = dict(compliance)
     display_decision.setdefault("system_sn", fields.get("system_sn", ""))
     display_decision.setdefault("imei1", fields.get("imei1", ""))
     display_decision.setdefault("imei2", fields.get("imei2", ""))
-    conflict_sn = _conflicting_observed_sn(display_decision) if primary_reason_code == "SN_MISMATCH" else ""
+    if trusted_category != "unknown":
+        display_decision["effective_category"] = trusted_category
+    else:
+        display_decision.setdefault("effective_category", trusted_category)
+    sn_display_decision = {
+        **sn_result,
+        "system_sn": fields.get("system_sn", ""),
+        "imei1": fields.get("imei1", ""),
+        "imei2": fields.get("imei2", ""),
+        "effective_category": trusted_category,
+    }
+    authoritative_sn = _authoritative_home_appliance_sn(sn_display_decision)
+    manual = as_bool(decision.get("manual_required"))
+    reason_codes = as_codes(decision.get("manual_reason_codes"))
+    reason_text = str(decision.get("manual_reason") or "")
+    if authoritative_sn and "SN_MISMATCH" in reason_codes:
+        reason_codes = [code for code in reason_codes if code != "SN_MISMATCH"]
+        reason_text = ""
+        if not reason_codes:
+            manual = False
+    reason = "" if not manual else ";".join(reason_codes) + ((": " + reason_text) if reason_text else "")
+    primary_reason_code = reason_codes[0] if manual and reason_codes else ""
+    reason_cn = build_chinese_reason(reason_codes, reason_text) if manual else ""
+    conflict_sn = (
+        _conflicting_observed_sn(display_decision)
+        if primary_reason_code == "SN_MISMATCH" and not authoritative_sn
+        else ""
+    )
     observed_sn = sn_result.get("observed_sn") or fields.get("system_sn", "") if as_bool(sn_result.get("sn_match")) else sn_result.get("observed_sn", "")
     sn_match = as_bool(sn_result.get("sn_match")) if sn_result else False
-    if conflict_sn:
+    if authoritative_sn:
+        observed_sn = authoritative_sn
+        sn_match = True
+    elif conflict_sn:
         observed_sn = conflict_sn
         sn_match = False
     row = {
@@ -2869,6 +3835,9 @@ def _final_row(
         "system_sn": fields.get("system_sn", ""),
         "observed_sn": observed_sn,
         "sn_match": sn_match,
+        "sn_char_review_mode": resolve_sn_char_review_mode(),
+        "sn_label_auth_review_mode": resolve_sn_label_auth_review_mode(),
+        "digital_activation_evidence_mode": resolve_digital_activation_evidence_mode(),
         "product_type_match": compliance.get("product_type_match", ""),
         "address_ok": decision.get("address_ok", compliance.get("address_ok", "")),
         "product_photo_ok": compliance.get("product_photo_ok", ""),
@@ -2957,9 +3926,39 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", default=os.environ.get("VISION_MODEL_NAME", "gpt-5.5"))
     parser.add_argument("--cache-dir", default="reports/model_audit/cache_v2")
     parser.add_argument("--mode", choices=["fast", "hybrid", "v2", "sn_only"], default="hybrid")
+    parser.add_argument(
+        "--sn-policy-version",
+        choices=["v1", "v2"],
+        default=os.environ.get("SN_POLICY_VERSION", "v1"),
+        help="hybrid模式SN策略；默认v1，v2仅用于显式对比测试",
+    )
     parser.add_argument("--no-review", action="store_true")
     parser.add_argument("--no-targeted-sn-review", action="store_true")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--sn-char-review-mode",
+        choices=["off", "on", "v2"],
+        default=os.environ.get("SN_CHAR_REVIEW_MODE", "off"),
+        help="SN相似字符逐字复核提示词插件；on为v1，v2为高精度字形版，默认off",
+    )
+    parser.add_argument(
+        "--sn-label-auth-review-mode",
+        choices=["off", "on"],
+        default=os.environ.get("SN_LABEL_AUTH_REVIEW_MODE", "off"),
+        help="SN/条码标签非实拍合规提示词插件；默认off，可显式设为on开启",
+    )
+    parser.add_argument(
+        "--photo-auth-edge-mapping-mode",
+        choices=["off", "on"],
+        default=os.environ.get("PHOTO_AUTH_EDGE_MAPPING_MODE", "off"),
+        help="图片真实性边缘与外部屏幕映射实验插件；默认off，可显式设为on开启",
+    )
+    parser.add_argument(
+        "--digital-activation-evidence-mode",
+        choices=["off", "on"],
+        default=os.environ.get("DIGITAL_ACTIVATION_EVIDENCE_MODE", "on"),
+        help="普通3C激活证据统一口径插件；默认on，可显式设为off关闭",
+    )
     parser.add_argument(
         "--photo-authenticity-mode",
         choices=["off", "shadow", "enforce"],
@@ -2976,12 +3975,28 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("PHOTO_AUTHENTICITY_BASELINE_PATH"),
         help="可选历史同类订单基线JSON，用于计算合并后的真实增量；缺失时增量标记不可用",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    try:
+        resolve_sn_char_review_mode(args.sn_char_review_mode)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.mode == "sn_only" and args.sn_char_review_mode != "off":
+        parser.error("SN character review plugins are not applied in sn_only mode")
+    if args.mode != "hybrid" and args.photo_auth_edge_mapping_mode != "off":
+        parser.error("photo authenticity edge mapping plugin is only applied in hybrid mode")
+    if args.photo_auth_edge_mapping_mode != "off" and args.photo_authenticity_mode == "off":
+        parser.error("photo authenticity edge mapping plugin requires photo authenticity mode shadow or enforce")
+    return args
 
 
 def main() -> None:
     configure_utf8_stdio()
     args = parse_cli_args()
+    os.environ["SN_CHAR_REVIEW_MODE"] = args.sn_char_review_mode
+    os.environ["SN_POLICY_VERSION"] = args.sn_policy_version
+    os.environ["SN_LABEL_AUTH_REVIEW_MODE"] = args.sn_label_auth_review_mode
+    os.environ["PHOTO_AUTH_EDGE_MAPPING_MODE"] = args.photo_auth_edge_mapping_mode
+    os.environ["DIGITAL_ACTIVATION_EVIDENCE_MODE"] = args.digital_activation_evidence_mode
     os.environ["PHOTO_AUTHENTICITY_MODE"] = args.photo_authenticity_mode
     if args.photo_authenticity_artifact_dir:
         os.environ["PHOTO_AUTHENTICITY_ARTIFACT_DIR"] = args.photo_authenticity_artifact_dir

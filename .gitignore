@@ -12,6 +12,10 @@ htmlcov/
 venv/
 env/
 .worktrees/
+/.venv-photo-auth/
+/reports/
+/temp/
+/data/
 
 logs/
 *.log

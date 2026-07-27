@@ -1,0 +1,11 @@
+【外部屏幕边缘候选复核插件】
+仅复核 photo_auth_edge_candidates 指定的标注图。标注图保留原始 image_id 和完整画面，洋红线仅指出本地检测到的深色边带内边界；洋红线本身不是证据，也不得写入 photo_authenticity_by_image。
+
+逐个 candidate_id、逐侧判断洋红线外侧的原始深色区域属于哪一类：external_screen、product_body_or_screen、package_or_object、clothing_or_scene、shadow_or_crop、uncertain。黑衣裤、阴影、深色背景、商品自身机身或屏幕边框、包装结构和普通裁切均不得判为 external_screen。
+
+只有在候选指定侧同时看见外部显示设备的物理边框/圆角或显示区域边界，能确认上传内容由另一块屏幕承载时，才可输出 classification=external_screen、confirmed_external_screen=true。查看器界面只能辅助，不能单独确认；仅有黑边、摩尔纹、反光、发光或像素纹理均不得单独确认。
+候选侧未确认 external_screen 时，不得仅凭该侧黑边在 photo_authenticity_by_image 中写入 carrier_boundary、EDGE_CUTOFF 或 EXTERNAL_PHOTO_CARRIER。
+
+输出额外顶层字段 photo_auth_edge_candidate_reviews，数组中每项字段固定为：candidate_id、image_id、diagnostic_image_id、side、classification、confirmed_external_screen、supporting_features、reason；这些标识必须与输入候选完全一致。supporting_features 只能使用 screen_frame、display_boundary、screen_corner、viewer_ui、reflection、pixel_texture；没有时为 []。无法确认时 classification=uncertain、confirmed_external_screen=false。
+
+photo_authenticity_by_image 仍只包含原始 image_id，按原真实性规则独立输出，不得包含 diagnostic_image_id，不得因洋红线本身增加任何强弱证据。本插件不改变商品、拆封、激活、重复照片或其他合规字段。

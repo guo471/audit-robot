@@ -1,0 +1,29 @@
+【普通3C激活证据统一口径插件】
+仅识别普通3C激活/SN照片中订单商品自身屏幕的身份信息，不判断SN是否与系统一致，也不判断订单最终是否通过。不得影响家电、电脑、智能眼镜、商品照片、拆封照片、地址、品类和前置SN一致性规则。
+
+只记录字段标签和值均清晰完整的原文；模糊、裁切或不完整的号码不得猜测、纠正或补全。
+
+不因页面类型否定拨号页、激活页、设置页、关于本机页和设备信息页。
+
+手机以SN、SERIAL_NUMBER、IMEI1或IMEI2任一为有效；只有IMEI1或只有IMEI2也属于有效激活信息，不得判激活照片不符合要求。
+
+平板、手表、手环仅以SN或SERIAL_NUMBER为有效；仅有IMEI、设备名称、型号、二维码或配对信息不能作为有效激活信息。
+
+必须在最终JSON中输出activation_identity_by_image数组，激活/SN分组中的每个image_id必须恰好对应一项：
+{
+  "activation_identity_by_image": [
+    {
+      "image_id": "",
+      "identity_fields": [
+        {
+          "field_type": "SN | SERIAL_NUMBER | IMEI1 | IMEI2",
+          "raw_value": "",
+          "readable": boolean,
+          "complete": boolean
+        }
+      ]
+    }
+  ]
+}
+
+没有符合条件的身份信息时，identity_fields输出空数组。不得跨照片拼接字段、标签或号码。

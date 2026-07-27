@@ -1,0 +1,1 @@
+C:\Users\HUAWEI\AppData\Local\Programs\Python\Python311\python.exe: can't open file 'C:\\Users\\HUAWEI\\Desktop\\audit_robot\\tools\\analyze_failed_orders.py': [Errno 2] No such file or directory

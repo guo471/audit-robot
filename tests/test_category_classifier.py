@@ -51,3 +51,38 @@ def test_legacy_product_type_helper_uses_shared_classifier_for_guobu_queue():
 
     assert is_home_appliance is False
     assert is_3c is True
+
+
+def test_classifies_computer_by_name_even_when_collector_marked_home_appliance():
+    result = classify_audit_category(
+        "guobu",
+        {
+            "product_type": "[A05]",
+            "goods_name": "\u7b14\u8bb0\u672c\u7535\u8111",
+            "cate_code_name": "PC",
+            "is_home_appliance": True,
+        },
+    )
+
+    assert result.category == "3c"
+    assert result.supported is True
+
+
+def test_classifies_home_appliance_by_name_not_a_prefix():
+    result = classify_audit_category(
+        "guobu",
+        {
+            "product_type": "[A02]",
+            "goods_name": "\u6d77\u5c14\u7535\u51b0\u7bb1",
+        },
+    )
+
+    assert result.category == "home_appliance"
+    assert result.supported is True
+
+
+def test_does_not_classify_home_appliance_from_a_prefix_only():
+    result = classify_audit_category("guobu", {"product_type": "[A02]"})
+
+    assert result.category == "unsupported"
+    assert result.supported is False

@@ -175,6 +175,46 @@ class OCREngine:
 
         return all_texts
 
+    def extract_text_sn_regions(self, image_path: str | Path, max_dim: int = 960) -> list[dict]:
+        """SN 区域补扫：优先扫底部 35%，并补扫 90/270 度旋转后的底部区域。"""
+        img = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("无法读取图片")
+
+        ocr = self.get_tiled_instance(max_dim)
+        all_texts = []
+        seen = set()
+
+        def bottom_region(source: np.ndarray) -> np.ndarray:
+            h = source.shape[0]
+            y1 = int(h * 0.65)
+            return source[y1:h, :]
+
+        regions = [
+            ("bottom_35", bottom_region(img)),
+            ("bottom_35_rot90", bottom_region(cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE))),
+            ("bottom_35_rot270", bottom_region(cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE))),
+        ]
+
+        for region_name, region in regions:
+            if region.shape[0] < 30 or region.shape[1] < 30:
+                continue
+            try:
+                prepared = self._preprocess_small_text_image(region)
+                result = ocr.predict(prepared)
+                texts = self._parse_predict_result(result)
+                for item in texts:
+                    key = (region_name, item.get("text"))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    item["region"] = region_name
+                    all_texts.append(item)
+            except Exception as exc:
+                logger.warning("SN 区域补扫失败: %s %s", region_name, exc)
+
+        return all_texts
+
     @staticmethod
     def _preprocess_small_text_image(img: np.ndarray) -> np.ndarray:
         """对小字体图像进行预处理（放大 + 对比度增强 + 锐化）

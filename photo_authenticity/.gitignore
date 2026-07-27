@@ -1,0 +1,14 @@
+data/input/
+data/manifests/
+data/splits/
+models/runs/
+models/releases/*
+!models/releases/non-real-photo-v2/
+!models/releases/non-real-photo-v2/**
+!models/releases/cross-surface-texture-v1/
+!models/releases/cross-surface-texture-v1/**
+reports/generated/
+reports/logs/
+*.egg-info/
+__pycache__/
+.pytest_cache/

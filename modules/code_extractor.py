@@ -39,6 +39,46 @@ class CodeExtractor:
         return sn.replace(" ", "").replace(" ", "").replace("\t", "")
 
     @staticmethod
+    def _normalize_sn(sn: str) -> str:
+        """Normalize SN for matching: ignore case, spaces, and separators."""
+        return re.sub(r"[^A-Za-z0-9]", "", sn or "").upper()
+
+    @staticmethod
+    def _is_safe_partial_sn_match(system_sn: str, found_sn: str) -> bool:
+        """Allow strong prefix matches, but avoid broad fragment concatenation."""
+        system_norm = CodeExtractor._normalize_sn(system_sn)
+        found_norm = CodeExtractor._normalize_sn(found_sn)
+        if not system_norm or not found_norm:
+            return False
+        if min(len(system_norm), len(found_norm)) < 20:
+            return False
+        return system_norm.startswith(found_norm) or found_norm.startswith(system_norm)
+
+    @staticmethod
+    def _is_home_appliance_fragment_match(system_sn: str, found_sn: str) -> bool:
+        """Allow limited continuous fragments for known 511/512 appliance SNs."""
+        system_norm = CodeExtractor._normalize_sn(system_sn)
+        found_norm = CodeExtractor._normalize_sn(found_sn)
+        if not system_norm.startswith(("511", "512")):
+            return False
+        if found_norm not in system_norm and system_norm not in found_norm:
+            return False
+
+        shorter = min(len(system_norm), len(found_norm))
+        longer = max(len(system_norm), len(found_norm))
+        missing = longer - shorter
+        coverage = shorter / longer if longer else 0
+        if shorter < 18:
+            return False
+        if missing > 6:
+            return False
+        if coverage < 0.75:
+            return False
+        if found_norm.isdigit():
+            return False
+        return True
+
+    @staticmethod
     def _levenshtein_distance(s1: str, s2: str) -> int:
         """计算两个字符串的编辑距离"""
         if len(s1) < len(s2):
@@ -154,7 +194,11 @@ class CodeExtractor:
 
     @classmethod
     def match_system_sn(
-        cls, ocr_texts: list[dict], system_sn: str
+        cls,
+        ocr_texts: list[dict],
+        system_sn: str,
+        *,
+        allow_home_appliance_fragment: bool = False,
     ) -> dict:
         """将 OCR 提取的 SN 与系统 SN 做比对（自动去除空格对比）"""
         found_sns = cls.extract_sn_list(ocr_texts)
@@ -174,6 +218,28 @@ class CodeExtractor:
                 if fs_upper == sys_upper:
                     sn_match = True
                     match_type = "case_insensitive"
+                    break
+
+        if not sn_match and clean_system:
+            system_norm = cls._normalize_sn(clean_system)
+            for fs in found_sns:
+                if cls._normalize_sn(fs) == system_norm:
+                    sn_match = True
+                    match_type = "normalized"
+                    break
+
+        if not sn_match and clean_system:
+            for fs in found_sns:
+                if cls._is_safe_partial_sn_match(clean_system, fs):
+                    sn_match = True
+                    match_type = "prefix"
+                    break
+
+        if allow_home_appliance_fragment and not sn_match and clean_system:
+            for fs in found_sns:
+                if cls._is_home_appliance_fragment_match(clean_system, fs):
+                    sn_match = True
+                    match_type = "home_appliance_fragment"
                     break
 
         return {

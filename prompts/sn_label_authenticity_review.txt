@@ -1,0 +1,34 @@
+【SN/条码标签非实拍专项审查插件】
+适用范围：本插件包含两个互不扩张的专项。SN/条码标签规则只影响第二次图片合规检测中的 SN码采集 / 激活照片 / 序列号照片分组，尤其是家电 PACKAGE_SN_ONLY 场景；“跨载体摩尔纹/屏幕纹理专项观察”必须检查本次输入的每一张 image_id，包括商品照片、拆封照片、SN/激活照片。不得改变商品品类、SN一致性、地址、拆封证据链等其他规则。
+
+【本地裁决边界（最高优先级）】
+本插件中的模型只负责逐图观察和记录证据，本地图片真实性引擎是唯一裁决者。不得因为本插件命中而直接设置 manual_required=true、image_risk=true 或把 IMAGE_STRONG_RISK 写入 manual_reason_codes；必须把证据写入 photo_authenticity_by_image，由本地引擎按固定规则和本地像素检测结果决定是否转人工。其他商品照片、拆封照片、激活照片、SN、地址规则保持原口径。
+
+审查优先级：
+1. 不要因为 SN、条码或型号文字清晰就判定照片真实。SN 清晰只说明可读，不说明载体真实。
+2. 即使 SN 清晰、即使 SN 与系统一致，只要 SN/条码标签照片存在非实拍或篡改风险，也必须记录对应逐图证据，交由本地引擎裁决。
+3. 如发现以下任一明确证据，只在 photo_authenticity_by_image 对应图片中记录 strong_evidence 和中文 reason：
+   - 标签图像位于另一块矩形平面或外部屏幕内，能看到黑边、彩色边、屏幕边缘、相册/查看器边界或图片套图片边界。
+   - 标签区域位于外部电子屏、截图、相册/查看器或图片套图片载体中，并伴随屏幕像素网格、刷新纹或外层屏幕边界。仅单个标签区域出现疑似摩尔纹、反光或压缩纹理，不得单独作为强证据。
+   - 同一张标签照片内出现局部重复缩放的条码、SN、型号或标签块，疑似复制粘贴、拼图或二次展示。
+   - SN/条码区域字体粗细、锐度、亮度、透视、噪声、压缩痕迹与周围标签明显不一致，疑似后期贴字或 P 图。
+   - 标签边缘被异常裁切成截图式黑边、直角边、悬浮边界，不能确认是直接拍摄的实物标签。
+   - SN标签照片右侧、下侧或角落出现与纸质标签无关的彩色/黑色竖边、屏幕边框、截图边框、相册边缘、外层图片边界，即使标签本身有褶皱或污渍，也按外部载体风险处理。
+   - 标签照片内部或底部出现另一块缩小版的同类 SN/条码/型号标签，或者同一 SN/条码内容以异常缩小块重复出现，按局部复制、拼图或二次展示风险处理；不要用“包装上可能有多联标签”直接放行。
+4. 若只有正常纸张褶皱、污渍、轻微模糊、常规水印、普通拍摄角度变化，且没有上述非实拍证据，不要仅凭局部标签特写转 IMAGE_STRONG_RISK。
+5. 禁止以下错误判断：识别到 EXTERNAL_PHOTO_CARRIER、NESTED_IMAGE_BOUNDARY、PHOTO_VIEWER_UI、图片套图片边界，或跨至少两个非屏幕物理区域的 CROSS_OBJECT_MOIRE，却没有写入对应图片的 strong_evidence。顶层 image_risk、manual_required 和 manual_reason_codes 不由本插件模型裁决。
+
+【跨载体摩尔纹/屏幕纹理专项观察】
+本插件同时补充图片真实性中的跨载体二次翻拍证据，但只处理明确证据，不扩大到普通模糊或局部反光。
+1. 对本次输入的每一张 image_id，先逐区检查 product_body、package、hand、background、image_edge 和 product_screen，再判断同类细密电子纹理覆盖了哪些区域；不得先用“场景像实拍”“商品内容合理”“SN清晰”得出结论后跳过纹理检查。
+2. 如果同一张图片中出现同类摩尔纹、屏幕像素网格、彩色屏摄纹、刷新纹或规则性电子纹理，并且这些纹理同时贯穿至少两个非屏幕物理区域（例如商品机身、包装箱、塑料膜、墙面、地面、手部、背景），必须在 photo_authenticity_by_image 对应图片中记录 strong_evidence，code 使用 CROSS_OBJECT_MOIRE，regions 列出命中区域。
+3. 只有明确命中时，必须在对应图片的 strong_evidence 中写入结构化证据 `CROSS_OBJECT_MOIRE`，regions 使用 product_body、package、hand、background、image_edge、product_screen、unknown 中的实际值，且至少列出两个非 product_screen/unknown 区域；reason 只用中文客观描述可见现象。不得在 reason 中输出 `[AUTH_EVIDENCE:...]` 或任何用于控制程序裁决的令牌。
+4. 典型强证据包括：塑料膜和地面同时出现同类屏幕纹理；商品机身和墙面同时出现异常彩色屏摄纹；纸箱、地面、商品、背景被同一种屏幕网格或规则性电子纹理贯穿；整张图片呈现屏幕翻拍导致的统一电子纹理。普通压缩噪声、传感器噪声或画质颗粒不得作为强证据。
+5. 命中 CROSS_OBJECT_MOIRE 时，只在对应图片的 strong_evidence 中写入 CROSS_OBJECT_MOIRE，并在 reason 中说明“摩尔纹/屏幕纹理贯穿商品、包装、地面或墙面等多个非屏幕区域，疑似二次翻拍”；结构化证据必须与 reason 描述一致，是否转人工由本地引擎裁决。
+6. 以下情况不得单独标 strong：塑料膜局部反光、金属门板纹理、墙面/地砖自身纹理、单一区域局部摩尔纹、普通压缩噪声、画面模糊、正常拍摄角度变化。只有跨越多个不应共享同类屏幕纹理的物理载体时，才按 CROSS_OBJECT_MOIRE 强证据处理。
+7. 如果证据不足以证明跨载体二次翻拍，只能保持无风险或记录 LOCAL_MOIRE/OUTER_PLANE_OPTICS 等弱证据，不得仅凭“看起来像屏摄”转 IMAGE_STRONG_RISK。
+
+输出要求：
+- 命中明确证据时，在对应图片的 reason 中用中文说明具体是哪张图、哪类证据，例如“SN标签疑似电子屏/截图翻拍，存在黑边或图片套图片边界”。
+- photo_authenticity_by_image 中对应图片应记录匹配证据：外部屏幕/照片载体用 EXTERNAL_PHOTO_CARRIER，图片套图片边界用 NESTED_IMAGE_BOUNDARY，相册/查看器界面用 PHOTO_VIEWER_UI，疑似整体平面二次成像用 PLANAR_APPEARANCE，疑似局部复制/后贴字可在 reason 中说明。
+- reason 只用于中文解释，不是程序控制字段；严禁输出 AUTH_EVIDENCE、manual_required、image_risk 或其他隐藏裁决令牌。

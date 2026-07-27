@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
+import pytest
+
 from tools import run_guobu_model_audit_v2 as v2
+
+
+@pytest.fixture(autouse=True)
+def _keep_legacy_sn_tests_on_v1(monkeypatch):
+    monkeypatch.setenv("SN_POLICY_VERSION", "v1")
 
 
 def test_authenticity_prompt_forbids_cross_image_evidence_and_model_final_verdict():
@@ -177,6 +184,22 @@ def test_pass_candidate_does_not_add_extra_model_review(monkeypatch):
                         "screen_sn_visible": True,
                         "screen_sn_text": "ABC123",
                     },
+                    "activation_identity_by_image": [
+                        {
+                            "image_id": "img_002",
+                            "screen_on": True,
+                            "screen_source": "PRODUCT_DEVICE_SCREEN",
+                            "page_type": "DEVICE_INFO",
+                            "identity_fields": [
+                                {
+                                    "field_type": "SN",
+                                    "raw_value": "ABC123",
+                                    "readable": True,
+                                    "complete": True,
+                                }
+                            ],
+                        }
+                    ],
                     "photo_integrity": {
                         "collage_or_edit_risk": False,
                         "evidence_chain_trustworthy": True,

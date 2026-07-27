@@ -1,0 +1,12 @@
+{
+  "status": "failed",
+  "count": 19,
+  "expectTotal": 19,
+  "currentPage": 1,
+  "checkStartTime": "",
+  "checkEndTime": "",
+  "approvalStartTime": "2026-07-24 00:00:00",
+  "approvalEndTime": "2026-07-24 15:59:36",
+  "label": "fail_20260724_19",
+  "port": 9222
+}

@@ -1,6 +1,10 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import hashlib
+import http.server
 import json
+from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -18,6 +22,11 @@ from tools.run_guobu_model_audit_v2 import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _keep_legacy_sn_tests_on_v1(monkeypatch):
+    monkeypatch.setenv("SN_POLICY_VERSION", "v1")
+
+
 def _auth_observation(image_id):
     return {
         "image_id": image_id,
@@ -31,30 +40,47 @@ def _auth_observation(image_id):
 
 def test_compliance_prompt_authenticity_addendum_is_opt_in_and_identical_for_all_categories():
     categories = ("home_appliance", "computer", "ordinary_3c", "unknown")
-    original = {category: v2.compliance_prompt_for_category(category) for category in categories}
+    original = {
+        category: v2.compliance_prompt_for_category(
+            category, digital_activation_evidence_mode="off",
+        )
+        for category in categories
+    }
 
     for category in categories:
-        assert v2.compliance_prompt_for_category(category, include_photo_authenticity=False) == original[category]
-        merged = v2.compliance_prompt_for_category(category, include_photo_authenticity=True)
+        assert v2.compliance_prompt_for_category(
+            category,
+            include_photo_authenticity=False,
+            digital_activation_evidence_mode="off",
+        ) == original[category]
+        merged = v2.compliance_prompt_for_category(
+            category,
+            include_photo_authenticity=True,
+            sn_label_auth_review_mode="off",
+            digital_activation_evidence_mode="off",
+        )
         assert merged == original[category] + v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
         assert merged.count(v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM) == 1
         assert merged.count('"photo_authenticity_by_image"') == 1
 
 
-def test_legacy_compliance_prompts_match_frozen_pre_task2_sha256_baselines():
-    # Baselines were frozen from the existing working-tree prompts when Task 2
-    # first brought this previously-untracked mainline file under version control.
-    # There is no earlier Git blob from which to reconstruct a historical diff.
+def test_plugin_off_compliance_prompts_match_frozen_exact_duplicate_policy_baselines():
+    # These hashes include the approved global exact-duplicate wording while
+    # keeping the digital activation plugin disabled.
     expected = {
-        "home_appliance": "c598cd041171f2552797cac2d71ed6c3615f05f495c3638a9dcd6f06a8708bb0",
-        "computer": "614a07fc1ec229d97958952ff2015864270eecc770d5f6da4d8ed078c626c772",
-        "ordinary_3c": "8d9e55cae771522f91ec29aca9d8d06a4c3b639de5f03b3e9c2959132d8ebe71",
-        "unknown": "578f0ade0ec8cfbd642b5467041e612e8683de08da5c4419656ed9db69f26315",
+        "home_appliance": "9b0127f2ee8d45168c6c37d4b106a20db256a7ec3884eef85db902639409c96c",
+        "computer": "a8df6e1d25ad95bc42376158666179097b9ec95c839b9ebe2c12f69e4fd00c79",
+        "ordinary_3c": "df4323fc3d3564d2c64f02b6d6129fd334b41e1172687a66d2ddc6c19f82bb81",
+        "unknown": "837429578a41c19c006e95ad8b482773e6e333c931078688442984f087db5f1f",
     }
 
     actual = {
         category: hashlib.sha256(
-            v2.compliance_prompt_for_category(category, include_photo_authenticity=False).encode("utf-8")
+            v2.compliance_prompt_for_category(
+                category,
+                include_photo_authenticity=False,
+                digital_activation_evidence_mode="off",
+            ).encode("utf-8")
         ).hexdigest()
         for category in expected
     }
@@ -117,8 +143,9 @@ def test_hybrid_enforce_routes_incomplete_authenticity_structure_manual_without_
     assert result["photo_authenticity_fallback_calls"] == 0
 
 
-def test_hybrid_enforce_exempts_r9_benign_package_local_moire(monkeypatch):
+def test_hybrid_enforce_routes_package_local_moire_manual_under_legacy_r9(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
 
     def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
         if stage == "hybrid_sn":
@@ -138,14 +165,16 @@ def test_hybrid_enforce_exempts_r9_benign_package_local_moire(monkeypatch):
 
     result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
 
-    assert result["manual_flag"] == "否"
-    assert result["photo_authenticity_would_manual"] is False
-    assert result["photo_authenticity_manual_count"] == 0
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "NON_REAL_PHOTO_REVIEW"
+    assert result["photo_authenticity_would_manual"] is True
+    assert result["photo_authenticity_manual_count"] == 1
     assert result["photo_authenticity_fft_count"] == 0
 
 
 def test_hybrid_enforce_routes_background_local_moire_manual_even_when_reason_says_real(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
 
     def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
         if stage == "hybrid_sn":
@@ -170,8 +199,9 @@ def test_hybrid_enforce_routes_background_local_moire_manual_even_when_reason_sa
     assert result["photo_authenticity_manual_count"] == 1
 
 
-def test_hybrid_enforce_exempts_r9_benign_package_outer_plane_optics(monkeypatch):
+def test_hybrid_enforce_routes_package_outer_plane_optics_manual_under_legacy_r9(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
 
     def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
         if stage == "hybrid_sn":
@@ -190,13 +220,15 @@ def test_hybrid_enforce_exempts_r9_benign_package_outer_plane_optics(monkeypatch
 
     result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", task)
 
-    assert result["manual_flag"] == "否"
-    assert result["photo_authenticity_would_manual"] is False
-    assert result["photo_authenticity_manual_count"] == 0
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "NON_REAL_PHOTO_REVIEW"
+    assert result["photo_authenticity_would_manual"] is True
+    assert result["photo_authenticity_manual_count"] == 1
 
 
 def test_hybrid_enforce_keeps_carrier_boundary_with_benign_weak_manual(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
 
     def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
         if stage == "hybrid_sn":
@@ -223,6 +255,7 @@ def test_hybrid_enforce_keeps_carrier_boundary_with_benign_weak_manual(monkeypat
 
 def test_hybrid_enforce_exempts_only_product_screen_local_moire(monkeypatch):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
 
     def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
         if stage == "hybrid_sn":
@@ -291,7 +324,10 @@ def test_hybrid_off_keeps_original_prompt_stage_and_never_calls_gate(monkeypatch
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
     monkeypatch.setattr(v2, "apply_photo_authenticity_gate", lambda **_: pytest.fail("gate called in off mode"), raising=False)
     result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task())
-    assert calls[1] == ("hybrid_compliance", v2.compliance_prompt_for_category("ordinary_3c"))
+    assert calls[1] == (
+        "hybrid_compliance",
+        v2.compliance_prompt_for_category("ordinary_3c", product_type="手机 [B01]"),
+    )
     assert result["manual_flag"] == "否"
 
 
@@ -329,9 +365,9 @@ def _base_task():
             "address": "",
         },
         "images": [
-            {"title": "鍟嗗搧鐓х墖", "source_url": "a"},
-            {"title": "鎷嗗皝鐓х墖", "source_url": "b"},
-            {"title": "SN photo", "source_url": "c"},
+            {"image_id": "img_001", "title": "鍟嗗搧鐓х墖", "source_url": "a"},
+            {"image_id": "img_002", "title": "鎷嗗皝鐓х墖", "source_url": "b"},
+            {"image_id": "img_003", "title": "SN photo", "source_url": "c"},
         ],
     }
 
@@ -363,6 +399,22 @@ def _screen_sn_compliance_pass():
             "screen_sn_visible": True,
             "screen_sn_text": "ABC123",
         },
+        "activation_identity_by_image": [
+            {
+                "image_id": "img_003",
+                "screen_on": True,
+                "screen_source": "PRODUCT_DEVICE_SCREEN",
+                "page_type": "DEVICE_INFO",
+                "identity_fields": [
+                    {
+                        "field_type": "SN",
+                        "raw_value": "ABC123",
+                        "readable": True,
+                        "complete": True,
+                    }
+                ],
+            }
+        ],
         "photo_integrity": {
             "collage_or_edit_risk": False,
             "evidence_chain_trustworthy": True,
@@ -389,7 +441,7 @@ def test_call_model_disables_qwen_thinking_for_sn_stage(monkeypatch):
         def json(self):
             return {"choices": [{"message": {"content": "{\"ok\": true}"}}], "usage": {}}
 
-    monkeypatch.setattr(v2, "_wait_before_model_request", lambda: None)
+    monkeypatch.setattr(v2, "_wait_before_model_request", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         v2,
         "_post_chat_completion_json",
@@ -423,7 +475,7 @@ def test_call_model_disables_qwen_thinking_for_compliance_stage(monkeypatch):
         def json(self):
             return {"choices": [{"message": {"content": "{\"ok\": true}"}}], "usage": {}}
 
-    monkeypatch.setattr(v2, "_wait_before_model_request", lambda: None)
+    monkeypatch.setattr(v2, "_wait_before_model_request", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         v2,
         "_post_chat_completion_json",
@@ -456,7 +508,7 @@ def test_direct_sn_ocr_uses_plain_text_without_system_sn_and_disables_qwen_think
         def json(self):
             return {"choices": [{"message": {"content": "SN: ABC123"}}], "usage": {"total_tokens": 7}}
 
-    monkeypatch.setattr(v2, "_wait_before_model_request", lambda: None)
+    monkeypatch.setattr(v2, "_wait_before_model_request", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         v2,
         "_post_chat_completion_json",
@@ -483,6 +535,37 @@ def test_direct_sn_ocr_uses_plain_text_without_system_sn_and_disables_qwen_think
     assert "ABC123" not in serialized
 
 
+def test_direct_sn_ocr_cache_changes_when_local_image_content_changes(monkeypatch, tmp_path):
+    image_path = tmp_path / "sn.jpg"
+    image_path.write_bytes(b"first")
+    responses = iter(["FIRST123", "SECOND456"])
+    calls = []
+
+    def fake_post(*_args, **_kwargs):
+        calls.append(True)
+        return {
+            "choices": [{"message": {"content": next(responses)}}],
+            "usage": {"total_tokens": 1},
+        }
+
+    monkeypatch.setattr(v2, "_post_chat_completion_json", fake_post)
+    images = [{"image_id": "i1", "local_path": str(image_path), "_detail": "high"}]
+
+    first, *_rest, first_cached = v2.call_direct_sn_ocr(
+        "https://example.test", "key", "qwen3.7-plus", images, cache_dir=tmp_path / "cache",
+    )
+    image_path.write_bytes(b"second")
+    second, *_rest, second_cached = v2.call_direct_sn_ocr(
+        "https://example.test", "key", "qwen3.7-plus", images, cache_dir=tmp_path / "cache",
+    )
+
+    assert first == "FIRST123"
+    assert second == "SECOND456"
+    assert first_cached is False
+    assert second_cached is False
+    assert len(calls) == 2
+
+
 def test_model_request_buffer_waits_until_three_seconds_after_previous_request(monkeypatch):
     sleeps = []
     moments = iter([101.0, 103.0])
@@ -497,8 +580,55 @@ def test_model_request_buffer_waits_until_three_seconds_after_previous_request(m
     assert v2._last_model_request_at == 103.0
 
 
-def test_chat_completion_retries_connect_failure_once_with_five_second_connect_timeout(monkeypatch):
+def test_chat_completion_throttle_respects_stage_deadline(monkeypatch):
+    monkeypatch.setattr(v2, "MODEL_REQUEST_BUFFER_SEC", 0.20)
+    monkeypatch.setattr(v2, "_last_model_request_at", time.monotonic())
+    monkeypatch.setattr(
+        v2,
+        "_http_connection_for_url",
+        lambda *_args, **_kwargs: pytest.fail("connection should not start after throttle deadline"),
+    )
+
+    started = time.perf_counter()
+    with pytest.raises(v2.OrderBudgetExceeded):
+        v2._post_chat_completion_json(
+            "http://127.0.0.1:1/v1",
+            "key",
+            {"model": "qwen3.7-plus"},
+            read_timeout_sec=0.05,
+        )
+
+    assert time.perf_counter() - started < 0.12
+
+
+def test_model_request_buffer_lock_wait_respects_stage_deadline(monkeypatch):
+    monkeypatch.setattr(v2, "MODEL_REQUEST_BUFFER_SEC", 0.20)
+    monkeypatch.setattr(v2, "_last_model_request_at", None)
+    lock_acquired = threading.Event()
+
+    def hold_model_request_lock():
+        with v2._model_request_lock:
+            lock_acquired.set()
+            time.sleep(0.20)
+
+    holder = threading.Thread(target=hold_model_request_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=1)
+
+    started = time.perf_counter()
+    try:
+        with pytest.raises(v2.OrderBudgetExceeded):
+            v2._wait_before_model_request(time.time() + 0.05)
+        elapsed = time.perf_counter() - started
+    finally:
+        holder.join(timeout=1)
+
+    assert elapsed < 0.12
+
+
+def test_chat_completion_retries_connect_failure_with_one_absolute_stage_deadline(monkeypatch):
     calls = []
+    fake_now = {"value": 1000.0}
 
     class FakeHTTPResponse:
         status = 200
@@ -523,7 +653,9 @@ def test_chat_completion_retries_connect_failure_once_with_five_second_connect_t
 
         def request(self, method, path, body=None, headers=None):
             if len(calls) == 1:
+                fake_now["value"] += 5.0
                 raise TimeoutError("connect timed out")
+            fake_now["value"] += 2.0
 
         def getresponse(self):
             return FakeHTTPResponse()
@@ -531,7 +663,8 @@ def test_chat_completion_retries_connect_failure_once_with_five_second_connect_t
         def close(self):
             return None
 
-    monkeypatch.setattr(v2, "_wait_before_model_request", lambda: None)
+    monkeypatch.setattr(v2, "_wait_before_model_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(v2.time, "time", lambda: fake_now["value"])
     monkeypatch.setattr(v2, "_http_connection_for_url", lambda parsed_url, timeout: FakeConnection(parsed_url.netloc, timeout))
 
     response = v2._post_chat_completion_json(
@@ -544,7 +677,48 @@ def test_chat_completion_retries_connect_failure_once_with_five_second_connect_t
     assert response["choices"][0]["message"]["content"] == "{\"ok\": true}"
     assert len(calls) == 2
     assert all(call.timeout == 5 for call in calls)
-    assert calls[1].sock.timeouts == [60]
+    assert calls[1].sock.timeouts == [53.0]
+
+
+def test_chat_completion_enforces_stage_deadline_during_progressive_body(monkeypatch):
+    response_body = json.dumps(
+        {"choices": [{"message": {"content": "{\"ok\": true}"}}], "usage": {}}
+    ).encode("utf-8")
+
+    class SlowBodyHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            for byte in response_body:
+                try:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                except OSError:
+                    break
+                time.sleep(0.01)
+
+        def log_message(self, format, *args):
+            return None
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SlowBodyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(v2, "_wait_before_model_request", lambda *_args, **_kwargs: None)
+
+    try:
+        with pytest.raises(v2.OrderBudgetExceeded):
+            v2._post_chat_completion_json(
+                f"http://127.0.0.1:{server.server_address[1]}/v1",
+                "key",
+                {"model": "qwen3.7-plus"},
+                read_timeout_sec=0.05,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_sn_only_audit_reads_direct_sn_without_compliance_or_auto_pass(monkeypatch):
@@ -1506,6 +1680,472 @@ def test_top_level_system_observed_is_cross_checked_against_conflicting_candidat
 
 
 @pytest.mark.parametrize(
+    (
+        "order_id",
+        "product_type",
+        "system_sn",
+        "observed_sn",
+        "candidates",
+    ),
+    [
+        (
+            "481172622339271118028880",
+            "[A03] 洗衣机",
+            "CEACF800001PHS21XAK1",
+            "G10090BD12S",
+            [
+                _sn_candidate("G10090BD12S", field_type="SN", raw_text="G10090BD12S"),
+                _sn_candidate(
+                    "CEACF800001PHS21XAK1",
+                    field_type="SERIAL",
+                    raw_text="CEACF800001PHS21XAK1",
+                ),
+            ],
+        ),
+        (
+            "481173066847794737971215",
+            "[A03] 洗衣机",
+            "51138000MN4AB141A00192",
+            "51138000MN4AB141A00192",
+            [
+                _sn_candidate(
+                    "51138000MN4AB141A00192",
+                    field_type="SN",
+                    raw_text="51138000MN4AB141A00192",
+                ),
+                _sn_candidate("MB80V37T", field_type="SERIAL", raw_text="MB80V37T"),
+            ],
+        ),
+        (
+            "481173197804678689587227",
+            "[A04] 空调",
+            "AAC81100000N4RCNW2GY",
+            "SN_NOT_FOUND",
+            [
+                _sn_candidate(
+                    "KFR72GMEA81U1",
+                    source="DEVICE_BODY",
+                    field_type="MODEL_NUMBER",
+                    raw_text="KFR-72G/MEA81U1",
+                ),
+                _sn_candidate(
+                    "AAC81100000N4RCNW2GY",
+                    source="DEVICE_BODY",
+                    field_type="OTHER_CODE",
+                    raw_text="AAC81 10000 0N4RC NW2GY",
+                ),
+            ],
+        ),
+        (
+            "481173197823400401305629",
+            "[A01] 电视机",
+            "1TE650CTCNTA017BQ280040",
+            "1TE650CTCNTA017BQ280040",
+            [
+                _sn_candidate(
+                    "1TE650CTCNTA017BQ280040",
+                    field_type="SN",
+                    raw_text="1TE650CTCNTA017BQ280040",
+                ),
+                _sn_candidate("65Z570QF", field_type="SERIAL", raw_text="65Z570QF"),
+            ],
+        ),
+        (
+            "481173198775177737011289",
+            "[A06] 热水器",
+            "GA0T0900800GMS4NRQHR",
+            "GA0T0900800GMS4NRQHR",
+            [
+                _sn_candidate(
+                    "GA0T0900800GMS4NRQHR",
+                    source="DEVICE_BODY",
+                    field_type="SERIAL",
+                    raw_text="GA0T0900800GMS4NRQHR",
+                ),
+                _sn_candidate(
+                    "GHS4N1C59A",
+                    source="DEVICE_BODY",
+                    field_type="SN",
+                    raw_text="GHS4N1C59A",
+                ),
+            ],
+        ),
+        (
+            "481173199299432149811214",
+            "[A03] 洗衣机",
+            "CAACE300000PAS6BZKLC",
+            "CAACE300000PAS6BZKLC",
+            [
+                _sn_candidate(
+                    "CAACE300000PAS6BZKLC",
+                    source="DEVICE_BODY",
+                    field_type="SERIAL",
+                    raw_text="CAACE300000PAS6BZKLC",
+                ),
+                _sn_candidate(
+                    "CAACE3000",
+                    source="DEVICE_BODY",
+                    field_type="SN",
+                    raw_text="CAACE3000",
+                ),
+            ],
+        ),
+        (
+            "481173201334998345318449",
+            "[A04] 空调",
+            "AB96B400001N7QBKBT01",
+            "AAC6G100001N8QBJFXMJ",
+            [
+                _sn_candidate(
+                    "AAC6G100001N8QBJFXMJ",
+                    source="DEVICE_BODY",
+                    field_type="SN",
+                    raw_text="AAC6G 10000 1N8QB JFXMJ",
+                ),
+                _sn_candidate(
+                    "AB96B400001N7QBKBT01",
+                    source="DEVICE_BODY",
+                    field_type="SERIAL",
+                    raw_text="AB96B 40000 1N7QB KBT01",
+                ),
+            ],
+        ),
+        (
+            "481173202061507166208054",
+            "[A06] 热水器",
+            "GA0T750020032RCAT9Z6",
+            "GA0T750020032RCAT9Z6",
+            [
+                _sn_candidate(
+                    "GA0T750020032RCAT9Z6",
+                    field_type="SERIAL",
+                    raw_text="GA0T750020032RCAT9Z6",
+                ),
+                _sn_candidate("32RCAB5CE3", field_type="SN", raw_text="32RCAB5CE3"),
+            ],
+        ),
+    ],
+)
+def test_home_appliance_exact_system_candidate_locks_authoritative_sn(
+    order_id, product_type, system_sn, observed_sn, candidates
+):
+    normalized = v2._normalize_sn_result(
+        {"system_sn": system_sn, "product_type": product_type},
+        {
+            "sn_match": observed_sn != "SN_NOT_FOUND",
+            "observed_sn": observed_sn,
+            "normalized_observed_sn": None if observed_sn == "SN_NOT_FOUND" else observed_sn,
+            "sn_candidates": candidates,
+            "manual_reason_code": "SN_NOT_FOUND" if observed_sn == "SN_NOT_FOUND" else None,
+        },
+    )
+
+    assert normalized["sn_match"] is True, order_id
+    assert normalized["observed_sn"] == system_sn, order_id
+    assert normalized["manual_reason_code"] == "", order_id
+
+
+def test_home_appliance_without_exact_system_candidate_preserves_mismatch():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "product_type": "[A03] 洗衣机"},
+        {
+            "observed_sn": "WRONG123",
+            "sn_candidates": [_sn_candidate("WRONG123", source="DEVICE_BODY")],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "WRONG123"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+
+
+def test_home_appliance_model_bound_exact_value_cannot_rescue_sn():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "KFR72GMEA81U1", "product_type": "[A04] 空调"},
+        {
+            "observed_sn": "SN_NOT_FOUND",
+            "sn_candidates": [
+                _sn_candidate(
+                    "KFR72GMEA81U1",
+                    source="DEVICE_BODY",
+                    field_type="MODEL_NUMBER",
+                    raw_text="型号: KFR-72G/MEA81U1",
+                )
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+def test_ordinary_3c_screen_first_conflict_is_not_rescued_by_matching_package_sn():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "product_type": "手机"},
+        {
+            "observed_sn": "WRONG123",
+            "sn_candidates": [
+                _sn_candidate("WRONG123", source="DEVICE_SCREEN"),
+                _sn_candidate("ABC123", source="PACKAGE_LABEL"),
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "WRONG123"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+
+
+def test_ordinary_3c_cannot_be_rescued_by_model_supplied_home_flag():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "product_type": "手机"},
+        {
+            "is_home_appliance": True,
+            "observed_sn": "WRONG123",
+            "sn_candidates": [
+                _sn_candidate("WRONG123", source="DEVICE_SCREEN"),
+                _sn_candidate("ABC123", source="PACKAGE_LABEL"),
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["observed_sn"] == "WRONG123"
+    assert normalized["manual_reason_code"] == "SN_MISMATCH"
+
+
+def test_home_appliance_model_context_does_not_hide_separately_bound_exact_sn():
+    candidate = _sn_candidate(
+        "ABC123",
+        source="DEVICE_BODY",
+        field_type="OTHER_CODE",
+        raw_text="ABC123",
+    )
+    candidate["raw_context"] = "Model: KFR72; SN: ABC123"
+
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "product_type": "[A04] 空调"},
+        {"observed_sn": "SN_NOT_FOUND", "sn_candidates": [candidate]},
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "ABC123"
+
+
+@pytest.mark.parametrize(
+    "raw_context",
+    [
+        "Model: ABC123",
+        "MODEL-NO: ABC123",
+        "MODEL_NO: ABC123",
+        "MODEL/NO: ABC123",
+    ],
+)
+def test_home_appliance_context_bound_model_value_cannot_rescue_sn(raw_context):
+    candidate = _sn_candidate(
+        "ABC123",
+        source="DEVICE_BODY",
+        field_type="OTHER_CODE",
+        raw_text="ABC123",
+    )
+    candidate["raw_context"] = raw_context
+
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "product_type": "[A04] 空调"},
+        {"observed_sn": "SN_NOT_FOUND", "sn_candidates": [candidate]},
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    "label_text",
+    ["MODEL-NO", "MODEL_NO", "MODEL/NO", "MODEL-NUMBER"],
+)
+def test_home_appliance_punctuated_model_label_cannot_rescue_sn(label_text):
+    candidate = _sn_candidate(
+        "ABC123",
+        source="DEVICE_BODY",
+        field_type="OTHER_CODE",
+        raw_text="ABC123",
+    )
+    candidate["label_text"] = label_text
+
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "product_type": "[A04] 空调"},
+        {"observed_sn": "SN_NOT_FOUND", "sn_candidates": [candidate]},
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    "field_type",
+    ["IMEI", "IMEI1", "IMEI2", "EID", "IMEI-1", "E-I-D"],
+)
+def test_home_appliance_identity_candidate_cannot_rescue_sn(field_type):
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "867530900000001", "product_type": "[A03] 洗衣机"},
+        {
+            "observed_sn": "SN_NOT_FOUND",
+            "sn_candidates": [
+                _sn_candidate(
+                    "867530900000001",
+                    source="DEVICE_BODY",
+                    field_type=field_type,
+                    raw_text=f"{field_type}: 867530900000001",
+                )
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+def test_home_appliance_hyphenated_model_field_cannot_rescue_sn():
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "KFR72GMEA81U1", "product_type": "[A04] 空调"},
+        {
+            "observed_sn": "SN_NOT_FOUND",
+            "sn_candidates": [
+                _sn_candidate(
+                    "KFR72GMEA81U1",
+                    source="DEVICE_BODY",
+                    field_type="MODEL-NUMBER",
+                    raw_text="KFR-72G/MEA81U1",
+                )
+            ],
+        },
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("label_text", "IMEI1"),
+        ("raw_context", "IMEI1: 867530900000001"),
+        ("label_text", "E-I-D"),
+        ("raw_context", "E-I-D: 867530900000001"),
+        ("label_text", "I-M-E-I"),
+        ("raw_context", "I-M-E-I: 867530900000001"),
+    ],
+)
+def test_home_appliance_identity_bound_exact_other_code_cannot_rescue_sn(
+    field_name, field_value
+):
+    candidate = _sn_candidate(
+        "867530900000001",
+        source="DEVICE_BODY",
+        field_type="OTHER_CODE",
+        raw_text="867530900000001",
+    )
+    candidate[field_name] = field_value
+
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "867530900000001", "product_type": "[A03] 洗衣机"},
+        {"observed_sn": "SN_NOT_FOUND", "sn_candidates": [candidate]},
+    )
+
+    assert normalized["sn_match"] is False
+    assert normalized["manual_reason_code"] == "SN_NOT_FOUND"
+
+
+def test_home_appliance_separate_identity_context_does_not_hide_exact_sn():
+    candidate = _sn_candidate(
+        "ABC123",
+        source="DEVICE_BODY",
+        field_type="OTHER_CODE",
+        raw_text="ABC123",
+    )
+    candidate["raw_context"] = "IMEI1: 867530900000001; SN: ABC123"
+
+    normalized = v2._normalize_sn_result(
+        {"system_sn": "ABC123", "product_type": "[A03] 洗衣机"},
+        {"observed_sn": "SN_NOT_FOUND", "sn_candidates": [candidate]},
+    )
+
+    assert normalized["sn_match"] is True
+    assert normalized["observed_sn"] == "ABC123"
+
+
+def test_final_row_keeps_locked_home_appliance_sn_instead_of_secondary_conflict():
+    fields = {
+        "system_sn": "ABC123",
+        "product_type": "[A03] 洗衣机",
+    }
+    sn_result = {
+        "sn_match": True,
+        "observed_sn": "ABC123",
+        "sn_candidates": [
+            _sn_candidate("ABC123", source="DEVICE_BODY", field_type="SERIAL"),
+            _sn_candidate("SHORT1", source="DEVICE_BODY", field_type="SN"),
+        ],
+    }
+    compliance = {
+        "effective_category": "ordinary_3c",
+        "system_sn": "ABC123",
+        "sn_candidates": [_sn_candidate("SHORT1", source="DEVICE_BODY")],
+    }
+
+    row = v2._final_row(
+        {"channel_order_no": "home-lock-report", "fields": fields},
+        {
+            "manual_required": True,
+            "manual_reason_codes": ["SN_MISMATCH"],
+            "manual_reason": "secondary candidate conflict",
+        },
+        sn_result,
+        compliance,
+        1.0,
+        0.1,
+        0.2,
+        0.3,
+    )
+
+    assert row["observed_sn"] == "ABC123"
+    assert row["sn_match"] is True
+    assert row["manual_flag"] == "否"
+    assert row["manual_reason_code"] == ""
+
+
+def test_final_row_keeps_other_manual_reason_after_locked_sn_removes_mismatch():
+    fields = {"system_sn": "ABC123", "product_type": "[A03] 洗衣机"}
+    sn_result = {
+        "sn_match": True,
+        "observed_sn": "ABC123",
+        "sn_candidates": [_sn_candidate("ABC123", source="DEVICE_BODY")],
+    }
+
+    row = v2._final_row(
+        {"channel_order_no": "home-lock-other-reason", "fields": fields},
+        {
+            "manual_required": True,
+            "manual_reason_codes": ["SN_MISMATCH", "IMAGE_STRONG_RISK"],
+            "manual_reason": "照片中SN与系统SN不一致",
+        },
+        sn_result,
+        {"effective_category": "ordinary_3c"},
+        1.0,
+        0.1,
+        0.2,
+        0.3,
+    )
+
+    assert row["observed_sn"] == "ABC123"
+    assert row["sn_match"] is True
+    assert row["manual_flag"] == "是"
+    assert row["manual_reason_code"] == "IMAGE_STRONG_RISK"
+    assert "SN不一致" not in row["manual_reason_cn"]
+    assert "SN不一致" not in row["manual_reason"]
+
+
+@pytest.mark.parametrize(
     ("observed_sn", "expected_match", "expected_code"),
     [
         ("ABC123", True, ""),
@@ -1591,6 +2231,23 @@ def test_address_precision_rules():
     assert not is_address_precise_enough("main road")
 
 
+def test_address_precision_rejects_long_opaque_alphanumeric_suffix():
+    assert not is_address_precise_enough("513385L0757B609M100145")
+    assert not is_address_precise_enough("西藏自治区拉萨市城关区513385L0757B609M100145")
+
+
+def test_address_precision_accepts_village_or_terminal_number_from_july16_samples():
+    for address in (
+        "丁青寺僧人宿舍302",
+        "柳梧新区圣地财富广场一期5B609",
+        "麦冬村",
+        "退休村",
+        "朗镇巴热村",
+        "柳梧宏御商业广场A座507",
+    ):
+        assert is_address_precise_enough(address)
+
+
 def test_address_precision_accepts_business_keywords_anywhere():
     for address in ("某某商贸", "北京市某路京东家电配送点", "幸福楼三层"):
         assert is_address_precise_enough(address)
@@ -1619,14 +2276,16 @@ def test_home_appliance_precheck_accepts_address_keyword_and_continues():
     assert result["activation_images"]
 
 
-def test_duplicate_cross_group_images_detected_by_same_url():
+def test_duplicate_cross_group_helper_requires_three_exact_images():
     groups = {
         "product": [{"source_url": "https://example.com/a.jpg", "local_path": "a.jpg"}],
         "unboxing": [{"source_url": "https://example.com/a.jpg", "local_path": "b.jpg"}],
         "SN photo": [{"source_url": "https://example.com/c.jpg", "local_path": "c.jpg"}],
     }
 
-    assert has_duplicate_cross_group_images(groups)
+    assert has_duplicate_cross_group_images(groups) is False
+    groups["SN photo"] = [{"source_url": "https://example.com/a.jpg", "local_path": "c.jpg"}]
+    assert has_duplicate_cross_group_images(groups) is True
 
 
 def test_precheck_allows_two_repeated_groups_but_rejects_all_three():
@@ -1667,7 +2326,7 @@ def test_compliance_allows_two_repeated_photos_but_rejects_all_three():
     allowed = v2.enforce_photo_noncompliance_manual(decision)
     assert allowed["manual_required"] is False
 
-    decision["manual_reason"] = "product, unboxing, and activation photos are all identical"
+    decision["_exact_duplicate_image_groups"] = [["product", "unboxing", "activation"]]
     rejected = v2.enforce_photo_noncompliance_manual(decision)
     assert rejected["manual_required"] is True
     assert rejected["manual_reason_codes"] == ["DUPLICATE_IMAGE_EVIDENCE"]
@@ -1783,7 +2442,9 @@ def test_effective_category_prefers_chinese_name_over_model_substrings():
 
 def test_compliance_prompt_selection_uses_short_category_prompts():
     assert v2.compliance_prompt_for_category("home_appliance") == v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
-    assert v2.compliance_prompt_for_category("ordinary_3c") == v2.ORDINARY_3C_COMPLIANCE_PROMPT
+    assert v2.compliance_prompt_for_category(
+        "ordinary_3c", digital_activation_evidence_mode="off",
+    ) == v2.ORDINARY_3C_COMPLIANCE_PROMPT
     assert v2.compliance_prompt_for_category("computer") == v2.COMPUTER_COMPLIANCE_PROMPT
     assert v2.compliance_prompt_for_category("unknown") == v2.UNKNOWN_COMPLIANCE_PROMPT
 
@@ -1883,12 +2544,12 @@ def test_audit_treats_normalized_observed_sn_as_match(monkeypatch):
             "system_sn": "ABC123",
             "is_home_appliance": False,
             "address": "",
-        },
-        "images": [
-            {"title": "鍟嗗搧鐓х墖", "source_url": "a"},
-            {"title": "鎷嗗皝鐓х墖", "source_url": "b"},
-            {"title": "SN photo", "source_url": "c"},
-        ],
+            },
+            "images": [
+                {"image_id": "img_001", "title": "鍟嗗搧鐓х墖", "source_url": "a"},
+                {"image_id": "img_002", "title": "鎷嗗皝鐓х墖", "source_url": "b"},
+                {"image_id": "img_003", "title": "SN photo", "source_url": "c"},
+            ],
     }
 
     result = audit_task_v2("https://example.invalid/v1", "key", "model", task)
@@ -1956,7 +2617,87 @@ def test_model_timeout_is_60_seconds_for_hybrid_calls(monkeypatch):
     result = audit_task_hybrid("https://example.invalid/v1", "key", "model", _base_task())
 
     assert result["manual_flag"] == "否"
-    assert timeouts[0] == ("hybrid_sn", 60)
+    assert timeouts[0][0] == "hybrid_sn"
+    assert timeouts[0][1] <= 60
+    assert timeouts[0][1] == pytest.approx(60, abs=0.01)
+
+
+def test_hybrid_edge_plugin_adds_no_model_stage_and_keeps_gate_on_original_images(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    stages = []
+    gate_image_ids = []
+
+    def fake_prepare(images, payload, **_kwargs):
+        diagnostic = {"image_id": "edge_candidate__img_003", "local_path": str(tmp_path / "diag.png")}
+        prepared_payload = dict(payload)
+        prepared_payload["photo_auth_edge_candidates"] = [{
+            "candidate_id": "img_003:bottom", "image_id": "img_003",
+            "diagnostic_image_id": "edge_candidate__img_003", "side": "bottom",
+        }]
+        return [*images, diagnostic], prepared_payload
+
+    def fake_call(_base, _key, _model, prompt, payload, images, *, stage, **_kwargs):
+        stages.append((stage, [image["image_id"] for image in images]))
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        decision["photo_authenticity_by_image"] = [
+            _auth_observation("img_001"), _auth_observation("img_002"), _auth_observation("img_003"),
+        ]
+        decision["photo_auth_edge_candidate_reviews"] = [{
+            "candidate_id": "img_003:bottom", "image_id": "img_003",
+            "diagnostic_image_id": "edge_candidate__img_003", "side": "bottom",
+            "classification": "clothing_or_scene", "confirmed_external_screen": False,
+            "supporting_features": [], "reason": "not an external display",
+        }]
+        return (decision, "compliance", 0.1, {}, False)
+
+    def fake_gate(*, legacy_row, images, **_kwargs):
+        gate_image_ids.extend(image["image_id"] for image in images)
+        return legacy_row
+
+    monkeypatch.setattr(v2, "prepare_photo_auth_edge_mapping_inputs", fake_prepare)
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    monkeypatch.setattr(v2, "apply_photo_authenticity_gate", fake_gate)
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task(), cache_dir=tmp_path)
+
+    assert [stage for stage, _ in stages] == ["hybrid_sn", "hybrid_compliance"]
+    assert stages[1][1][-1] == "edge_candidate__img_003"
+    assert gate_image_ids == ["img_001", "img_002", "img_003"]
+    assert result["model_calls"] == 2
+
+
+def test_hybrid_edge_plugin_with_no_successful_candidate_uses_baseline_prompt(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    compliance_prompts = []
+
+    monkeypatch.setattr(
+        v2, "prepare_photo_auth_edge_mapping_inputs",
+        lambda images, payload, **_kwargs: (images, payload),
+    )
+
+    def fake_call(_base, _key, _model, prompt, _payload, _images, *, stage, **_kwargs):
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        compliance_prompts.append(prompt)
+        decision = _screen_sn_compliance_pass()
+        decision["photo_authenticity_by_image"] = [
+            _auth_observation("img_001"), _auth_observation("img_002"), _auth_observation("img_003"),
+        ]
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+    monkeypatch.setattr(v2, "apply_photo_authenticity_gate", lambda *, legacy_row, **_kwargs: legacy_row)
+
+    audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task(), cache_dir=tmp_path)
+
+    assert len(compliance_prompts) == 1
+    assert v2.read_photo_auth_edge_mapping_prompt() not in compliance_prompts[0]
 
 
 def test_cli_default_mode_is_hybrid():
@@ -1979,7 +2720,75 @@ def test_hybrid_does_not_retry_after_model_timeout_under_order_budget(monkeypatc
     except TimeoutError:
         pass
 
-    assert calls == [("hybrid_sn", 60)]
+    assert len(calls) == 1
+    assert calls[0][0] == "hybrid_sn"
+    assert calls[0][1] <= 60
+    assert calls[0][1] == pytest.approx(60, abs=0.01)
+
+
+def test_v2_compliance_call_uses_remaining_order_budget(monkeypatch):
+    calls = []
+    now = [100.0]
+
+    def fake_time():
+        return now[0]
+
+    def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
+        calls.append((stage, timeout_sec))
+        if stage == "sn":
+            now[0] += 59.0
+            return (
+                {"sn_match": True, "observed_sn": "ABC123", "normalized_observed_sn": "ABC123", "confidence": 0.95},
+                "{}",
+                59.0,
+                {"total_tokens": 10},
+                False,
+            )
+        return (
+            _screen_sn_compliance_pass(),
+            "{}",
+            0.5,
+            {"total_tokens": 10},
+            False,
+        )
+
+    monkeypatch.setattr(v2.time, "time", fake_time)
+    monkeypatch.setattr(v2, "call_model", fake_call_model)
+
+    result = audit_task_v2("https://example.invalid/v1", "key", "model", _base_task())
+
+    assert result["manual_flag"] == "否"
+    assert calls == [("sn", 60), ("compliance", 1.0)]
+
+
+def test_fast_retry_uses_only_remaining_order_budget(monkeypatch):
+    calls = []
+    now = [200.0]
+
+    def fake_time():
+        return now[0]
+
+    def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
+        calls.append((stage, timeout_sec))
+        if len(calls) == 1:
+            now[0] += 59.0
+            raise TimeoutError("first call timed out")
+        return (
+            {"sn_match": True, "observed_sn": "ABC123", "normalized_observed_sn": "ABC123", "confidence": 0.95},
+            "{}",
+            0.5,
+            {"total_tokens": 10},
+            False,
+        )
+
+    monkeypatch.setattr(v2.time, "time", fake_time)
+    monkeypatch.setattr(v2, "call_model", fake_call_model)
+
+    result = audit_task_fast("https://example.invalid/v1", "key", "model", _base_task())
+
+    assert result["manual_flag"] == "是"
+    assert calls == [("fast_sn", 60), ("fast_sn", 1.0)]
+
 
 def test_hybrid_order_budget_stops_before_compliance_when_time_is_used(monkeypatch):
     calls = []
@@ -2006,6 +2815,8 @@ def test_hybrid_order_budget_stops_before_compliance_when_time_is_used(monkeypat
 
     assert calls == [("hybrid_sn", 60)]
     assert result["manual_reason_code"] == "MODEL_UNCERTAIN"
+    assert "60秒" in result["manual_reason"]
+    assert "转人工" in result["manual_reason"]
     assert result["strategy"] == "hybrid_order_timeout_manual"
 
 
@@ -2375,7 +3186,9 @@ def test_hybrid_runs_compliance_after_sn_passes(monkeypatch):
     result = audit_task_hybrid("https://example.invalid/v1", "key", "model", _base_task())
 
     assert [stage for stage, _prompt, _payload in calls] == ["hybrid_sn", "hybrid_compliance"]
-    assert calls[1][1] == v2.ORDINARY_3C_COMPLIANCE_PROMPT
+    assert calls[1][1] == v2.compliance_prompt_for_category(
+        "ordinary_3c", product_type="手机 [B01]",
+    )
     assert result["manual_flag"] == "否"
     assert result["strategy"] == "hybrid_sn_then_compliance"
     assert result["model_calls"] == 2
@@ -2644,6 +3457,116 @@ def test_verified_home_appliance_without_packaging_passes_strict_home_scene_gate
     assert result["manual_reason_codes"] == []
 
 
+def test_verified_home_appliance_packaging_without_product_body_is_manual():
+    result = v2.enforce_photo_noncompliance_manual(
+        {
+            "_sn_already_verified_by_system": True,
+            "manual_required": False,
+            "manual_reason_codes": [],
+            "manual_reason": "",
+            "effective_category": "home_appliance",
+            "category_name": "电冰箱",
+            "product_type_match": "match",
+            "product_photo_ok": True,
+            "unboxing_photo_ok": True,
+            "package_visible": True,
+            "whole_product_visible": False,
+            "home_or_installation_scene_visible": True,
+            "activation_photo_ok": True,
+            "activation_evidence_type": "PACKAGE_SN_ONLY",
+            "image_risk": False,
+            "duplicate_image_evidence": False,
+            "confidence": 0.95,
+        }
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == ["UNBOXING_PHOTO_INVALID"]
+
+
+def test_verified_home_appliance_ignores_activation_photo_false_after_sn_verified():
+    result = v2.enforce_photo_noncompliance_manual(
+        {
+            "_sn_already_verified_by_system": True,
+            "manual_required": True,
+            "manual_reason_codes": ["ACTIVATION_PHOTO_INVALID"],
+            "manual_reason": "模型误判家电激活照片未亮屏",
+            "system_sn": "600961101427",
+            "normalized_system_sn": "600961101427",
+            "observed_sn": "600961101427",
+            "effective_category": "home_appliance",
+            "product_type": "[A02] 电冰箱",
+            "category_name": "电冰箱",
+            "product_type_match": "match",
+            "product_photo_ok": True,
+            "unboxing_photo_ok": True,
+            "package_visible": True,
+            "activation_photo_ok": False,
+            "activation_evidence_type": "PACKAGE_SN_ONLY",
+            "image_risk": False,
+            "photo_integrity": {
+                "collage_or_edit_risk": False,
+                "evidence_chain_trustworthy": True,
+            },
+            "duplicate_image_evidence": False,
+            "_exact_duplicate_image_groups": [],
+            "invoice_orange_warning": False,
+            "confidence": 0.95,
+        }
+    )
+
+    assert result["manual_required"] is False
+    assert "ACTIVATION_PHOTO_INVALID" not in result["manual_reason_codes"]
+
+
+@pytest.mark.parametrize(
+    ("effective_category", "product_type"),
+    [
+        ("ordinary_3c", "[B01] 手机"),
+        ("computer", "[C01] 笔记本电脑"),
+    ],
+)
+def test_verified_non_home_activation_photo_false_still_blocks(effective_category, product_type):
+    result = v2.enforce_photo_noncompliance_manual(
+        {
+            "_sn_already_verified_by_system": True,
+            "manual_required": True,
+            "manual_reason_codes": ["ACTIVATION_PHOTO_INVALID"],
+            "manual_reason": "非家电激活照片不合格",
+            "system_sn": "ABC123",
+            "normalized_system_sn": "ABC123",
+            "observed_sn": "ABC123",
+            "effective_category": effective_category,
+            "product_type": product_type,
+            "product_type_match": "match",
+            "product_photo_ok": True,
+            "unboxing_photo_ok": True,
+            "package_visible": True,
+            "activation_photo_ok": False,
+            "activation_evidence_type": "SCREEN_SN",
+            "activation_screen": {
+                "screen_on": True,
+                "screen_content_type": "ABOUT_DEVICE_SN",
+                "screen_sn_visible": True,
+                "screen_sn_text": "ABC123",
+                "screen_identity_text": "Serial Number ABC123",
+            },
+            "image_risk": False,
+            "photo_integrity": {
+                "collage_or_edit_risk": False,
+                "evidence_chain_trustworthy": True,
+            },
+            "duplicate_image_evidence": False,
+            "_exact_duplicate_image_groups": [],
+            "invoice_orange_warning": False,
+            "confidence": 0.95,
+        }
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == ["ACTIVATION_PHOTO_INVALID"]
+
+
 @pytest.mark.parametrize("missing_field", ["whole_product_visible", "home_or_installation_scene_visible"])
 def test_verified_home_appliance_without_packaging_requires_complete_home_scene_gate(missing_field):
     decision = {
@@ -2732,7 +3655,7 @@ def test_home_scene_gate_does_not_override_higher_priority_photo_failures(code, 
         decision[field] = True
     elif field == "duplicate_image_evidence":
         decision[field] = True
-        decision["manual_reason"] = "商品、拆封、激活三类照片完全相同"
+        decision["_exact_duplicate_image_groups"] = [["img_001", "img_002", "img_003"]]
     elif field == "product_type_match":
         decision[field] = "mismatch"
     elif field == "product_photo_ok":
@@ -2742,6 +3665,34 @@ def test_home_scene_gate_does_not_override_higher_priority_photo_failures(code, 
 
     assert result["manual_required"] is True
     assert result["manual_reason_codes"] == [code]
+
+
+def test_verified_home_activation_fallback_does_not_clear_invoice_orange_warning():
+    result = v2.enforce_photo_noncompliance_manual(
+        {
+            "_sn_already_verified_by_system": True,
+            "manual_required": True,
+            "manual_reason_codes": ["INVOICE_ORANGE_WARNING"],
+            "manual_reason": "INVOICE_ORANGE_WARNING",
+            "invoice_orange_warning": True,
+            "effective_category": "home_appliance",
+            "category_name": "电冰箱",
+            "product_type_match": "match",
+            "product_photo_ok": True,
+            "unboxing_photo_ok": True,
+            "package_visible": True,
+            "whole_product_visible": True,
+            "home_or_installation_scene_visible": True,
+            "activation_photo_ok": False,
+            "activation_evidence_type": "PACKAGE_SN_ONLY",
+            "image_risk": False,
+            "duplicate_image_evidence": False,
+            "confidence": 0.95,
+        }
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == ["INVOICE_ORANGE_WARNING"]
 
 
 def test_compliance_nonstandard_reason_codes_are_normalized():
@@ -3035,6 +3986,7 @@ def test_hybrid_does_not_target_review_short_unrelated_sn_mismatch(monkeypatch):
 
 
 def test_hybrid_forces_manual_when_pass_candidate_lacks_activation_evidence_type(monkeypatch):
+    monkeypatch.setenv("DIGITAL_ACTIVATION_EVIDENCE_MODE", "off")
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
         if stage == "hybrid_sn":
             return (
@@ -3072,6 +4024,7 @@ def test_hybrid_forces_manual_when_pass_candidate_lacks_activation_evidence_type
 
 
 def test_hybrid_forces_manual_when_activation_evidence_is_screen_on_without_sn(monkeypatch):
+    monkeypatch.setenv("DIGITAL_ACTIVATION_EVIDENCE_MODE", "off")
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
         if stage == "hybrid_sn":
             return (
@@ -3111,6 +4064,8 @@ def test_hybrid_forces_manual_when_activation_evidence_is_screen_on_without_sn(m
 
 
 def test_hybrid_forces_manual_when_image_risk_true_even_if_other_fields_pass(monkeypatch):
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
+
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
         if stage == "hybrid_sn":
             return (
@@ -3149,6 +4104,7 @@ def test_hybrid_forces_manual_when_image_risk_true_even_if_other_fields_pass(mon
 
 
 def test_hybrid_forces_manual_when_activation_photo_invalid_after_sn_passes(monkeypatch):
+    monkeypatch.setenv("DIGITAL_ACTIVATION_EVIDENCE_MODE", "off")
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
         if stage == "hybrid_sn":
             return (
@@ -3187,6 +4143,8 @@ def test_hybrid_forces_manual_when_activation_photo_invalid_after_sn_passes(monk
 
 
 def test_hybrid_forces_manual_when_image_strong_risk_code_returned_without_manual_flag(monkeypatch):
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
+
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
         if stage == "hybrid_sn":
             return (
@@ -3380,7 +4338,9 @@ def test_hybrid_compliance_payload_preserves_explicit_image_groups(monkeypatch):
 def test_home_appliance_unboxing_rule_accepts_installation_scene_without_packaging():
     checklist = open("docs/guobu-collector-field-checklist.md", encoding="utf-8").read()
 
-    assert "无包装但商品已安装在家庭、店铺或使用场景中，且能清楚看到商品本体，也可判定拆封/安装照片合格" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "拆封/安装照片组自身必须看到商品本体" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "无包装时，必须能看到商品本体已经到家、安装、摆放或处于家庭/店铺/使用场景中" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "不得用商品照片中的商品本体去补拆封/安装照片缺失的商品本体" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
     assert "whole_product_visible" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
     assert "home_or_installation_scene_visible" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
     assert "whole_product_visible" not in v2.ORDINARY_3C_COMPLIANCE_PROMPT
@@ -3404,6 +4364,33 @@ def test_compliance_prompt_contains_split_category_rules_and_invoice_warning():
     assert "当前品类：普通3C" in v2.ORDINARY_3C_COMPLIANCE_PROMPT
     assert "当前品类：电脑" in v2.COMPUTER_COMPLIANCE_PROMPT
     assert "电脑不得套用普通3C或家电规则" in v2.COMPUTER_COMPLIANCE_PROMPT
+    assert "SN 已由第一阶段核验后，家电不要求亮屏或开机证据" in v2.HOME_APPLIANCE_COMPLIANCE_PROMPT
+    assert "家电不要求亮屏或开机证据" not in v2.ORDINARY_3C_COMPLIANCE_PROMPT
+    assert "家电不要求亮屏或开机证据" not in v2.COMPUTER_COMPLIANCE_PROMPT
+
+
+def test_compliance_prompts_limit_product_type_mismatch_to_visible_product_form():
+    scoped_rule = (
+        "仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，"
+        "不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 "
+        "PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。"
+    )
+
+    for prompt in (
+        v2.HOME_APPLIANCE_COMPLIANCE_PROMPT,
+        v2.ORDINARY_3C_COMPLIANCE_PROMPT,
+        v2.COMPUTER_COMPLIANCE_PROMPT,
+    ):
+        assert scoped_rule in prompt
+        assert "若商品类型与订单类型明显不一致" not in prompt
+
+    ordinary_3c_runtime_prompt = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        product_type="[B01] 手机",
+        digital_activation_evidence_mode="on",
+    )
+    assert scoped_rule in ordinary_3c_runtime_prompt
+    assert "若商品类型与订单类型明显不一致" not in ordinary_3c_runtime_prompt
 
 
 def test_model_and_order_timeout_budget_is_60_seconds():
@@ -3463,6 +4450,757 @@ def test_photo_authenticity_cli_defaults_enforce_and_allows_explicit_off_before_
             "--tasks-dir", "tasks", "--out-dir", "out",
             "--photo-authenticity-mode", "invalid",
         ])
+
+
+def test_sn_char_review_prompt_plugin_is_reversible_without_changing_base_prompt(monkeypatch):
+    monkeypatch.delenv("SN_CHAR_REVIEW_MODE", raising=False)
+
+    assert v2.build_sn_prompt("off") == v2.SN_PROMPT
+
+    enabled = v2.build_sn_prompt("on")
+    assert enabled == v2.SN_PROMPT + "\n\n" + v2.SN_SIMILAR_CHAR_REVIEW_PROMPT
+    assert "不进行视觉字符容错" in enabled
+    assert "V/Y" in enabled
+    assert "0/O/Q" in enabled
+    assert "8/B" in enabled
+    assert "5/S" in enabled
+    assert "2/Z" in enabled
+    assert "6/G" in enabled
+    assert "1/I/L" in enabled
+
+
+def test_sn_char_review_v2_prompt_is_mutually_exclusive_and_glyph_focused(monkeypatch):
+    monkeypatch.delenv("SN_CHAR_REVIEW_MODE", raising=False)
+
+    enabled = v2.build_sn_prompt("v2")
+
+    assert enabled == v2.SN_PROMPT + "\n\n" + v2.SN_SIMILAR_CHAR_REVIEW_V2_PROMPT
+    assert v2.SN_SIMILAR_CHAR_REVIEW_PROMPT not in enabled
+    assert "0：轮廓近似纵向椭圆，比同字体 O 更窄；若该差异不可见则保持不确定" in enabled
+    assert "O：轮廓更接近圆形，整体比 0 更圆润" in enabled
+    assert "Q：圆形或椭圆形轮廓的右下方带有一条短斜线或尾笔" in enabled
+    assert "不得新增、覆盖、解释或改变来源优先级、匹配、归一化、后续系统比对、有限视觉容错、目标复核或合规规则" in enabled
+    assert "observed_sn 必须与最终选定的 sn_candidates 对应候选逐字符一致" in enabled
+    assert "可按主提示词在 uncertain_positions 或 visual_ambiguity_notes 中记录位置和候选字符" in enabled
+    assert "本插件只约束本轮图片读取" not in v2.SN_SIMILAR_CHAR_REVIEW_V2_PROMPT
+
+
+def test_sn_char_review_cli_defaults_off_supports_env_and_rejects_invalid(monkeypatch):
+    monkeypatch.delenv("SN_CHAR_REVIEW_MODE", raising=False)
+    default_args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert default_args.sn_char_review_mode == "off"
+
+    monkeypatch.setenv("SN_CHAR_REVIEW_MODE", "on")
+    env_args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert env_args.sn_char_review_mode == "on"
+
+    monkeypatch.setenv("SN_CHAR_REVIEW_MODE", "v2")
+    env_v2 = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert env_v2.sn_char_review_mode == "v2"
+
+    explicit_off = v2.parse_cli_args([
+        "--tasks-dir", "tasks", "--out-dir", "out",
+        "--sn-char-review-mode", "off",
+    ])
+    assert explicit_off.sn_char_review_mode == "off"
+
+    explicit_v2 = v2.parse_cli_args([
+        "--tasks-dir", "tasks", "--out-dir", "out",
+        "--sn-char-review-mode", "v2",
+    ])
+    assert explicit_v2.sn_char_review_mode == "v2"
+
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args([
+            "--tasks-dir", "tasks", "--out-dir", "out",
+            "--mode", "sn_only",
+            "--sn-char-review-mode", "v2",
+        ])
+
+    monkeypatch.setenv("SN_CHAR_REVIEW_MODE", "invalid")
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args([
+            "--tasks-dir", "tasks", "--out-dir", "out",
+            "--sn-char-review-mode", "invalid",
+        ])
+
+
+def test_hybrid_uses_enabled_sn_char_review_prompt_and_records_mode(monkeypatch):
+    monkeypatch.setenv("SN_CHAR_REVIEW_MODE", "on")
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    prompts = {}
+
+    def fake_call(_base, _key, _model, prompt, _payload, _images, *, stage, **_kwargs):
+        prompts[stage] = prompt
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        return (_screen_sn_compliance_pass(), "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task())
+
+    assert prompts["hybrid_sn"] == v2.build_sn_prompt("on")
+    assert result["sn_char_review_mode"] == "on"
+
+
+def test_hybrid_uses_sn_char_review_v2_prompt_and_records_exact_mode(monkeypatch):
+    monkeypatch.setenv("SN_CHAR_REVIEW_MODE", "v2")
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    prompts = {}
+
+    def fake_call(_base, _key, _model, prompt, _payload, _images, *, stage, **_kwargs):
+        prompts[stage] = prompt
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        return (_screen_sn_compliance_pass(), "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "enforce_photo_noncompliance_manual", lambda decision, **_: decision)
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task())
+
+    assert prompts["hybrid_sn"] == v2.build_sn_prompt("v2")
+    assert v2.SN_SIMILAR_CHAR_REVIEW_PROMPT not in prompts["hybrid_sn"]
+    assert result["sn_char_review_mode"] == "v2"
+
+
+def test_sn_label_auth_review_prompt_plugin_defaults_off_and_explicit_on_appends_prompt(monkeypatch):
+    monkeypatch.delenv("SN_LABEL_AUTH_REVIEW_MODE", raising=False)
+
+    default_disabled = v2.compliance_prompt_for_category("home_appliance", include_photo_authenticity=True)
+    explicit_on = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        sn_label_auth_review_mode="on",
+    )
+
+    assert explicit_on == default_disabled + "\n\n" + v2.read_sn_label_auth_review_prompt()
+    assert "SN/条码标签非实拍专项审查插件" not in default_disabled
+
+
+def test_sn_label_auth_review_prompt_plugin_appends_only_when_enabled(monkeypatch):
+    monkeypatch.delenv("SN_LABEL_AUTH_REVIEW_MODE", raising=False)
+
+    disabled = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        sn_label_auth_review_mode="off",
+    )
+    enabled = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        sn_label_auth_review_mode="on",
+    )
+
+    assert enabled == disabled + "\n\n" + v2.read_sn_label_auth_review_prompt()
+    assert "SN/条码标签非实拍专项审查插件" in enabled
+    assert "IMAGE_STRONG_RISK" in enabled
+    assert "即使 SN 清晰、即使 SN 与系统一致" in enabled
+    assert "跨载体摩尔纹/屏幕纹理专项观察" in enabled
+    assert "CROSS_OBJECT_MOIRE" in enabled
+    assert "至少两个非屏幕物理区域" in enabled
+    assert "塑料膜局部反光、金属门板纹理、墙面/地砖自身纹理" in enabled
+    assert "本次输入的每一张 image_id" in enabled
+    assert "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:" not in enabled
+    assert "reason 只用于中文解释，不是程序控制字段" in enabled
+    assert "只有明确命中时" in enabled
+
+    fragment = v2.read_sn_label_auth_review_prompt()
+    assert "本地图片真实性引擎是唯一裁决者" in fragment
+    assert "不得因为本插件命中而直接设置 manual_required=true" in fragment
+    assert "manual_required=true，image_risk=true" not in fragment
+
+
+def test_sn_label_auth_plugin_defers_only_image_authenticity_to_local_engine():
+    image_only = _screen_sn_compliance_pass()
+    image_only.update({
+        "manual_required": True,
+        "manual_reason_codes": ["IMAGE_STRONG_RISK"],
+        "manual_reason": "model-only authenticity claim",
+        "image_risk": True,
+        "effective_category": "ordinary_3c",
+        "system_sn": "ABC123",
+        "normalized_system_sn": "ABC123",
+        "_sn_already_verified_by_system": True,
+    })
+
+    legacy = v2.enforce_photo_noncompliance_manual(image_only)
+    deferred = v2.enforce_photo_noncompliance_manual(
+        image_only,
+        defer_image_authenticity_to_local=True,
+    )
+
+    assert legacy["manual_reason_codes"] == ["IMAGE_STRONG_RISK"]
+    assert deferred["manual_required"] is False
+    assert deferred["manual_reason_codes"] == []
+
+    product_invalid = dict(image_only, product_photo_ok=False)
+    preserved = v2.enforce_photo_noncompliance_manual(
+        product_invalid,
+        defer_image_authenticity_to_local=True,
+    )
+    assert preserved["manual_required"] is True
+    assert preserved["manual_reason_codes"] == ["PRODUCT_PHOTO_INVALID"]
+
+
+def test_sn_label_auth_review_requires_photo_authenticity_schema(monkeypatch):
+    monkeypatch.delenv("SN_LABEL_AUTH_REVIEW_MODE", raising=False)
+
+    base = v2.compliance_prompt_for_category("home_appliance", include_photo_authenticity=False)
+    enabled_without_schema = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=False,
+        sn_label_auth_review_mode="on",
+    )
+
+    assert enabled_without_schema == base
+    assert "SN/条码标签非实拍专项审查插件" not in enabled_without_schema
+    assert "跨载体摩尔纹/屏幕纹理专项观察" not in enabled_without_schema
+
+
+def test_sn_label_auth_review_cli_defaults_off_supports_env_and_rejects_invalid(monkeypatch):
+    monkeypatch.delenv("SN_LABEL_AUTH_REVIEW_MODE", raising=False)
+    default_args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert default_args.sn_label_auth_review_mode == "off"
+
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "on")
+    env_args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert env_args.sn_label_auth_review_mode == "on"
+
+    explicit_off = v2.parse_cli_args([
+        "--tasks-dir", "tasks", "--out-dir", "out",
+        "--sn-label-auth-review-mode", "off",
+    ])
+    assert explicit_off.sn_label_auth_review_mode == "off"
+
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args([
+            "--tasks-dir", "tasks", "--out-dir", "out",
+            "--sn-label-auth-review-mode", "invalid",
+        ])
+
+
+def test_photo_auth_edge_mapping_prompt_plugin_defaults_off_and_explicit_on_appends_once(monkeypatch):
+    monkeypatch.delenv("PHOTO_AUTH_EDGE_MAPPING_MODE", raising=False)
+
+    baseline = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        sn_label_auth_review_mode="off",
+        digital_activation_evidence_mode="off",
+    )
+    explicit_off = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        sn_label_auth_review_mode="off",
+        digital_activation_evidence_mode="off",
+        photo_auth_edge_mapping_mode="off",
+    )
+    explicit_on = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        sn_label_auth_review_mode="off",
+        digital_activation_evidence_mode="off",
+        photo_auth_edge_mapping_mode="on",
+    )
+    fragment = v2.read_photo_auth_edge_mapping_prompt()
+
+    assert explicit_off == baseline
+    assert explicit_on == baseline + "\n\n" + fragment
+    assert explicit_on.count(fragment) == 1
+
+
+def test_photo_auth_edge_mapping_prompt_plugin_requires_authenticity_schema():
+    baseline = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        include_photo_authenticity=False,
+        digital_activation_evidence_mode="off",
+    )
+    enabled_without_schema = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        include_photo_authenticity=False,
+        digital_activation_evidence_mode="off",
+        photo_auth_edge_mapping_mode="on",
+    )
+
+    assert enabled_without_schema == baseline
+
+
+def test_photo_auth_edge_mapping_prompt_preserves_safe_evidence_boundaries():
+    fragment = v2.read_photo_auth_edge_mapping_prompt()
+
+    assert "洋红线本身不是证据" in fragment
+    assert "黑衣裤、阴影、深色背景" in fragment
+    assert "商品自身机身或屏幕边框、包装结构和普通裁切" in fragment
+    assert "仅有黑边、摩尔纹、反光、发光或像素纹理均不得单独确认" in fragment
+    assert "classification=external_screen" in fragment
+    assert "confirmed_external_screen=true" in fragment
+    assert "查看器界面只能辅助，不能单独确认" in fragment
+    assert "candidate_id、image_id、diagnostic_image_id、side" in fragment
+    assert "photo_auth_edge_candidate_reviews" in fragment
+    assert "不得因洋红线本身增加任何强弱证据" in fragment
+    assert "不改变商品、拆封、激活、重复照片或其他合规字段" in fragment
+
+
+@pytest.mark.parametrize(
+    ("sn_label_mode", "digital_mode"),
+    [("off", "off"), ("on", "off"), ("off", "on"), ("on", "on")],
+)
+def test_photo_auth_edge_mapping_prompt_is_the_final_append_after_existing_plugins(
+    sn_label_mode, digital_mode,
+):
+    kwargs = {
+        "product_type": "智能手机",
+        "include_photo_authenticity": True,
+        "sn_label_auth_review_mode": sn_label_mode,
+        "digital_activation_evidence_mode": digital_mode,
+    }
+    disabled = v2.compliance_prompt_for_category(
+        "ordinary_3c", photo_auth_edge_mapping_mode="off", **kwargs,
+    )
+    enabled = v2.compliance_prompt_for_category(
+        "ordinary_3c", photo_auth_edge_mapping_mode="on", **kwargs,
+    )
+
+    assert enabled == disabled + "\n\n" + v2.read_photo_auth_edge_mapping_prompt()
+
+
+def test_photo_auth_edge_mapping_off_does_not_load_experimental_prompt(monkeypatch):
+    monkeypatch.setattr(
+        v2,
+        "read_photo_auth_edge_mapping_prompt",
+        lambda: pytest.fail("experimental prompt loaded while plugin is off"),
+    )
+
+    v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        photo_auth_edge_mapping_mode="off",
+    )
+
+
+def test_photo_auth_edge_mapping_off_is_exact_input_identity(monkeypatch, tmp_path):
+    image = {"image_id": "i1", "local_path": str(tmp_path / "i1.jpg"), "source_url": "https://example/i1.jpg"}
+    images = [image]
+    payload = {"id": "order-1", "image_groups": {"activation": ["i1"]}}
+    monkeypatch.setattr(v2, "scan_photo_auth_edge_candidates", lambda *_args, **_kwargs: pytest.fail("scanner called while plugin is off"), raising=False)
+
+    result_images, result_payload = v2.prepare_photo_auth_edge_mapping_inputs(
+        images, payload, mode="off", output_dir=tmp_path
+    )
+
+    assert result_images is images
+    assert result_payload is payload
+
+
+def test_photo_auth_edge_mapping_on_marks_only_strong_candidates_without_new_model_call(monkeypatch, tmp_path):
+    source = tmp_path / "i1.jpg"
+    source.write_bytes(b"image")
+    image = {
+        "image_id": "i1", "local_path": str(source),
+        "source_url": "https://example/i1.jpg", "url": "https://fallback/i1.jpg",
+    }
+    payload = {"id": "order-1"}
+
+    class StrongScan:
+        status = "strong_candidate"
+        sides = {"bottom": type("Side", (), {
+            "status": "strong_candidate",
+            "tangent_start_fraction": 0.1,
+            "tangent_end_fraction": 0.9,
+            "boundary_depth_fraction": 0.08,
+            "reason": "outer_dark_run_with_abrupt_linear_boundary",
+        })()}
+
+        def to_dict(self):
+            return {"status": self.status, "sides": {"bottom": {"status": "strong_candidate"}}}
+
+    monkeypatch.setattr(v2, "scan_photo_auth_edge_candidates", lambda *_args, **_kwargs: {"i1": StrongScan()})
+    monkeypatch.setattr(v2, "annotate_photo_auth_edge_candidates", lambda source_path, destination, scan: destination.write_bytes(b"annotated") or destination)
+
+    result_images, result_payload = v2.prepare_photo_auth_edge_mapping_inputs(
+        [image], payload, mode="on", output_dir=tmp_path
+    )
+
+    assert len(result_images) == 1
+    assert result_images[0]["image_id"] == "i1"
+    assert result_images[0].get("source_url") is None
+    assert result_images[0].get("url") is None
+    assert Path(result_images[0]["local_path"]).read_bytes() == b"annotated"
+    assert "outer-edge-geometry-v2" in Path(result_images[0]["local_path"]).name
+    assert "full-scene-magenta-v1" in Path(result_images[0]["local_path"]).name
+    assert result_payload is not payload
+    assert result_payload["photo_auth_edge_candidates"][0]["image_id"] == "i1"
+    assert result_payload["photo_auth_edge_candidates"][0]["diagnostic_image_id"] == "edge_candidate__i1"
+    assert result_payload["photo_auth_edge_candidates"][0]["diagnostic_image_position"] == 1
+
+
+def test_photo_auth_edge_mapping_blocks_unconfirmed_edge_evidence(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    compliance = {
+        "photo_authenticity_by_image": [{
+            **_auth_observation("i1"),
+            "edges": {
+                "top": "scene_continues", "right": "scene_continues",
+                "bottom": "carrier_boundary", "left": "scene_continues",
+            },
+            "strong_evidence": [{"code": "EXTERNAL_PHOTO_CARRIER", "regions": ["image_edge"]}],
+            "weak_evidence": [{"code": "EDGE_CUTOFF", "regions": ["image_edge"]}],
+        }],
+        "photo_auth_edge_candidate_reviews": [],
+    }
+    candidates = [{"candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom"}]
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(compliance, candidates)
+
+    observation = result["photo_authenticity_by_image"][0]
+    assert observation["edges"]["bottom"] == "scene_continues"
+    assert observation["strong_evidence"] == []
+    assert observation["weak_evidence"] == []
+
+
+def test_photo_auth_edge_mapping_blocks_edge_evidence_when_review_field_is_missing(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    compliance = {
+        "photo_authenticity_by_image": [{
+            **_auth_observation("i1"),
+            "edges": {
+                "top": "scene_continues", "right": "scene_continues",
+                "bottom": "carrier_boundary", "left": "scene_continues",
+            },
+            "strong_evidence": [{"code": "EXTERNAL_PHOTO_CARRIER", "regions": ["image_edge"]}],
+        }],
+    }
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(
+        compliance,
+        [{"candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom"}],
+    )
+
+    observation = result["photo_authenticity_by_image"][0]
+    assert observation["edges"]["bottom"] == "scene_continues"
+    assert observation["strong_evidence"] == []
+
+
+def test_photo_auth_edge_mapping_preserves_non_edge_model_evidence(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    carrier = {"code": "EXTERNAL_PHOTO_CARRIER", "regions": ["background"]}
+    compliance = {
+        "photo_authenticity_by_image": [{
+            **_auth_observation("i1"),
+            "edges": {
+                "top": "scene_continues", "right": "scene_continues",
+                "bottom": "carrier_boundary", "left": "scene_continues",
+            },
+            "strong_evidence": [carrier],
+        }],
+        "photo_auth_edge_candidate_reviews": [],
+    }
+    candidates = [{"candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom"}]
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(compliance, candidates)
+
+    observation = result["photo_authenticity_by_image"][0]
+    assert observation["strong_evidence"] == [carrier]
+
+
+def test_photo_auth_edge_mapping_rejects_mismatched_diagnostic_image(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    compliance = {
+        "photo_authenticity_by_image": [_auth_observation("i1")],
+        "photo_auth_edge_candidate_reviews": [{
+            "candidate_id": "i1:bottom", "image_id": "i1",
+            "diagnostic_image_id": "edge_candidate__other", "side": "bottom",
+            "classification": "external_screen", "confirmed_external_screen": True,
+            "supporting_features": ["screen_frame"],
+        }],
+    }
+    candidates = [{
+        "candidate_id": "i1:bottom", "image_id": "i1",
+        "diagnostic_image_id": "edge_candidate__i1", "side": "bottom",
+    }]
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(compliance, candidates)
+
+    assert result["photo_authenticity_by_image"][0] == _auth_observation("i1")
+
+
+def test_cache_key_changes_when_local_image_content_changes(tmp_path):
+    image_path = tmp_path / "i1.jpg"
+    image_path.write_bytes(b"first")
+    image = [{"image_id": "i1", "local_path": str(image_path)}]
+
+    first = v2._cache_key("model", "stage", "prompt", {}, image)
+    image_path.write_bytes(b"second")
+    second = v2._cache_key("model", "stage", "prompt", {}, image)
+
+    assert first != second
+
+
+def test_atomic_json_writer_never_leaves_partial_cache_file(tmp_path):
+    path = tmp_path / "cache.json"
+
+    v2._write_json_atomically(path, {"ok": True})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"ok": True}
+
+
+def test_photo_auth_edge_mapping_failure_preserves_original_image(monkeypatch, tmp_path):
+    source = tmp_path / "i1.jpg"
+    source.write_bytes(b"image")
+    image = {"image_id": "i1", "local_path": str(source), "source_url": "https://example/i1.jpg"}
+    payload = {"id": "order-1"}
+    monkeypatch.setattr(v2, "scan_photo_auth_edge_candidates", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("scan failed")))
+
+    result_images, result_payload = v2.prepare_photo_auth_edge_mapping_inputs(
+        [image], payload, mode="on", output_dir=tmp_path
+    )
+
+    assert result_images[0] == image
+    assert "photo_auth_edge_candidates" not in result_payload
+
+
+def test_photo_auth_edge_mapping_requires_local_and_model_physical_confirmation(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    compliance = {
+        "photo_authenticity_by_image": [_auth_observation("i1")],
+        "photo_auth_edge_candidate_reviews": [{
+            "candidate_id": "i1:bottom",
+            "image_id": "i1",
+            "diagnostic_image_id": "edge_candidate__i1",
+            "side": "bottom",
+            "classification": "external_screen",
+            "confirmed_external_screen": True,
+            "supporting_features": ["screen_frame"],
+            "reason": "marked band is the frame of another display",
+        }],
+    }
+    candidates = [{
+        "candidate_id": "i1:bottom", "image_id": "i1",
+        "diagnostic_image_id": "edge_candidate__i1", "side": "bottom",
+    }]
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(compliance, candidates)
+
+    observation = result["photo_authenticity_by_image"][0]
+    assert observation["edges"]["bottom"] == "carrier_boundary"
+    assert observation["screen_owner"] == "external_screen"
+    assert {item["code"] for item in observation["strong_evidence"]} == {"EXTERNAL_PHOTO_CARRIER"}
+
+
+def test_photo_auth_edge_mapping_maps_only_the_confirmed_candidate_side(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    compliance = {
+        "photo_authenticity_by_image": [_auth_observation("i1")],
+        "photo_auth_edge_candidate_reviews": [{
+            "candidate_id": "i1:bottom", "image_id": "i1",
+            "diagnostic_image_id": "edge_candidate__i1", "side": "bottom",
+            "classification": "external_screen", "confirmed_external_screen": True,
+            "supporting_features": ["display_boundary"], "reason": "confirmed bottom frame",
+        }],
+    }
+    candidates = [
+        {"candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom"},
+        {"candidate_id": "i1:right", "image_id": "i1", "side": "right"},
+    ]
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(compliance, candidates)
+
+    edges = result["photo_authenticity_by_image"][0]["edges"]
+    assert edges["bottom"] == "carrier_boundary"
+    assert edges["right"] == "scene_continues"
+
+
+@pytest.mark.parametrize(
+    "review",
+    [
+        {
+            "candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom", "classification": "uncertain",
+            "confirmed_external_screen": False, "supporting_features": ["screen_frame"],
+        },
+        {
+            "candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom", "classification": "external_screen",
+            "confirmed_external_screen": True, "supporting_features": ["pixel_texture"],
+        },
+        {
+            "candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom", "classification": "external_screen",
+            "confirmed_external_screen": True, "supporting_features": ["viewer_ui"],
+        },
+        {
+            "candidate_id": "i1:bottom", "image_id": "i1", "side": "right", "classification": "external_screen",
+            "confirmed_external_screen": True, "supporting_features": ["screen_frame"],
+        },
+        {
+            "candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom", "classification": "clothing_or_scene",
+            "confirmed_external_screen": False, "supporting_features": [],
+        },
+    ],
+)
+def test_photo_auth_edge_mapping_does_not_promote_uncertain_texture_or_scene(monkeypatch, review):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    compliance = {
+        "photo_authenticity_by_image": [_auth_observation("i1")],
+        "photo_auth_edge_candidate_reviews": [review],
+    }
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(
+        compliance, [{"candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom"}],
+    )
+
+    assert result is compliance
+    assert result["photo_authenticity_by_image"][0] == _auth_observation("i1")
+
+
+def test_photo_auth_edge_mapping_review_is_ignored_when_plugin_is_off(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "off")
+    compliance = {
+        "photo_authenticity_by_image": [_auth_observation("i1")],
+        "photo_auth_edge_candidate_reviews": [{
+            "candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom", "classification": "external_screen",
+            "confirmed_external_screen": True, "supporting_features": ["screen_frame"],
+        }],
+    }
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(
+        compliance, [{"candidate_id": "i1:bottom", "image_id": "i1", "side": "bottom"}],
+    )
+
+    assert result is compliance
+
+
+def test_photo_auth_edge_mapping_drops_only_its_diagnostic_observation(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    original = _auth_observation("i1")
+    diagnostic = _auth_observation("edge_candidate__i1")
+    compliance = {
+        "photo_authenticity_by_image": [original, diagnostic],
+        "photo_auth_edge_candidate_reviews": [],
+    }
+    candidates = [{
+        "candidate_id": "i1:bottom",
+        "image_id": "i1",
+        "diagnostic_image_id": "edge_candidate__i1",
+        "side": "bottom",
+    }]
+
+    result = v2.apply_photo_auth_edge_candidate_reviews(compliance, candidates)
+
+    assert result is not compliance
+    assert result["photo_authenticity_by_image"] == [original]
+
+
+def test_photo_auth_edge_mapping_cache_validation_uses_original_image_ids_only():
+    prompt = v2.compliance_prompt_for_category(
+        "home_appliance",
+        include_photo_authenticity=True,
+        photo_auth_edge_mapping_mode="on",
+    )
+    images = [
+        {"image_id": "i1"},
+        {"image_id": "edge_candidate__i1"},
+    ]
+
+    assert v2._is_cacheable_model_result(
+        "hybrid_compliance",
+        prompt,
+        {"photo_authenticity_by_image": [_auth_observation("i1")]},
+        images,
+    ) is True
+    assert v2._is_cacheable_model_result(
+        "hybrid_compliance",
+        prompt,
+        {"photo_authenticity_by_image": [_auth_observation("edge_candidate__i1")]},
+        images,
+    ) is False
+
+
+def test_photo_auth_edge_mapping_cli_defaults_off_supports_env_and_rejects_invalid(monkeypatch):
+    monkeypatch.delenv("PHOTO_AUTH_EDGE_MAPPING_MODE", raising=False)
+    default_args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert default_args.photo_auth_edge_mapping_mode == "off"
+
+    monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
+    env_args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
+    assert env_args.photo_auth_edge_mapping_mode == "on"
+
+    explicit_off = v2.parse_cli_args([
+        "--tasks-dir", "tasks", "--out-dir", "out",
+        "--photo-auth-edge-mapping-mode", "off",
+    ])
+    assert explicit_off.photo_auth_edge_mapping_mode == "off"
+
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args([
+            "--tasks-dir", "tasks", "--out-dir", "out",
+            "--photo-auth-edge-mapping-mode", "invalid",
+        ])
+
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args([
+            "--tasks-dir", "tasks", "--out-dir", "out",
+            "--photo-auth-edge-mapping-mode", "on",
+            "--photo-authenticity-mode", "off",
+        ])
+
+    with pytest.raises(SystemExit):
+        v2.parse_cli_args([
+            "--tasks-dir", "tasks", "--out-dir", "out",
+            "--mode", "v2",
+            "--photo-auth-edge-mapping-mode", "on",
+        ])
+
+
+def test_photo_authenticity_report_records_effective_sn_label_plugin_state():
+    disabled = v2.finalize_photo_authenticity_report_fields(
+        {},
+        v2.PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "off",
+            "SN_LABEL_AUTH_REVIEW_MODE": "on",
+        }),
+    )
+    enabled = v2.finalize_photo_authenticity_report_fields(
+        {},
+        v2.PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "SN_LABEL_AUTH_REVIEW_MODE": "on",
+        }),
+    )
+
+    assert disabled["sn_label_auth_review_mode"] == "off"
+    assert enabled["sn_label_auth_review_mode"] == "on"
+
+
+def test_hybrid_uses_enabled_sn_label_auth_review_prompt_only_for_compliance(monkeypatch):
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "on")
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("DIGITAL_ACTIVATION_EVIDENCE_MODE", "off")
+    prompts = {}
+
+    def fake_call(_base, _key, _model, prompt, _payload, _images, *, stage, **_kwargs):
+        prompts[stage] = prompt
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        compliance = _screen_sn_compliance_pass()
+        compliance["photo_authenticity_by_image"] = [
+            _auth_observation("img_001"),
+            _auth_observation("img_002"),
+            _auth_observation("img_003"),
+        ]
+        return (compliance, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "apply_photo_authenticity_gate", lambda **kwargs: kwargs["legacy_row"])
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task())
+
+    assert "SN/条码标签非实拍专项审查插件" not in prompts["hybrid_sn"]
+    assert prompts["hybrid_compliance"].endswith(v2.read_sn_label_auth_review_prompt())
+    assert result["sn_label_auth_review_mode"] == "on"
 
 
 def test_photo_authenticity_summary_counts_routes_and_resources():
@@ -3664,3 +5402,339 @@ def test_photo_authenticity_summary_separates_merged_postprocess_and_available_d
     assert summary["available_incremental_tokens"] == 225
     assert summary["available_incremental_elapsed_sec"] == 3.5
     assert summary["baseline_coverage"] == {"orders_with_baseline": 1, "total_orders": 2, "rate": 0.5}
+
+
+def _activation_identity_observation(
+    image_id="img_003",
+    *,
+    field_type="SN",
+    raw_value="ABC123",
+    readable=True,
+    complete=True,
+):
+    return {
+        "image_id": image_id,
+        "identity_fields": [{
+            "field_type": field_type,
+            "raw_value": raw_value,
+            "readable": readable,
+            "complete": complete,
+        }],
+    }
+
+
+def _digital_activation_decision(product_type, observations):
+    return {
+        "digital_activation_evidence_mode": "on",
+        "effective_category": "ordinary_3c",
+        "product_type": product_type,
+        "_activation_image_ids": ["img_003"],
+        "activation_identity_by_image": observations,
+        "activation_evidence_type": "SCREEN_ACTIVE_WITH_SN",
+        "activation_photo_ok": True,
+    }
+
+
+def test_digital_activation_prompt_delegates_authenticity_and_uses_minimal_identity_schema():
+    prompt = v2.read_digital_activation_evidence_prompt()
+
+    assert '"activation_identity_by_image"' in prompt
+    assert "照片真实性" not in prompt
+    assert "EXTERNAL_DISPLAY_OR_PHOTO" not in prompt
+    assert "screen_source" not in prompt
+    assert "screen_on" not in prompt
+    assert "page_type" not in prompt
+    assert "只有IMEI1或只有IMEI2也属于有效激活信息" in prompt
+    assert "平板、手表、手环仅以SN或SERIAL_NUMBER为有效" in prompt
+
+
+def test_digital_activation_gate_accepts_minimal_identity_schema_without_screen_metadata():
+    decision = _digital_activation_decision(
+        "智能手机",
+        [_activation_identity_observation(field_type="IMEI1", raw_value="867530900000001")],
+    )
+
+    assert v2._verified_sn_activation_form_reason(decision) == ""
+
+
+def test_tablet_rejects_imei_but_accepts_serial_number():
+    imei = _digital_activation_decision(
+        "平板电脑",
+        [_activation_identity_observation(field_type="IMEI1", raw_value="867530900000001")],
+    )
+    serial = _digital_activation_decision(
+        "平板电脑",
+        [_activation_identity_observation(field_type="SERIAL_NUMBER")],
+    )
+
+    assert v2._verified_sn_activation_form_reason(imei) == "ACTIVATION_PHOTO_INVALID"
+    assert v2._verified_sn_activation_form_reason(serial) == ""
+
+
+def test_digital_activation_prompt_plugin_is_independent_and_ordinary_3c_only():
+    ordinary_off = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        product_type="智能手机",
+        digital_activation_evidence_mode="off",
+    )
+    ordinary_on = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        product_type="智能手机",
+        digital_activation_evidence_mode="on",
+    )
+
+    assert ordinary_on.endswith("\n\n" + v2.read_digital_activation_evidence_prompt())
+    assert "普通3C激活证据统一口径插件" in ordinary_on
+    assert "智能手表/手环的配对页、设备名称、开机标志、二维码不属于 SN/IMEI/序列号身份信息" not in ordinary_on
+    for category in ("home_appliance", "computer", "unknown"):
+        assert v2.compliance_prompt_for_category(
+            category, digital_activation_evidence_mode="on",
+        ) == v2.compliance_prompt_for_category(
+            category, digital_activation_evidence_mode="off",
+        )
+
+    glasses_on = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        product_type="智能眼镜",
+        digital_activation_evidence_mode="on",
+    )
+    glasses_off = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        product_type="智能眼镜",
+        digital_activation_evidence_mode="off",
+    )
+    assert glasses_on == glasses_off
+    assert "activation_identity_by_image" not in glasses_on
+
+    headphone_on = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        product_type="HEADPHONE",
+        digital_activation_evidence_mode="on",
+    )
+    headphone_off = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        product_type="HEADPHONE",
+        digital_activation_evidence_mode="off",
+    )
+    assert headphone_on == headphone_off
+
+
+@pytest.mark.parametrize("field_type", ["SN", "SERIAL_NUMBER", "IMEI1", "IMEI2"])
+def test_phone_accepts_any_complete_identity_field(field_type):
+    decision = _digital_activation_decision(
+        "智能手机", [_activation_identity_observation(field_type=field_type)],
+    )
+
+    assert v2._verified_sn_activation_form_reason(decision) == ""
+
+
+def test_watch_accepts_serial_but_rejects_imei():
+    serial = _digital_activation_decision(
+        "智能手表", [_activation_identity_observation(field_type="SERIAL_NUMBER")],
+    )
+    imei = _digital_activation_decision(
+        "智能手表", [_activation_identity_observation(field_type="IMEI1")],
+    )
+
+    assert v2._verified_sn_activation_form_reason(serial) == ""
+    assert v2._verified_sn_activation_form_reason(imei) == "ACTIVATION_PHOTO_INVALID"
+
+
+def test_watch_does_not_inherit_phone_imei_rule_from_product_description():
+    decision = _digital_activation_decision(
+        "智能手表",
+        [_activation_identity_observation(field_type="IMEI1", raw_value="867530900000001")],
+    )
+    decision["goods_name"] = "智能手表，支持手机通话"
+
+    assert v2._verified_sn_activation_form_reason(decision) == "ACTIVATION_PHOTO_INVALID"
+
+
+@pytest.mark.parametrize(
+    "observation, expected",
+    [
+        (_activation_identity_observation(field_type="OTHER"), "ACTIVATION_PHOTO_INVALID"),
+        (_activation_identity_observation(readable=False), "ACTIVATION_PHOTO_INVALID"),
+        (_activation_identity_observation(complete=False), "ACTIVATION_PHOTO_INVALID"),
+        (_activation_identity_observation(image_id="img_other"), "MODEL_UNCERTAIN"),
+    ],
+)
+def test_digital_activation_gate_fails_closed_without_same_image_valid_evidence(observation, expected):
+    decision = _digital_activation_decision("平板电脑", [observation])
+
+    assert v2._verified_sn_activation_form_reason(decision) == expected
+
+
+def test_digital_activation_gate_rejects_missing_structured_output():
+    decision = _digital_activation_decision("智能手机", [])
+
+    assert v2._verified_sn_activation_form_reason(decision) == "MODEL_UNCERTAIN"
+
+
+@pytest.mark.parametrize(
+    "observations",
+    [
+        [_activation_identity_observation("img_003")],
+        [
+            _activation_identity_observation("img_003"),
+            _activation_identity_observation("img_003"),
+        ],
+        [
+            _activation_identity_observation("img_003"),
+            _activation_identity_observation("img_extra"),
+        ],
+    ],
+)
+def test_digital_activation_gate_requires_exact_unique_image_coverage(observations):
+    decision = _digital_activation_decision("智能手机", observations)
+    decision["_activation_image_ids"] = ["img_003", "img_004"]
+
+    assert v2._verified_sn_activation_form_reason(decision) == "MODEL_UNCERTAIN"
+
+
+def test_digital_activation_mode_off_preserves_legacy_gate():
+    decision = _digital_activation_decision("智能手机", [])
+    decision["digital_activation_evidence_mode"] = "off"
+
+    assert v2._verified_sn_activation_form_reason(decision) == ""
+
+
+def test_digital_activation_gate_does_not_capture_headphones_by_substring():
+    decision = _digital_activation_decision("HEADPHONE", [])
+
+    assert v2._verified_sn_activation_form_reason(decision) == ""
+
+
+def test_structured_activation_pass_overrides_legacy_activation_failure_fields():
+    decision = _digital_activation_decision(
+        "智能手机", [_activation_identity_observation(field_type="IMEI1")],
+    )
+    decision.update({
+        "_sn_already_verified_by_system": True,
+        "manual_required": True,
+        "manual_reason_codes": ["ACTIVATION_PHOTO_INVALID"],
+        "manual_reason": "旧字段误判激活照片无效",
+        "activation_photo_ok": False,
+        "product_type_match": True,
+        "product_photo_ok": True,
+        "unboxing_photo_ok": True,
+        "duplicate_image_evidence": False,
+        "_exact_duplicate_image_groups": [],
+        "confidence": 0.99,
+    })
+
+    result = v2.enforce_photo_noncompliance_manual(decision)
+
+    assert result["manual_required"] is False
+    assert result["manual_reason_codes"] == []
+
+
+def test_dedicated_authenticity_risk_overrides_activation_identity_pass():
+    decision = _digital_activation_decision(
+        "智能手机",
+        [_activation_identity_observation(field_type="IMEI1")],
+    )
+    decision.update({
+        "_sn_already_verified_by_system": True,
+        "manual_required": True,
+        "manual_reason_codes": ["ACTIVATION_PHOTO_INVALID"],
+        "manual_reason": "旧字段只报激活照片无效",
+        "activation_photo_ok": False,
+        "image_risk": True,
+        "product_type_match": True,
+        "product_photo_ok": True,
+        "unboxing_photo_ok": True,
+        "duplicate_image_evidence": False,
+        "_exact_duplicate_image_groups": [],
+        "confidence": 0.99,
+    })
+
+    result = v2.enforce_photo_noncompliance_manual(decision)
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == ["IMAGE_STRONG_RISK"]
+
+
+def _image_group(image_id, path):
+    return {"image_id": image_id, "local_path": str(path), "source_url": f"https://unused/{image_id}.jpg"}
+
+
+def test_exact_duplicate_groups_require_three_identical_files(tmp_path):
+    same_a = tmp_path / "a.jpg"
+    same_b = tmp_path / "b.jpg"
+    different = tmp_path / "c.jpg"
+    same_a.write_bytes(b"same-image")
+    same_b.write_bytes(b"same-image")
+    different.write_bytes(b"different-image")
+    groups = {
+        "product": [_image_group("img_001", same_a)],
+        "unboxing": [_image_group("img_002", different)],
+        "activation": [_image_group("img_003", same_b)],
+    }
+
+    assert v2.exact_duplicate_image_groups(groups) == []
+
+
+def test_four_images_with_three_identical_files_are_duplicate(tmp_path):
+    paths = []
+    for index, content in enumerate((b"same", b"same", b"different", b"same"), start=1):
+        path = tmp_path / f"{index}.jpg"
+        path.write_bytes(content)
+        paths.append(path)
+    groups = {
+        "product": [_image_group("img_001", paths[0]), _image_group("img_002", paths[1])],
+        "unboxing": [_image_group("img_003", paths[2])],
+        "activation": [_image_group("img_004", paths[3])],
+    }
+
+    assert v2.exact_duplicate_image_groups(groups) == [["img_001", "img_002", "img_004"]]
+
+
+def test_model_duplicate_claim_cannot_block_without_local_exact_group():
+    decision = {
+        "_sn_already_verified_by_system": True,
+        "digital_activation_evidence_mode": "off",
+        "manual_required": True,
+        "manual_reason_codes": ["DUPLICATE_IMAGE_EVIDENCE"],
+        "manual_reason": "三张证据位图片完全重复",
+        "duplicate_image_evidence": True,
+        "_exact_duplicate_image_groups": [],
+        "effective_category": "ordinary_3c",
+        "product_type": "智能手机",
+        "product_type_match": True,
+        "product_photo_ok": True,
+        "unboxing_photo_ok": True,
+        "activation_photo_ok": True,
+        "activation_evidence_type": "SCREEN_SN",
+        "confidence": 0.99,
+    }
+
+    result = v2.enforce_photo_noncompliance_manual(decision)
+
+    assert result["manual_required"] is False
+    assert result["manual_reason_codes"] == []
+
+
+def test_local_three_image_group_blocks_even_when_model_does_not_claim_duplicate():
+    decision = {
+        "_sn_already_verified_by_system": True,
+        "digital_activation_evidence_mode": "off",
+        "manual_required": False,
+        "manual_reason_codes": [],
+        "manual_reason": "",
+        "duplicate_image_evidence": False,
+        "_exact_duplicate_image_groups": [["img_001", "img_002", "img_003"]],
+        "effective_category": "ordinary_3c",
+        "product_type": "智能手机",
+        "product_type_match": True,
+        "product_photo_ok": True,
+        "unboxing_photo_ok": True,
+        "activation_photo_ok": True,
+        "activation_evidence_type": "SCREEN_SN",
+        "confidence": 0.99,
+    }
+
+    result = v2.enforce_photo_noncompliance_manual(decision)
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == ["DUPLICATE_IMAGE_EVIDENCE"]

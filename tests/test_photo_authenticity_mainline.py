@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -61,6 +64,56 @@ def test_fft_enabled_config_defaults_false_and_parses_strict_boolean():
     assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "0"}).fft_enabled is False
     with pytest.raises(ValueError, match="PHOTO_AUTHENTICITY_FFT_ENABLED"):
         PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "sometimes"})
+
+
+def test_local_texture_detector_reuses_existing_plugin_switch():
+    assert PhotoAuthenticityConfig.from_env({}).sn_label_auth_review_enabled is False
+    assert PhotoAuthenticityConfig.from_env({"SN_LABEL_AUTH_REVIEW_MODE": "off"}).sn_label_auth_review_enabled is False
+    assert PhotoAuthenticityConfig.from_env({"SN_LABEL_AUTH_REVIEW_MODE": "on"}).sn_label_auth_review_enabled is True
+
+
+def test_plugin_off_does_not_require_cv2_during_module_import():
+    script = (
+        "import sys; "
+        "sys.modules['cv2'] = None; "
+        "import tools.photo_authenticity_mainline as module; "
+        "assert module.PhotoAuthenticityConfig.from_env({"
+        "'PHOTO_AUTHENTICITY_MODE': 'off', 'SN_LABEL_AUTH_REVIEW_MODE': 'off'"
+        "}).mode == 'off'"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_plugin_off_cli_help_does_not_import_cv2(tmp_path):
+    (tmp_path / "cv2.py").write_text("raise ImportError('cv2 must stay lazy')\n", encoding="ascii")
+    env = os.environ.copy()
+    env.update({
+        "PHOTO_AUTHENTICITY_MODE": "off",
+        "SN_LABEL_AUTH_REVIEW_MODE": "off",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONPATH": str(tmp_path) + os.pathsep + env.get("PYTHONPATH", ""),
+    })
+    result = subprocess.run(
+        [sys.executable, "tools/run_guobu_model_audit_v2.py", "--help"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--sn-label-auth-review-mode" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -133,6 +186,8 @@ def test_off_mode_does_not_load_artifact_or_images(monkeypatch, tmp_path):
         ({"strong_evidence": [evidence("PRINTED_PHOTO_CARRIER", "background")]}, ("high_risk_non_real", "R4")),
         ({"strong_evidence": [evidence("NESTED_IMAGE_BOUNDARY", "background")]}, ("high_risk_non_real", "R4")),
         ({"strong_evidence": [evidence("CROSS_OBJECT_MOIRE", "hand", "background")]}, ("high_risk_non_real", "R5")),
+        ({"strong_evidence": [evidence("CROSS_OBJECT_MOIRE", "product_screen", "package")]}, ("high_risk_non_real", "R5")),
+        ({"strong_evidence": [evidence("CROSS_OBJECT_MOIRE", "product_screen", "background")]}, ("high_risk_non_real", "R5")),
         ({"strong_evidence": [evidence("CROSS_OBJECT_MOIRE", "hand")]}, ("manual_review", "R9")),
         ({"weak_evidence": [evidence("PLANAR_APPEARANCE", "background")]}, ("manual_review", "R9")),
         ({}, ("no_evidence", "R9")),
@@ -183,6 +238,98 @@ def test_product_screen_local_moire_exemption_is_withheld_when_any_guard_fails(o
     assert derive_v4_result(observation)[0] == "manual_review"
 
 
+def test_product_screen_outer_plane_optics_only_is_exempt_when_scene_is_continuous():
+    observation = validate_image_observations([
+        raw(
+            screen_owner="product_screen",
+            weak_evidence=[evidence("OUTER_PLANE_OPTICS", "product_screen")],
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("no_evidence", "R10_PRODUCT_SCREEN_OUTER_OPTICS_EXEMPT")
+
+
+@pytest.mark.parametrize("screen_owner", ["external_screen", "uncertain", "none"])
+def test_product_screen_outer_plane_optics_exemption_requires_product_screen_owner(screen_owner):
+    observation = validate_image_observations([
+        raw(
+            screen_owner=screen_owner,
+            weak_evidence=[evidence("OUTER_PLANE_OPTICS", "product_screen")],
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("manual_review", "R9")
+
+
+@pytest.mark.parametrize("region", ["product_body", "package", "hand", "background", "image_edge", "unknown"])
+def test_product_screen_outer_plane_optics_exemption_rejects_every_non_screen_region(region):
+    observation = validate_image_observations([
+        raw(
+            screen_owner="product_screen",
+            weak_evidence=[evidence("OUTER_PLANE_OPTICS", "product_screen", region)],
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("manual_review", "R9")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"weak_evidence": [evidence("OUTER_PLANE_OPTICS")]},
+        {"weak_evidence": [evidence("OUTER_PLANE_OPTICS", "product_screen"), evidence("LOCAL_MOIRE", "product_screen")]},
+        {"edges": {"top": "scene_continues", "right": "uncertain", "bottom": "scene_continues", "left": "scene_continues"}},
+    ],
+)
+def test_product_screen_outer_plane_optics_exemption_rejects_empty_mixed_or_noncontinuous_guards(overrides):
+    observation = validate_image_observations([
+        raw(**{
+            "screen_owner": "product_screen",
+            "weak_evidence": [evidence("OUTER_PLANE_OPTICS", "product_screen")],
+            **overrides,
+        })
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == ("manual_review", "R9")
+
+
+@pytest.mark.parametrize(
+    "strong_evidence, expected",
+    [
+        ([evidence("EXTERNAL_PHOTO_CARRIER", "background")], ("high_risk_non_real", "R1")),
+        ([evidence("PHOTO_VIEWER_UI", "product_body")], ("manual_review", "R9")),
+        ([evidence("PRINTED_PHOTO_CARRIER", "background")], ("high_risk_non_real", "R4")),
+        ([evidence("NESTED_IMAGE_BOUNDARY", "background")], ("high_risk_non_real", "R4")),
+        ([evidence("CROSS_OBJECT_MOIRE", "product_body")], ("manual_review", "R9")),
+    ],
+)
+def test_product_screen_outer_plane_optics_exemption_does_not_hide_effective_strong_evidence(strong_evidence, expected):
+    observation = validate_image_observations([
+        raw(
+            screen_owner="product_screen",
+            strong_evidence=strong_evidence,
+            weak_evidence=[evidence("OUTER_PLANE_OPTICS", "product_screen")],
+        )
+    ], ["i1"])["i1"]
+    assert derive_v4_result(observation) == expected
+
+
+def test_product_screen_outer_plane_optics_exemption_does_not_override_r7_or_r8():
+    r7 = validate_image_observations([
+        raw(
+            screen_owner="product_screen",
+            weak_evidence=[evidence("OUTER_PLANE_OPTICS", "product_screen")],
+            edges={"top": "scene_continues", "right": "carrier_boundary", "bottom": "scene_continues", "left": "scene_continues"},
+        )
+    ], ["i1"])["i1"]
+    r8 = validate_image_observations([
+        raw(
+            screen_owner="product_screen",
+            weak_evidence=[evidence("OUTER_PLANE_OPTICS", "product_screen")],
+            edges={"top": "scene_continues", "right": "abrupt_cutoff", "bottom": "scene_continues", "left": "scene_continues"},
+        )
+    ], ["i1"])["i1"]
+
+    assert derive_v4_result(r7) == ("manual_review", "R7")
+    assert derive_v4_result(r8) == ("high_risk_non_real", "R8")
+
+
 @pytest.mark.parametrize(
     "weak_evidence",
     [
@@ -191,9 +338,9 @@ def test_product_screen_local_moire_exemption_is_withheld_when_any_guard_fails(o
         [evidence("LOCAL_MOIRE", "product_screen"), evidence("OUTER_PLANE_OPTICS", "package")],
     ],
 )
-def test_r9_benign_local_moire_and_outer_plane_optics_are_exempt_with_guards(weak_evidence):
+def test_r9_routes_non_product_screen_weak_evidence_to_manual_review(weak_evidence):
     observation = validate_image_observations([raw(weak_evidence=weak_evidence)], ["i1"])["i1"]
-    assert derive_v4_result(observation) == ("no_evidence", "R9")
+    assert derive_v4_result(observation) == ("manual_review", "R9")
 
 
 @pytest.mark.parametrize(
@@ -336,6 +483,7 @@ def test_fft_only_rescues_no_evidence_and_retries_twice(monkeypatch, tmp_path):
     result = evaluate_authenticity_images(
         config=PhotoAuthenticityConfig.from_env({
             "PHOTO_AUTHENTICITY_MODE": "enforce", "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+            "SN_LABEL_AUTH_REVIEW_MODE": "off",
         }),
         raw_observations=[raw(item.image_id, edges=item.edges, screen_owner=item.screen_owner,
                               strong_evidence=[evidence(x.code, *x.regions) for x in item.strong_evidence],
@@ -357,7 +505,10 @@ def test_fft_only_rescues_no_evidence_and_retries_twice(monkeypatch, tmp_path):
 def test_fft_disabled_by_default_keeps_no_evidence_and_performs_zero_io(monkeypatch, tmp_path):
     monkeypatch.setattr(FrozenFFTRescue, "load", lambda *_: pytest.fail("FFT artifact must not load"))
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "SN_LABEL_AUTH_REVIEW_MODE": "off",
+        }),
         raw_observations=[raw("i1")],
         expected_image_ids=["i1"],
         image_paths={"i1": tmp_path / "missing.jpg"},
@@ -366,6 +517,127 @@ def test_fft_disabled_by_default_keeps_no_evidence_and_performs_zero_io(monkeypa
     assert result.service_failure is False
     assert result.image_results["i1"].result == "no_evidence"
     assert result.image_results["i1"].score is None
+
+
+def test_enabled_plugin_does_not_trust_cross_surface_marker_without_structured_evidence(tmp_path):
+    image_path = tmp_path / "arbitrary-name.jpg"
+    image_path.write_bytes(b"present")
+
+    class NegativeTextureDetector:
+        threshold = 1.0
+
+        def score(self, path):
+            assert path == image_path
+            return 0.0, {"source": "local_image_engine"}
+
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "SN_LABEL_AUTH_REVIEW_MODE": "on",
+        }),
+        raw_observations=[raw(
+            "anonymous-image",
+            reason=(
+                "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_body,package,background] "
+                "same screen raster crosses unrelated physical surfaces"
+            ),
+        )],
+        expected_image_ids=["anonymous-image"],
+        image_paths={"anonymous-image": image_path},
+        texture_detector=NegativeTextureDetector(),
+    )
+
+    image_result = result.image_results["anonymous-image"]
+    assert result.would_manual is False
+    assert result.service_failure is False
+    assert image_result.result == "no_evidence"
+    assert image_result.rule == "R9"
+    assert image_result.evidence_summary == {"source": "local_image_engine"}
+
+
+def test_enabled_plugin_runs_local_texture_detector_when_model_returns_no_evidence(tmp_path):
+    image_path = tmp_path / "anonymous-image.jpg"
+    image_path.write_bytes(b"present")
+
+    class FakeTextureDetector:
+        threshold = 0.8
+
+        def score(self, path):
+            assert path == image_path
+            return 0.91, {"detector": "uniform-screen-texture-v2"}
+
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "SN_LABEL_AUTH_REVIEW_MODE": "on",
+        }),
+        raw_observations=[raw("anonymous-image")],
+        expected_image_ids=["anonymous-image"],
+        image_paths={"anonymous-image": image_path},
+        texture_detector=FakeTextureDetector(),
+    )
+
+    image_result = result.image_results["anonymous-image"]
+    assert result.would_manual is True
+    assert result.service_failure is False
+    assert image_result.result == "high_risk_non_real"
+    assert image_result.rule == "LOCAL_CROSS_SURFACE_TEXTURE"
+    assert image_result.score == pytest.approx(0.91)
+    assert image_result.evidence_summary == {
+        "detector": "uniform-screen-texture-v2",
+        "source": "local_image_engine",
+    }
+
+
+@pytest.mark.parametrize(
+    "env, reason",
+    [
+        (
+            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "off"},
+            "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_body,background] explicit marker",
+        ),
+        (
+            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_body] only one physical region",
+        ),
+        (
+            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_screen,unknown] product screen only",
+        ),
+        (
+            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            "No marker: ordinary blur and local reflection are not cross-surface evidence",
+        ),
+        (
+            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            "Not confirmed [AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_body,background]",
+        ),
+    ],
+)
+def test_cross_surface_marker_rescue_is_strict_and_reversible(env, reason, tmp_path):
+    image_path = tmp_path / "unread.jpg"
+    image_path.write_bytes(b"present")
+    calls = []
+
+    class NegativeTextureDetector:
+        threshold = 0.8
+
+        def score(self, path):
+            calls.append(path)
+            return 0.2, {"detector": "negative-test-detector"}
+
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env(env),
+        raw_observations=[raw("opaque-id", reason=reason)],
+        expected_image_ids=["opaque-id"],
+        image_paths={"opaque-id": image_path},
+        texture_detector=NegativeTextureDetector(),
+    )
+
+    assert result.would_manual is False
+    assert result.image_results["opaque-id"].result == "no_evidence"
+    assert result.image_results["opaque-id"].rule == "R9"
+    assert calls == ([image_path] if env.get("SN_LABEL_AUTH_REVIEW_MODE") == "on" else [])
 
 
 @pytest.mark.parametrize("mode", ["shadow", "enforce"])
@@ -381,6 +653,7 @@ def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monk
     result = evaluate_authenticity_images(
         config=PhotoAuthenticityConfig.from_env({
             "PHOTO_AUTHENTICITY_MODE": mode, "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
+            "SN_LABEL_AUTH_REVIEW_MODE": "off",
         }),
         raw_observations=[raw("n0")],
         expected_image_ids=["n0"],

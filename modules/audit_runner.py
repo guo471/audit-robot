@@ -10,7 +10,16 @@ from .code_extractor import CodeExtractor
 from .id_card_parser import IDCardParser
 from .image_forensics import ImageForensics
 from .image_role import group_images_by_role, required_roles_present
-from .ocr_engine import OCREngine
+
+
+def _sn_ocr_attempt(path: str, ocr_texts: list[dict], match: dict, reason: Optional[str]) -> dict:
+    return {
+        "path": path,
+        "found_sns": match.get("found_sns", []),
+        "match_type": match.get("match_type", ""),
+        "sn_match": bool(match.get("sn_match")),
+        "reason": reason,
+    }
 
 
 @dataclass
@@ -20,6 +29,8 @@ class AuditDependencies:
 
     def get_ocr(self):
         if self.ocr is None:
+            from .ocr_engine import OCREngine
+
             self.ocr = OCREngine()
         return self.ocr
 
@@ -146,6 +157,7 @@ def audit_request(
 
     ocr = deps.get_ocr()
     enhanced_ocr_by_path = {}
+    sn_ocr_attempts = []
     last_image_path = request.images[-1].path if request.images else ""
     id_number_match = None
 
@@ -204,11 +216,21 @@ def audit_request(
         if timed_out():
             return manual(scene, "fast", "\u5355\u5355\u8d85\u65f6")
         try:
-            match = CodeExtractor.match_system_sn(ocr_texts, system_sn)
+            match = CodeExtractor.match_system_sn(
+                ocr_texts,
+                system_sn,
+                allow_home_appliance_fragment=category.category == "home_appliance",
+            )
         except Exception:
             return manual(scene, "fast", "SN\u5339\u914d\u5f02\u5e38", safe_evidence(sn_match=False))
+        sn_ocr_attempts.append(_sn_ocr_attempt("fast", ocr_texts, match, None if match.get("sn_match") else "SN未命中"))
         if match.get("sn_match"):
             pass_evidence = evidence(True, image_roles_ok)
+            pass_evidence["sn_ocr_attempts"] = sn_ocr_attempts
+            if scene == "guobu":
+                if category.category == "home_appliance":
+                    pass_evidence["address_detail_ok"] = True
+                return manual(scene, "fast", "旧OCR审核入口不再自动通过，请使用v2 hybrid审核", pass_evidence)
             if scene == "no_coupon":
                 pass_evidence["id_name_match"] = True
                 pass_evidence["id_number_match"] = id_number_match
@@ -233,11 +255,21 @@ def audit_request(
         if timed_out():
             return manual(scene, "slow", "\u5355\u5355\u8d85\u65f6")
         try:
-            match = CodeExtractor.match_system_sn(ocr_texts, system_sn)
+            match = CodeExtractor.match_system_sn(
+                ocr_texts,
+                system_sn,
+                allow_home_appliance_fragment=category.category == "home_appliance",
+            )
         except Exception:
             return manual(scene, "slow", "SN\u5339\u914d\u5f02\u5e38", safe_evidence(sn_match=False))
+        sn_ocr_attempts.append(_sn_ocr_attempt("slow", ocr_texts, match, None if match.get("sn_match") else "SN未命中"))
         if match.get("sn_match"):
             pass_evidence = evidence(True, image_roles_ok)
+            pass_evidence["sn_ocr_attempts"] = sn_ocr_attempts
+            if scene == "guobu":
+                if category.category == "home_appliance":
+                    pass_evidence["address_detail_ok"] = True
+                return manual(scene, "slow", "旧OCR审核入口不再自动通过，请使用v2 hybrid审核", pass_evidence)
             if scene == "no_coupon":
                 pass_evidence["id_name_match"] = True
                 pass_evidence["id_number_match"] = id_number_match
@@ -253,6 +285,7 @@ def audit_request(
             )
 
     miss_evidence = evidence(False, image_roles_ok)
+    miss_evidence["sn_ocr_attempts"] = sn_ocr_attempts
     if scene == "no_coupon":
         miss_evidence["id_name_match"] = True
         miss_evidence["id_number_match"] = id_number_match

@@ -21,8 +21,6 @@ STRONG_CODES = frozenset({
     "NESTED_IMAGE_BOUNDARY", "CROSS_OBJECT_MOIRE",
 })
 WEAK_CODES = frozenset({"EDGE_CUTOFF", "OUTER_PLANE_OPTICS", "PLANAR_APPEARANCE", "LOCAL_MOIRE", "UI_CANDIDATE"})
-R9_BENIGN_WEAK_CODES = frozenset({"LOCAL_MOIRE", "OUTER_PLANE_OPTICS"})
-R9_BENIGN_REGIONS = frozenset({"product_screen", "package", "product_body"})
 OBSERVATION_FIELDS = frozenset({"image_id", "edges", "screen_owner", "strong_evidence", "weak_evidence", "reason"})
 
 EXPECTED_EXTRACTOR_VERSION = "fft-v1-512-ycbcr-5x53"
@@ -32,6 +30,14 @@ EXPECTED_MODEL_SHA256 = "49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65
 EXPECTED_METADATA_SHA256 = "e8c4ba687b702535231d91e001c55f4e0750b07ab79e3cd4829ae1dea5f708cf"
 EXPECTED_V4_PROMPT_SHA256 = "7d4e7224b38c5fc5cbb9293f6d72b091df39d4dc9efb2e983b0daa829a43ca77"
 DEFAULT_ARTIFACT_DIR = Path("photo_authenticity/models/releases/non-real-photo-v2")
+UNIFORM_SCREEN_TEXTURE_EXTRACTOR_VERSION = "uniform-orientation-v2-3x3-192"
+UNIFORM_SCREEN_TEXTURE_THRESHOLD = 1.0
+UNIFORM_SCREEN_TEXTURE_LIMITS = {
+    "entropy_45_mean_min": 0.9694,
+    "entropy_45_std_max": 0.021,
+    "entropy_67_mean_min": 0.979,
+    "entropy_67_std_max": 0.018,
+}
 
 
 class PhotoAuthenticitySchemaError(ValueError):
@@ -50,6 +56,7 @@ class PhotoAuthenticityConfig:
     mode: str
     artifact_dir: Path
     fft_enabled: bool = False
+    sn_label_auth_review_enabled: bool = False
     max_fft_attempts: int = 2
 
     @classmethod
@@ -64,8 +71,20 @@ class PhotoAuthenticityConfig:
             fft_enabled = False
         else:
             raise ValueError("PHOTO_AUTHENTICITY_FFT_ENABLED must be true or false")
+        marker_raw = str(env.get("SN_LABEL_AUTH_REVIEW_MODE", "off")).strip().lower()
+        if marker_raw == "on":
+            cross_surface_marker_enabled = True
+        elif marker_raw in {"off", ""}:
+            cross_surface_marker_enabled = False
+        else:
+            raise ValueError("SN_LABEL_AUTH_REVIEW_MODE must be on or off")
         artifact_dir = Path(env.get("PHOTO_AUTHENTICITY_ARTIFACT_DIR", str(DEFAULT_ARTIFACT_DIR)))
-        return cls(mode=mode, artifact_dir=artifact_dir, fft_enabled=fft_enabled)
+        return cls(
+            mode=mode,
+            artifact_dir=artifact_dir,
+            fft_enabled=fft_enabled,
+            sn_label_auth_review_enabled=cross_surface_marker_enabled,
+        )
 
 
 @dataclass(frozen=True)
@@ -173,20 +192,6 @@ def validate_image_observations(raw: Any, expected_image_ids: Sequence[str]) -> 
     return {image_id: by_id[image_id] for image_id in expected}
 
 
-def _is_r9_benign_weak_only(observation: ImageObservation, effective_strong: set[str], weak: dict[str, Evidence]) -> bool:
-    if effective_strong or not weak or set(weak) - R9_BENIGN_WEAK_CODES:
-        return False
-    if observation.screen_owner not in {"none", "product_screen"}:
-        return False
-    if any(value != "scene_continues" for value in observation.edges.values()):
-        return False
-    for item in weak.values():
-        regions = set(item.regions)
-        if not regions or regions - R9_BENIGN_REGIONS:
-            return False
-    return True
-
-
 def derive_v4_result(observation: ImageObservation) -> tuple[str, str]:
     strong = {item.code: item for item in observation.strong_evidence}
     weak = {item.code: item for item in observation.weak_evidence}
@@ -217,8 +222,11 @@ def derive_v4_result(observation: ImageObservation) -> tuple[str, str]:
     if effective_strong & {"PRINTED_PHOTO_CARRIER", "NESTED_IMAGE_BOUNDARY"}:
         return "high_risk_non_real", "R4"
     moire = strong.get("CROSS_OBJECT_MOIRE")
-    eligible_regions = set(moire.regions) - {"product_screen", "unknown"} if moire else set()
-    if len(eligible_regions) >= 2:
+    moire_regions = set(moire.regions) - {"unknown"} if moire else set()
+    non_screen_moire_regions = moire_regions - {"product_screen"}
+    if len(non_screen_moire_regions) >= 2 or (
+        "product_screen" in moire_regions and bool(non_screen_moire_regions)
+    ):
         return "high_risk_non_real", "R5"
     carrier_edges = sum(value == "carrier_boundary" for value in observation.edges.values())
     if carrier_edges >= 2:
@@ -227,8 +235,17 @@ def derive_v4_result(observation: ImageObservation) -> tuple[str, str]:
         return "manual_review", "R7"
     if "abrupt_cutoff" in observation.edges.values() and "OUTER_PLANE_OPTICS" in weak:
         return "high_risk_non_real", "R8"
-    if _is_r9_benign_weak_only(observation, effective_strong, weak):
-        return "no_evidence", "R9"
+    outer_plane_optics = weak.get("OUTER_PLANE_OPTICS")
+    product_screen_outer_optics_exempt = (
+        not effective_strong
+        and set(weak) == {"OUTER_PLANE_OPTICS"}
+        and observation.screen_owner == "product_screen"
+        and outer_plane_optics is not None
+        and set(outer_plane_optics.regions) == {"product_screen"}
+        and all(value == "scene_continues" for value in observation.edges.values())
+    )
+    if product_screen_outer_optics_exempt:
+        return "no_evidence", "R10_PRODUCT_SCREEN_OUTER_OPTICS_EXEMPT"
     if effective_strong or weak:
         return "manual_review", "R9"
     return "no_evidence", "R9"
@@ -342,6 +359,106 @@ class FrozenFFTRescue:
         }
 
 
+def _load_cv2() -> Any:
+    import cv2
+
+    return cv2
+
+
+def _orientation_entropy(tile: np.ndarray) -> float:
+    cv2 = _load_cv2()
+    gray = cv2.cvtColor(tile, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    high_pass = (
+        cv2.GaussianBlur(gray, (0, 0), 0.55)
+        - cv2.GaussianBlur(gray, (0, 0), 2.2)
+    )
+    gradient_x = cv2.Sobel(high_pass, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(high_pass, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = np.sqrt(gradient_x * gradient_x + gradient_y * gradient_y)
+    angle = np.mod(np.arctan2(gradient_y, gradient_x), math.pi)
+    low, high = np.quantile(magnitude, (0.35, 0.95))
+    selected = (magnitude >= low) & (magnitude <= high)
+    histogram, _ = np.histogram(
+        angle[selected],
+        bins=36,
+        range=(0.0, math.pi),
+        weights=magnitude[selected],
+    )
+    total = float(histogram.sum())
+    if total <= 0:
+        return 0.0
+    probabilities = histogram / total
+    return float(
+        -(probabilities * np.log(probabilities + 1e-12)).sum()
+        / math.log(len(probabilities))
+    )
+
+
+def _orientation_entropy_stats(image: np.ndarray, relative_scale: float) -> tuple[float, float]:
+    cv2 = _load_cv2()
+    height, width = image.shape[:2]
+    base_scale = min(1.0, 2048.0 / max(height, width))
+    scale = base_scale * relative_scale
+    resized_width = max(192, round(width * scale))
+    resized_height = max(192, round(height * scale))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    resized = cv2.resize(
+        image,
+        (resized_width, resized_height),
+        interpolation=interpolation,
+    )
+    centers_y = np.unique(np.rint(np.linspace(96, resized_height - 96, 3)).astype(int))
+    centers_x = np.unique(np.rint(np.linspace(96, resized_width - 96, 3)).astype(int))
+    entropies = [
+        _orientation_entropy(resized[center_y - 96:center_y + 96, center_x - 96:center_x + 96])
+        for center_y in centers_y
+        for center_x in centers_x
+    ]
+    values = np.asarray(entropies, dtype=np.float64)
+    return float(values.mean()), float(values.std())
+
+
+@dataclass(frozen=True)
+class UniformScreenTextureDetector:
+    threshold: float = UNIFORM_SCREEN_TEXTURE_THRESHOLD
+
+    @property
+    def feature_dimension(self) -> int:
+        return 4
+
+    def score(self, image_path: Path) -> tuple[float, dict[str, Any]]:
+        cv2 = _load_cv2()
+        encoded = np.fromfile(str(image_path), dtype=np.uint8)
+        bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise ValueError("local texture detector could not decode image")
+        image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        entropy_45_mean, entropy_45_std = _orientation_entropy_stats(image, 0.45)
+        entropy_67_mean, entropy_67_std = _orientation_entropy_stats(image, 0.67)
+        metrics = {
+            "entropy_45_mean": entropy_45_mean,
+            "entropy_45_std": entropy_45_std,
+            "entropy_67_mean": entropy_67_mean,
+            "entropy_67_std": entropy_67_std,
+        }
+        margins = (
+            entropy_45_mean / UNIFORM_SCREEN_TEXTURE_LIMITS["entropy_45_mean_min"],
+            UNIFORM_SCREEN_TEXTURE_LIMITS["entropy_45_std_max"] / max(entropy_45_std, 1e-12),
+            entropy_67_mean / UNIFORM_SCREEN_TEXTURE_LIMITS["entropy_67_mean_min"],
+            UNIFORM_SCREEN_TEXTURE_LIMITS["entropy_67_std_max"] / max(entropy_67_std, 1e-12),
+        )
+        score = float(min(margins))
+        return score, {
+            "source": "local_image_engine",
+            "detector": "uniform-screen-texture-v2",
+            "extractor_version": UNIFORM_SCREEN_TEXTURE_EXTRACTOR_VERSION,
+            "feature_dimension": self.feature_dimension,
+            "threshold": self.threshold,
+            "limits": dict(UNIFORM_SCREEN_TEXTURE_LIMITS),
+            "metrics": metrics,
+        }
+
+
 def evaluate_authenticity_images(
     *,
     config: PhotoAuthenticityConfig,
@@ -349,12 +466,14 @@ def evaluate_authenticity_images(
     expected_image_ids: Sequence[str],
     image_paths: Mapping[str, Path],
     rescue: FrozenFFTRescue | None = None,
+    texture_detector: UniformScreenTextureDetector | None = None,
     budget_available: Callable[[], bool] = lambda: True,
 ) -> AuthenticityOrderResult:
     if config.mode == "off":
         return AuthenticityOrderResult(mode="off", would_manual=False, image_results={})
     observations = validate_image_observations(raw_observations, expected_image_ids)
     loaded_rescue = rescue
+    loaded_texture_detector = texture_detector
     artifact_error: Exception | None = None
     results: dict[str, AuthenticityImageResult] = {}
     service_failure = False
@@ -363,6 +482,54 @@ def evaluate_authenticity_images(
         if result != "no_evidence":
             results[image_id] = AuthenticityImageResult(image_id, result, rule)
             continue
+        if config.sn_label_auth_review_enabled:
+            if not budget_available():
+                service_failure = True
+                results[image_id] = AuthenticityImageResult(
+                    image_id, "manual_review", "ORDER_BUDGET_EXHAUSTED", status="order_budget_exhausted",
+                )
+                continue
+            image_path = Path(image_paths.get(image_id, Path()))
+            if not image_path.is_file():
+                service_failure = True
+                results[image_id] = AuthenticityImageResult(
+                    image_id, "manual_review", "IMAGE_FILE_MISSING", status="image_file_missing",
+                )
+                continue
+            if loaded_texture_detector is None:
+                loaded_texture_detector = UniformScreenTextureDetector()
+            try:
+                texture_score, texture_summary = loaded_texture_detector.score(image_path)
+            except Exception as exc:
+                service_failure = True
+                results[image_id] = AuthenticityImageResult(
+                    image_id,
+                    "manual_review",
+                    "SN_LABEL_AUTH_LOCAL_FAILURE",
+                    status="failed_after_retries",
+                    evidence_summary={"error": f"{type(exc).__name__}: {exc}"},
+                )
+                continue
+            texture_summary = dict(texture_summary)
+            texture_summary.setdefault("source", "local_image_engine")
+            if texture_score >= loaded_texture_detector.threshold:
+                results[image_id] = AuthenticityImageResult(
+                    image_id,
+                    "high_risk_non_real",
+                    "LOCAL_CROSS_SURFACE_TEXTURE",
+                    score=texture_score,
+                    evidence_summary=texture_summary,
+                )
+                continue
+            if not config.fft_enabled:
+                results[image_id] = AuthenticityImageResult(
+                    image_id,
+                    "no_evidence",
+                    rule,
+                    score=texture_score,
+                    evidence_summary=texture_summary,
+                )
+                continue
         if not config.fft_enabled:
             results[image_id] = AuthenticityImageResult(image_id, "no_evidence", rule)
             continue

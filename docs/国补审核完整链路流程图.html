@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>国补订单审核完整链路流程图</title>
+  <style>
+    :root {
+      --paper: #ffffff;
+      --surface: #f7f7f8;
+      --ink: #111111;
+      --muted: #626262;
+      --line: #d8d8dc;
+      --accent: #e4002b;
+      --ok: #087f5b;
+      --warn: #9a5b00;
+      --max: 1500px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      line-height: 1.65;
+      letter-spacing: 0;
+    }
+    a { color: #002fa7; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
+    .layout { max-width: var(--max); margin: 0 auto; display: grid; grid-template-columns: 260px minmax(0, 1fr); }
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      padding: 28px 22px;
+      border-right: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .brand { margin: 0 0 20px; font-size: 18px; line-height: 1.25; }
+    .brand strong { color: var(--accent); }
+    nav a { display: grid; grid-template-columns: 28px 1fr; gap: 8px; padding: 7px 0; color: var(--ink); text-decoration: none; border-top: 1px solid var(--line); font-size: 13px; }
+    nav a:last-child { border-bottom: 1px solid var(--line); }
+    nav b { color: var(--accent); font-variant-numeric: tabular-nums; }
+    main { min-width: 0; }
+    header { min-height: 58vh; padding: 64px clamp(26px, 5vw, 82px) 44px; border-bottom: 1px solid var(--ink); display: flex; flex-direction: column; justify-content: flex-end; }
+    .folio { color: var(--accent); font-size: 14px; font-weight: 700; }
+    h1 { margin: 12px 0 18px; max-width: 900px; font-size: clamp(38px, 6vw, 88px); line-height: .98; font-weight: 700; }
+    .lead { max-width: 850px; margin: 0; font-size: 18px; color: #333; }
+    section { padding: 42px clamp(26px, 5vw, 82px); border-bottom: 1px solid var(--line); scroll-margin-top: 12px; }
+    h2 { margin: 0 0 24px; font-size: 30px; line-height: 1.15; }
+    h3 { margin: 34px 0 12px; font-size: 19px; }
+    p { max-width: 980px; }
+    .meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--ink); border-left: 1px solid var(--ink); margin-top: 34px; }
+    .meta div { min-height: 96px; padding: 14px; border-right: 1px solid var(--ink); border-bottom: 1px solid var(--ink); }
+    .meta b { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+    .meta span { font-size: 20px; font-weight: 700; }
+    .note { padding: 14px 18px; border-left: 5px solid var(--accent); background: var(--surface); max-width: 1100px; }
+    .mermaid { margin: 24px 0 8px; padding: 22px; overflow: auto; border: 1px solid var(--line); background: #fff; }
+    table { width: 100%; border-collapse: collapse; margin: 18px 0 30px; font-size: 14px; }
+    th, td { padding: 10px 12px; text-align: left; vertical-align: top; border: 1px solid var(--line); }
+    th { background: var(--surface); font-weight: 700; }
+    tbody tr:hover { background: #fafafa; }
+    ul, ol { max-width: 1050px; padding-left: 22px; }
+    .twocol { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 30px; }
+    .status { display: inline-block; padding: 1px 7px; border: 1px solid currentColor; font-size: 12px; font-weight: 700; }
+    .active { color: var(--ok); }
+    .optional { color: var(--warn); }
+    .legacy { color: var(--muted); }
+    footer { padding: 34px clamp(26px, 5vw, 82px) 70px; color: var(--muted); }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { position: relative; width: auto; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
+      .meta, .twocol { grid-template-columns: 1fr 1fr; }
+      header { min-height: auto; }
+    }
+    @media (max-width: 620px) {
+      nav, .meta, .twocol { grid-template-columns: 1fr; }
+      h1 { font-size: 42px; }
+      .mermaid { padding: 10px; }
+      th, td { padding: 8px; }
+    }
+    @media print {
+      aside { display: none; }
+      .layout { display: block; }
+      header { min-height: auto; }
+      section { break-inside: avoid; }
+      .mermaid { border-color: #999; }
+    }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <p class="brand"><strong>国补审核</strong><br>完整链路图集</p>
+    <nav>
+      <a href="#overview"><b>01</b><span>系统总览</span></a>
+      <a href="#io"><b>02</b><span>输入与输出</span></a>
+      <a href="#collection"><b>03</b><span>订单采集</span></a>
+      <a href="#batch"><b>04</b><span>批次预检</span></a>
+      <a href="#order"><b>05</b><span>单单主链</span></a>
+      <a href="#precheck"><b>06</b><span>本地预检</span></a>
+      <a href="#category"><b>07</b><span>品类与地址</span></a>
+      <a href="#sn"><b>08</b><span>SN 精确裁决</span></a>
+      <a href="#compliance"><b>09</b><span>图片合规</span></a>
+      <a href="#categories"><b>10</b><span>三品类规则</span></a>
+      <a href="#authenticity"><b>11</b><span>真实性 R1-R10</span></a>
+      <a href="#retry"><b>12</b><span>超时与重跑</span></a>
+      <a href="#report"><b>13</b><span>结果与报表</span></a>
+      <a href="#codes"><b>14</b><span>中文原因码</span></a>
+      <a href="#runtime"><b>15</b><span>路径与开关</span></a>
+    </nav>
+  </aside>
+
+  <main>
+    <header>
+      <span class="folio">2026-07-19 / SOURCE-GROUNDED</span>
+      <h1>国补订单审核完整链路流程图</h1>
+      <p class="lead">从 Edge 页面筛选、接口采集、图片下载，到 SN 精确比对、三品类图片合规、逐图真实性、网络失败重跑和最终 Excel/JSON 汇总。本文只描述当前实现，不修改业务代码。</p>
+      <div class="meta">
+        <div><b>生产模式</b><span>hybrid</span></div>
+        <div><b>默认模型</b><span>qwen3.7-plus</span></div>
+        <div><b>每单预算</b><span>60 秒</span></div>
+        <div><b>真实性模式</b><span>enforce</span></div>
+      </div>
+    </header>
+
+    <section id="overview">
+      <span class="folio">01</span><h2>系统总览</h2>
+      <div class="mermaid">
+flowchart TD
+  U["用户在审核页面设置筛选"] --> E["已登录 Edge 审核页 / CDP 9222"]
+  E --> C["采集器"]
+  C --> A1["examinePage 列表接口"]
+  C --> A2["detail 详情接口"]
+  A1 --> T["任务 JSON + 三类图片"]
+  A2 --> T
+  T --> B["批次编排与运行锁"]
+  B --> P["环境、任务、代码和提示词哈希预检"]
+  P --> L["本地预检"]
+  L --> S["SN 模型只看激活/SN图"]
+  S --> SC["本地逐字符精确比对"]
+  SC -->|"失败"| H["转人工"]
+  SC -->|"通过"| C2["全部图片进入分品类合规"]
+  C2 --> LC["本地合规强制裁决"]
+  LC -->|"暂可通过"| PA["逐图真实性 R1-R10"]
+  LC -->|"已拦截"| R["逐单结果"]
+  PA --> R
+  R --> NF{"真实网络失败?"}
+  NF -->|"是"| RR["只重跑该单一次"]
+  NF -->|"否"| M["合并结果"]
+  RR --> M
+  M --> X["Excel 明细/汇总 + 审计 JSON"]
+      </div>
+      <p class="note"><strong>最终原则：</strong>非实拍不放行优先；不确定不放行；SN 不做模糊匹配；模型负责识别与结构化观察，本地规则负责最终确定性约束。</p>
+    </section>
+
+    <section id="io">
+      <span class="folio">02</span><h2>输入与输出</h2>
+      <div class="twocol">
+        <div>
+          <h3>采集筛选输入</h3>
+          <p>状态、申请记录 ID、条码、客户、渠道订单号、审核时间、申请时间、审批时间、结算状态、结算时间、企业名称、页码和数量。</p>
+          <h3>每单业务字段</h3>
+          <p><code>product_type</code>、完整中文 <code>category_name</code>、<code>system_sn</code>、IMEI、地址、商品名、品牌、型号、条码、价格和原流程状态。</p>
+        </div>
+        <div>
+          <h3>图片输入</h3>
+          <p><code>goodsPhoto</code> 映射商品照片，<code>unsealingPhoto</code> 映射拆封照片，<code>activatePhoto</code> 映射 SN 采集/激活照片。每图保留 ID、本地路径、源 URL 和下载错误。</p>
+          <h3>逐单输出</h3>
+          <p>订单号、是否转人工、中文原因、系统 SN、识别 SN、原流程状态、分阶段耗时、Token、品类/地址/照片字段和逐图真实性结果。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="collection">
+      <span class="folio">03</span><h2>订单采集</h2>
+      <div class="mermaid">
+flowchart TD
+  A["连接 127.0.0.1:9222/json"] --> B{"找到审核页?"}
+  B -->|"精确匹配"| C["approval.jhddsz.com/admin/#/digital/review"]
+  B -->|"否则"| D["第一个 page 目标"]
+  B -->|"无页面"| X1["终止"]
+  C --> E["页面上下文读取 localStorage token"]
+  D --> E
+  E --> F["POST examinePage / 用户筛选 + 页码 + 数量"]
+  F --> G{"接口成功且有记录?"}
+  G -->|"否"| X2["终止"]
+  G -->|"是"| H["最多6个详情worker"]
+  H --> I["每单 detail 请求，失败等待300ms再试一次"]
+  I --> J["建立商品/拆封/激活三分组"]
+  J --> K["逐图下载，单图60秒"]
+  K --> L["下载失败保留任务并记录错误"]
+  L --> M["任务JSON + 图片 + raw_response + summary"]
+      </div>
+      <ul>
+        <li>采集全部图片，不再假定固定三张。</li>
+        <li>详情接口失败时商品图片为空并记录 <code>detail_error</code>，不会伪造图片。</li>
+        <li>原始响应可能含业务敏感字段，必须限制目录权限和传播范围。</li>
+      </ul>
+    </section>
+
+    <section id="batch">
+      <span class="folio">04</span><h2>批次预检与运行锁</h2>
+      <div class="mermaid">
+flowchart TD
+  A["TasksDir / RunName / 模型 / 模式"] --> B{"任务目录有JSON?"}
+  B -->|"否"| X1["终止"]
+  B -->|"是"| C{"同名输出、缓存或锁存在?"}
+  C -->|"是"| X2["终止，要求新RunName"]
+  C -->|"否"| D["原子创建 reservation.lock"]
+  D --> E["定位 .venv-photo-auth Python"]
+  E --> F["预检 Python 与 cv2"]
+  F --> G["解析插件和真实性模式"]
+  G --> H["记录Git、Python、cv2、工作区状态"]
+  H --> I["计算运行代码与提示词SHA256"]
+  I --> J["写 run_manifest.json"]
+  J --> K["启动首轮审核"]
+      </div>
+      <p>首轮和网络重跑的模型、模式、worker、插件、超时、Git、Python/cv2、运行文件哈希和提示词哈希必须完全一致。任何漂移都拒绝合并。</p>
+    </section>
+
+    <section id="order">
+      <span class="folio">05</span><h2>单订单生产主链</h2>
+      <div class="mermaid">
+flowchart TD
+  A["订单开始 / 60秒总预算"] --> B["本地预检"]
+  B -->|"失败"| Z1["0次模型调用，转人工"]
+  B -->|"通过"| C["SN模型：只看激活图，高细节"]
+  C --> D["本地SN精确裁决"]
+  D --> E{"SN_NOT_FOUND / MODEL_UNCERTAIN / 置信度<0.75?"}
+  E -->|"是"| F["高细节再读一次"]
+  E -->|"否"| G{"SN精确通过?"}
+  F --> G
+  G -->|"否"| Z2["SN原因转人工并结束"]
+  G -->|"是"| H["按完整中文品类选择提示词"]
+  H --> I["全部图片进入合规模型"]
+  I --> J["本地合规强制规则"]
+  J --> K{"已经转人工?"}
+  K -->|"是"| Z3["保留当前主原因"]
+  K -->|"否"| L["真实性 off/shadow/enforce"]
+  L --> M{"enforce命中风险或服务异常?"}
+  M -->|"是"| Z4["真实性原因转人工"]
+  M -->|"否"| P["自动通过"]
+  Z1 --> R["形成最终行"]
+  Z2 --> R
+  Z3 --> R
+  Z4 --> R
+  P --> R
+      </div>
+    </section>
+
+    <section id="precheck">
+      <span class="folio">06</span><h2>本地预检</h2>
+      <div class="mermaid">
+flowchart TD
+  A["precheck_task"] --> B{"订单号存在?"}
+  B -->|"否"| X1["必要字段缺失 FIELD_MISSING"]
+  B -->|"是"| C{"product_type存在?"}
+  C -->|"否"| X2["必要字段缺失 FIELD_MISSING"]
+  C -->|"是"| D{"system_sn存在?"}
+  D -->|"否"| X3["系统SN缺失 SYSTEM_SN_MISSING"]
+  D -->|"是"| E{"激活/SN分组有图片?"}
+  E -->|"否"| X4["激活照片不合格 ACTIVATION_PHOTO_INVALID"]
+  E -->|"是"| F{"至少3个不同image_id原始文件完全相同?"}
+  F -->|"是"| X5["三证据位完全重复 DUPLICATE_IMAGE_EVIDENCE"]
+  F -->|"否"| G{"家电?"}
+  G -->|"否"| P["预检通过"]
+  G -->|"是"| H{"地址粒度合格?"}
+  H -->|"否"| X6["地址粒度不足 ADDRESS_TOO_COARSE"]
+  H -->|"是"| P
+      </div>
+      <p class="note">三图重复采用本地 SHA256；只有两张重复不拦截，不使用感知哈希、相似度、裁切相似或模型主观重复判断。</p>
+    </section>
+
+    <section id="category">
+      <span class="folio">07</span><h2>品类与家电地址</h2>
+      <div class="twocol">
+        <div>
+          <h3>品类来源顺序</h3>
+          <ol>
+            <li><code>category_name</code>。</li>
+            <li><code>cate_code_name</code>。</li>
+            <li>去掉代码前缀后的 <code>product_type</code>。</li>
+            <li>商品名/型号与兼容分类器回退。</li>
+          </ol>
+          <p>家电包括冰箱、冷柜、电视、空调、热水器、热水炉、壁挂炉、洗衣机、烘干机等；电脑独立识别；手机、平板、手表、手环、智能眼镜归普通 3C；其余为未知并转人工。</p>
+        </div>
+        <div>
+          <h3>家电地址可通过</h3>
+          <p>包含“商贸”“京东家电”“楼”；包含“村”；末尾数字；末尾数字或中文数字加“组”；数字-数字；市场/商场/建材/店铺等加详细编号；或含号、栋、幢、单元、室、户、门牌、店铺、门店、商铺、B1-、B-。</p>
+          <p>长度不足 6 且未命中任何明确规则，或只有粗粒度地点时，输出“家电地址粒度不足”。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="sn">
+      <span class="folio">08</span><h2>SN 精确裁决</h2>
+      <div class="mermaid">
+flowchart TD
+  A["模型候选"] --> B{"可读且明确绑定SN/Serial标签?"}
+  B -->|"否"| DROP["丢弃"]
+  B -->|"是"| C{"是IMEI/EID字段、标签或订单IMEI值?"}
+  C -->|"是"| DROP
+  C -->|"否"| K["可信SN候选"]
+  K --> P["来源优先：设备屏幕 > 机身 > 包装/条码"]
+  P --> Q{"存在两个不同可信读数?"}
+  Q -->|"是"| M["SN不一致 SN_MISMATCH"]
+  Q -->|"否"| R{"存在唯一可信读数?"}
+  R -->|"否"| N["SN未找到 SN_NOT_FOUND"]
+  R -->|"是"| S{"规范化后逐字符等于系统SN?"}
+  S -->|"是"| PASS["SN通过"]
+  S -->|"否"| M
+      </div>
+      <ul>
+        <li>设备屏幕上的可信冲突 SN 权重高于包装，包装一致不能覆盖屏幕不一致。</li>
+        <li>IMEI 可以用于手机/平板激活形式，但永远不能替代系统 SN 精确比较。</li>
+        <li>相似字符插件只改善读字；<code>_system_sn_supported_by_visual_ambiguity()</code> 固定返回 false。</li>
+        <li>O/0、I/1、S/5、B/8 等差异仍属于不一致，不能自动放行。</li>
+      </ul>
+    </section>
+
+    <section id="compliance">
+      <span class="folio">09</span><h2>图片合规与主原因优先级</h2>
+      <div class="mermaid">
+flowchart TD
+  A["合规模型结构化结果"] --> P1{"发票橘色感叹号?"}
+  P1 -->|"是"| C1["发票橘色警告"]
+  P1 -->|"否"| P2{"明确图片强风险?"}
+  P2 -->|"是"| C2["图片强风险"]
+  P2 -->|"否"| P3{"本地确认三图完全重复?"}
+  P3 -->|"是"| C3["三证据位完全重复"]
+  P3 -->|"否"| P4{"品类明显不一致?"}
+  P4 -->|"是"| C4["商品品类不一致"]
+  P4 -->|"否"| P5{"商品照片不合格?"}
+  P5 -->|"是"| C5["商品照片不合格"]
+  P5 -->|"否"| P6{"拆封/安装证据不足?"}
+  P6 -->|"是"| C6["拆封/安装证据不足"]
+  P6 -->|"否"| P7{"激活/身份形式不合格?"}
+  P7 -->|"是"| C7["激活证据不足"]
+  P7 -->|"否"| P8{"结构异常、低置信度或无法判断?"}
+  P8 -->|"是"| C8["模型不确定"]
+  P8 -->|"否"| PASS["进入真实性门"]
+      </div>
+      <p>模型可输出多个命中项，但最终业务行只保留一个主原因码。本地规则会移除未经本地三图哈希确认的“重复图片”声明，并阻止合规阶段重新模糊解释前置 SN。</p>
+    </section>
+
+    <section id="categories">
+      <span class="folio">10</span><h2>三品类业务规则</h2>
+      <h3>家电</h3>
+      <div class="mermaid">
+flowchart LR
+  A["商品本体或外包装"] --> B{"有包装证据链?"}
+  B -->|"是"| C["拆封/安装合格"]
+  B -->|"否"| D{"完整整机 + 家庭/店铺/安装场景 + 品类一致 + 无图片风险?"}
+  D -->|"是"| E["到家无盒放行 / package_visible=false"]
+  D -->|"否"| X["拆封/安装证据不足"]
+  C --> F["SN前置通过后不要求家电亮屏"]
+  E --> F
+      </div>
+      <p>仅商品局部、铭牌、内部、保护膜、泡沫或模糊环境不能使用到家无盒例外。</p>
+
+      <h3>手机与平板</h3>
+      <div class="mermaid">
+flowchart LR
+  A["每张激活图唯一结构化记录"] --> B{"外部显示/相册/照片?"}
+  B -->|"是"| X1["图片强风险"]
+  B -->|"否"| C{"商品自身屏幕亮起?"}
+  C -->|"否"| X2["激活证据不足"]
+  C -->|"是"| D{"完整可读SN/序列号/IMEI1/IMEI2之一?"}
+  D -->|"否"| X2
+  D -->|"是"| PASS["激活形式合格"]
+      </div>
+
+      <h3>手表/手环与电脑</h3>
+      <table>
+        <thead><tr><th>品类</th><th>必须满足</th><th>不能替代</th></tr></thead>
+        <tbody>
+          <tr><td>手表/手环</td><td>商品自身屏幕亮起，显示完整 SN 或 Serial Number</td><td>IMEI、配对页、设备名、二维码、型号、开机标志、仅包装 SN</td></tr>
+          <tr><td>笔记本</td><td>同一激活照片中同时出现亮屏设备 SN 和包装 SN</td><td>仅亮屏、仅包装、普通 3C 例外</td></tr>
+          <tr><td>台式机</td><td>主机机身 SN/铭牌与外包装 SN 形成证据链</td><td>家电到家无盒例外</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="authenticity">
+      <span class="folio">11</span><h2>逐图真实性 R1-R10</h2>
+      <div class="mermaid">
+flowchart TD
+  A["单图观察：四边、屏幕归属、强弱证据"] --> B{"外部照片载体?"}
+  B -->|"是"| R1["R1 明确非实拍"]
+  B -->|"否"| C{"外部屏幕相册/查看器?"}
+  C -->|"是"| R2["R2 明确非实拍"]
+  C -->|"否"| D{"商品自身UI且四边连续、无其他证据?"}
+  D -->|"是"| R3["R3 豁免"]
+  D -->|"否"| E{"仅商品屏局部摩尔纹、四边连续?"}
+  E -->|"是"| R10["R10 豁免"]
+  E -->|"否"| F{"纸张/印刷载体或图片套图片?"}
+  F -->|"是"| R4["R4 明确非实拍"]
+  F -->|"否"| G{"摩尔纹跨至少2个非商品屏区域?"}
+  G -->|"是"| R5["R5 明确非实拍"]
+  G -->|"否"| H{"载体边界数量"}
+  H -->|">=2"| R6["R6 明确非实拍"]
+  H -->|"=1"| R7["R7 人工复核"]
+  H -->|"=0"| I{"突然截断 + 外层平面光学痕迹?"}
+  I -->|"是"| R8["R8 明确非实拍"]
+  I -->|"否"| J{"仍有任一强/弱证据?"}
+  J -->|"是"| R9A["R9 人工复核"]
+  J -->|"否"| R9B["R9 无证据"]
+      </div>
+      <table>
+        <thead><tr><th>证据</th><th>中文</th><th>级别</th></tr></thead>
+        <tbody>
+          <tr><td><code>EXTERNAL_PHOTO_CARRIER</code></td><td>外部手机/显示器承载完整照片</td><td>强</td></tr>
+          <tr><td><code>PHOTO_VIEWER_UI</code></td><td>外部相册或图片查看器界面</td><td>强；商品自身屏幕可豁免</td></tr>
+          <tr><td><code>PRINTED_PHOTO_CARRIER</code></td><td>纸张、相纸或印刷图片载体</td><td>强</td></tr>
+          <tr><td><code>NESTED_IMAGE_BOUNDARY</code></td><td>画面内另一张图片的完整边界</td><td>强</td></tr>
+          <tr><td><code>CROSS_OBJECT_MOIRE</code></td><td>同类摩尔纹跨两个以上非商品屏区域</td><td>强</td></tr>
+          <tr><td><code>EDGE_CUTOFF</code></td><td>边缘突然缺块或不连续</td><td>弱</td></tr>
+          <tr><td><code>OUTER_PLANE_OPTICS</code></td><td>疑似外层平面的统一反光</td><td>弱</td></tr>
+          <tr><td><code>PLANAR_APPEARANCE</code></td><td>整体缺乏景深、疑似平面二次成像</td><td>弱</td></tr>
+          <tr><td><code>LOCAL_MOIRE</code></td><td>单一区域摩尔纹</td><td>弱</td></tr>
+          <tr><td><code>UI_CANDIDATE</code></td><td>疑似但不明确的外部界面</td><td>弱</td></tr>
+        </tbody>
+      </table>
+      <h3>可选本地插件</h3>
+      <p>SN 标签真实性插件开启后，对无证据图片运行本地统一纹理检测；命中 <code>LOCAL_CROSS_SURFACE_TEXTURE</code> 判强风险。FFT 默认关闭，显式开启时使用冻结阈值 0.995，只能把“无证据”升级为人工复核。预算耗尽、图片缺失、模型文件或推理失败都按真实性服务异常转人工。</p>
+    </section>
+
+    <section id="retry">
+      <span class="folio">12</span><h2>超时、网络错误与重跑</h2>
+      <div class="mermaid">
+flowchart TD
+  A["每单deadline=开始+60秒"] --> B["请求前全局锁 / 至少间隔3秒"]
+  B --> C["连接超时最多5秒 / 连接最多2次"]
+  C --> D{"完成?"}
+  D -->|"总期限耗尽"| T["模型不确定 / 超时转人工"]
+  D -->|"其他异常"| E["error_to_manual"]
+  D -->|"成功"| F["继续下一阶段"]
+  T --> G["首轮结束后识别真实网络失败"]
+  E --> G
+  G --> H{"属于网络失败标记?"}
+  H -->|"否"| M["不重跑"]
+  H -->|"是"| I["只选择该订单重跑一次"]
+  I --> J["校验首轮/重跑manifest一致"]
+  J --> K["重跑结果替换该订单首轮最终结果"]
+      </div>
+      <p>网络标记包括 TimeoutError、timed out、OrderBudgetExceeded、ModelConnectionError、connect failed、WinError 10060、HTTP 500、RemoteDisconnected 等。业务拦截单不重跑。</p>
+    </section>
+
+    <section id="report">
+      <span class="folio">13</span><h2>最终结果与报表</h2>
+      <div class="mermaid">
+flowchart LR
+  A["首轮 + 可选重跑"] --> B["校验ID、人工标记和原因码一致性"]
+  B --> C["合并每次尝试耗时和Token"]
+  C --> D["Excel 明细表"]
+  C --> E["Excel 汇总表"]
+  C --> F["可追溯 JSON"]
+  D --> D1["订单号 / 是否人工 / 原流程 / 中文原因 / 系统SN / 模型SN / 差异"]
+  E --> E1["总数 / 拦截率 / 误判率 / Token / 成本 / 效率"]
+  F --> F1["首轮或重跑来源 / 原始轨迹 / 公式定义"]
+      </div>
+      <p>若 <code>manual_flag=否</code> 但仍存在原因，或 <code>manual_flag=是</code> 却无主原因码，报表生成会直接拒绝，避免矛盾结果进入正式文档。</p>
+    </section>
+
+    <section id="codes">
+      <span class="folio">14</span><h2>中文原因码总表</h2>
+      <table>
+        <thead><tr><th>原因码</th><th>中文表示</th><th>状态/来源</th></tr></thead>
+        <tbody>
+          <tr><td><code>INVOICE_ORANGE_WARNING</code></td><td>发票编号旁出现橘色感叹号</td><td>当前主链</td></tr>
+          <tr><td><code>SN_MISMATCH</code></td><td>系统 SN 与照片可信 SN 不一致</td><td>当前主链</td></tr>
+          <tr><td><code>SN_NOT_FOUND</code></td><td>未读取到完整可信 SN</td><td>当前主链</td></tr>
+          <tr><td><code>PRODUCT_PHOTO_INVALID</code></td><td>商品照片不合格</td><td>当前主链</td></tr>
+          <tr><td><code>PRODUCT_TYPE_MISMATCH</code></td><td>图片商品品类与订单品类不一致</td><td>当前主链</td></tr>
+          <tr><td><code>UNBOXING_PHOTO_INVALID</code></td><td>拆封或安装证据不足</td><td>当前主链</td></tr>
+          <tr><td><code>ACTIVATION_PHOTO_INVALID</code></td><td>激活/SN 身份形式不合格</td><td>当前主链</td></tr>
+          <tr><td><code>IMAGE_STRONG_RISK</code></td><td>图片存在明确翻拍、拼接、P图或篡改风险</td><td>当前主链</td></tr>
+          <tr><td><code>DUPLICATE_IMAGE_EVIDENCE</code></td><td>至少三个证据位使用完全相同原始图片</td><td>当前主链，本地确认</td></tr>
+          <tr><td><code>MODEL_UNCERTAIN</code></td><td>模型不确定、结构异常、低置信度或超时</td><td>当前主链</td></tr>
+          <tr><td><code>ADDRESS_TOO_COARSE</code></td><td>家电地址粒度不足</td><td>当前主链</td></tr>
+          <tr><td><code>SYSTEM_SN_MISSING</code></td><td>系统 SN 缺失</td><td>当前主链</td></tr>
+          <tr><td><code>FIELD_MISSING</code></td><td>必要订单字段缺失</td><td>当前主链</td></tr>
+          <tr><td><code>NON_REAL_PHOTO_STRONG_RISK</code></td><td>明确非实拍强风险</td><td>真实性最终码</td></tr>
+          <tr><td><code>NON_REAL_PHOTO_REVIEW</code></td><td>图片真实性需人工复核</td><td>真实性最终码</td></tr>
+          <tr><td><code>NON_REAL_PHOTO_FFT_RESCUE</code></td><td>FFT 补充命中，需人工复核</td><td>真实性最终码</td></tr>
+          <tr><td><code>PHOTO_AUTHENTICITY_SERVICE_FAILURE</code></td><td>图片真实性服务异常</td><td>真实性最终码，失败关闭</td></tr>
+          <tr><td><code>CHANNEL_ORDER_NO_MISSING</code></td><td>渠道订单号缺失</td><td>保留码；当前实际归 FIELD_MISSING</td></tr>
+          <tr><td><code>PRODUCT_TYPE_MISSING</code></td><td>商品类型缺失</td><td>保留码；当前实际归 FIELD_MISSING</td></tr>
+          <tr><td><code>IMAGE_MISSING</code></td><td>审核图片缺失</td><td>保留码；主链按具体阶段归因</td></tr>
+          <tr><td><code>SN_TRUNCATED_OBSCURED</code></td><td>SN 不完整或被遮挡</td><td>报表兼容；主链通常归 SN_NOT_FOUND</td></tr>
+        </tbody>
+      </table>
+      <h3>兼容模型码归一</h3>
+      <table>
+        <thead><tr><th>兼容码</th><th>中文表示</th><th>当前归一结果</th></tr></thead>
+        <tbody>
+          <tr><td><code>PHOTO_FAKE</code></td><td>模型称图片疑似伪造</td><td>图片强风险 <code>IMAGE_STRONG_RISK</code></td></tr>
+          <tr><td><code>SCREEN_PHOTO_OF_SCREEN</code></td><td>外部屏幕翻拍</td><td>图片强风险 <code>IMAGE_STRONG_RISK</code></td></tr>
+          <tr><td><code>SN_TAMPERED</code></td><td>SN 区域疑似篡改</td><td>图片强风险 <code>IMAGE_STRONG_RISK</code></td></tr>
+          <tr><td><code>IMAGE_TAMPERED</code></td><td>图片疑似处理或篡改</td><td>图片强风险 <code>IMAGE_STRONG_RISK</code></td></tr>
+          <tr><td><code>PHOTO_INVALID</code></td><td>图片信息无法稳定确认</td><td>模型不确定 <code>MODEL_UNCERTAIN</code></td></tr>
+          <tr><td><code>SN_MISSING_IN_ACTIVATION_PHOTO</code></td><td>激活照片缺少身份信息</td><td>激活照片不合格 <code>ACTIVATION_PHOTO_INVALID</code></td></tr>
+          <tr><td>合规阶段 <code>SN_NOT_FOUND</code></td><td>后置阶段称未找到 SN</td><td>激活照片不合格，不能重做前置 SN 裁决</td></tr>
+          <tr><td>合规阶段 <code>SN_MISMATCH</code></td><td>后置阶段称 SN 不一致</td><td>模型不确定，不能覆盖前置精确裁决</td></tr>
+          <tr><td><code>OK</code> / <code>PASS</code> / <code>SN_FOUND</code> / <code>SN_MATCH</code></td><td>模型表示未发现问题</td><td>不产生原因码，仍需通过本地所有门</td></tr>
+          <tr><td><code>DUPLICATE_IMAGE</code></td><td>旧版重复图片原因</td><td>兼容显示；正式码为 <code>DUPLICATE_IMAGE_EVIDENCE</code></td></tr>
+        </tbody>
+      </table>
+      <h3>真实性技术异常</h3>
+      <table>
+        <thead><tr><th>技术标签</th><th>中文表示</th><th>最终处理</th></tr></thead>
+        <tbody>
+          <tr><td><code>ORDER_BUDGET_EXHAUSTED</code></td><td>订单 60 秒预算耗尽</td><td>服务异常转人工</td></tr>
+          <tr><td><code>IMAGE_FILE_MISSING</code></td><td>本地图片文件缺失</td><td>服务异常转人工</td></tr>
+          <tr><td><code>SN_LABEL_AUTH_LOCAL_FAILURE</code></td><td>SN 标签本地检测失败</td><td>服务异常转人工</td></tr>
+          <tr><td><code>LOCAL_CROSS_SURFACE_TEXTURE</code></td><td>跨表面统一纹理强风险</td><td>明确非实拍</td></tr>
+          <tr><td><code>ARTIFACT_LOAD_FAILURE</code></td><td>冻结模型或元数据加载失败</td><td>服务异常转人工</td></tr>
+          <tr><td><code>FFT_FAILURE</code></td><td>FFT 特征或推理失败</td><td>服务异常转人工</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="runtime">
+      <span class="folio">15</span><h2>生产路径与开关</h2>
+      <table>
+        <thead><tr><th>能力</th><th>当前状态</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>hybrid 主链</td><td><span class="status active">生产默认</span></td><td>SN 后图片合规，再真实性门</td></tr>
+          <tr><td>SN 高细节复核</td><td><span class="status active">默认开启</span></td><td>SN 未找到、模型不确定或置信度低于 0.75 时执行</td></tr>
+          <tr><td>定向 SN 复核</td><td><span class="status optional">默认关闭</span></td><td>批次需显式开启，仍不允许相似字符放行</td></tr>
+          <tr><td>SN 字符插件</td><td><span class="status optional">默认关闭</span></td><td>off/on/v2，只改善识别</td></tr>
+          <tr><td>普通 3C 激活插件</td><td><span class="status active">默认开启</span></td><td>逐激活图结构化证据</td></tr>
+          <tr><td>SN 标签真实性插件</td><td><span class="status optional">默认关闭</span></td><td>开启后增加本地纹理检测</td></tr>
+          <tr><td>真实性门</td><td><span class="status active">enforce</span></td><td>命中风险或服务异常转人工</td></tr>
+          <tr><td>FFT</td><td><span class="status optional">默认关闭</span></td><td>只能 no_evidence 到 manual_review</td></tr>
+          <tr><td>v2 / sn_only / fast</td><td><span class="status legacy">兼容路径</span></td><td>不是批次生产默认；旧 fast 提示词已废弃</td></tr>
+        </tbody>
+      </table>
+      <h3>主要源文件</h3>
+      <p><code>tools/guobu_one_click_collect.js</code>、<code>tools/run_guobu_audit_batch.ps1</code>、<code>tools/run_guobu_model_audit_v2.py</code>、<code>tools/photo_authenticity_mainline.py</code>、<code>tools/guobu_audit_contract.py</code>、<code>tools/guobu_audit_report.py</code>。</p>
+      <p class="note">当前链路输出审核建议与报表，不包含自动点击后台按钮或调用写回接口修改平台状态。任何上线写回都应作为独立、可回滚、幂等且有人工兜底的链路设计。</p>
+    </section>
+
+    <footer>
+      完整文字说明和更多字段细节见同目录 <a href="国补审核完整链路流程图.md">国补审核完整链路流程图.md</a>。
+    </footer>
+  </main>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "base",
+    securityLevel: "loose",
+    flowchart: { htmlLabels: true, curve: "stepAfter", useMaxWidth: true },
+    themeVariables: {
+      fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
+      primaryColor: "#f7f7f8",
+      primaryTextColor: "#111111",
+      primaryBorderColor: "#111111",
+      lineColor: "#555555",
+      secondaryColor: "#ffffff",
+      tertiaryColor: "#ffffff",
+      clusterBkg: "#ffffff",
+      clusterBorder: "#d8d8dc",
+      edgeLabelBackground: "#ffffff"
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[data]
+non_real_dir = "photo_authenticity/data/input/non_real"
+real_candidates_csv = "photo_authenticity/data/input/real_candidates.csv"
+manifest_dir = "photo_authenticity/data/manifests"
+split_dir = "photo_authenticity/data/splits"
+
+[artifacts]
+run_dir = "photo_authenticity/models/runs"
+release_dir = "photo_authenticity/models/releases"
+report_dir = "photo_authenticity/reports/generated"
+log_dir = "photo_authenticity/reports/logs"

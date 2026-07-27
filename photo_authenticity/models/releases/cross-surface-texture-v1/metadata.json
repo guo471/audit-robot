@@ -1,0 +1,51 @@
+{
+  "C": 0.1,
+  "artifact_version": "cross-surface-texture-plugin-v1",
+  "class_weight": "balanced",
+  "classifier": "logistic_regression_numpy_runtime",
+  "extractor_version": "fft-v1-512-ycbcr-5x53",
+  "feature_dimension": 795,
+  "feature_policy": {
+    "forbidden": [
+      "filename",
+      "path",
+      "dimensions",
+      "format",
+      "watermark_text",
+      "order_metadata",
+      "ocr_text",
+      "hash_as_feature"
+    ],
+    "source": "decoded_rgb_pixels_only"
+  },
+  "model_sha256": "0687709fcaa9b44289ef4467ee4abfe9d91e2bb50f2856f134bf513b36232b10",
+  "plugin_env": "SN_LABEL_AUTH_REVIEW_MODE",
+  "route_policy": {
+    "allowed_transition": "no_evidence->high_risk_non_real"
+  },
+  "solver": "liblinear",
+  "threshold": 0.99,
+  "training": {
+    "negative_manifest_sha256": "bce4ec88f225570de781fd93b51edaf600c9d4164ca2c6360d9c43f059b0acf3",
+    "negative_real_count": 385,
+    "positive_augmented_count": 144,
+    "positive_original_count": 4,
+    "positive_seed_range": [
+      0,
+      35
+    ]
+  },
+  "validation": {
+    "independent_real_count": 629,
+    "independent_real_false_positive_rate": 0.025437201907790145,
+    "independent_real_false_positives": 16,
+    "independent_real_manifest_sha256": "b50d3554c41780f81fa9a71b9d9b279914e3399f15158dd4041d9a10809c0882",
+    "positive_augmented_count": 144,
+    "positive_augmented_min_score": 0.9935752734430126,
+    "positive_original_min_score": 0.995559084364136,
+    "positive_seed_range": [
+      100,
+      135
+    ]
+  }
+}
