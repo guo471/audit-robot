@@ -31,8 +31,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from modules.category_classifier import classify_audit_category
 from tools.photo_authenticity_mainline import (
+    EXPECTED_LOCAL_TREE_SHA256,
     PhotoAuthenticityConfig,
     ImageObservation,
+    LocalTreeNonRealRescue,
     PhotoAuthenticitySchemaError,
     apply_photo_authenticity_gate,
     validate_image_observations,
@@ -833,6 +835,10 @@ CSV_COLUMNS = [
     ("image_risk", "image_risk"),
     ("confidence", "confidence"),
     ("photo_authenticity_mode", "图片真实性模式"),
+    ("photo_authenticity_local_tree_enabled", "图片真实性本地树是否启用"),
+    ("photo_authenticity_local_tree_artifact_sha256", "图片真实性本地树artifact SHA256"),
+    ("photo_authenticity_local_tree_hit_count", "图片真实性本地树命中图片数"),
+    ("photo_authenticity_local_tree_unavailable_count", "图片真实性本地树不可用图片数"),
     ("photo_authenticity_would_manual", "图片真实性是否建议转人工"),
     ("photo_authenticity_strong_count", "图片真实性强证据图片数"),
     ("photo_authenticity_manual_count", "图片真实性人工复核图片数"),
@@ -860,6 +866,10 @@ CSV_COLUMNS = [
 
 PHOTO_AUTHENTICITY_REPORT_DEFAULTS = {
     "photo_authenticity_mode": "off",
+    "photo_authenticity_local_tree_enabled": "off",
+    "photo_authenticity_local_tree_artifact_sha256": "",
+    "photo_authenticity_local_tree_hit_count": 0,
+    "photo_authenticity_local_tree_unavailable_count": 0,
     "photo_authenticity_would_manual": False,
     "photo_authenticity_strong_count": 0,
     "photo_authenticity_manual_count": 0,
@@ -895,6 +905,13 @@ def prepare_photo_authenticity_report_fields(row: dict[str, Any]) -> dict[str, A
             item.get("result") == "manual_review" for item in values
         )
         row["photo_authenticity_fft_count"] = sum(bool(item.get("rescued_by_fft")) for item in values)
+        row["photo_authenticity_local_tree_hit_count"] = sum(
+            item.get("rule") == "LOCAL_TREE" and item.get("result") == "high_risk_non_real"
+            for item in values
+        )
+        row["photo_authenticity_local_tree_unavailable_count"] = sum(
+            item.get("status") == "local_tree_unavailable" for item in values
+        )
         row["photo_authenticity_image_results"] = json.dumps(
             image_results, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         )
@@ -934,11 +951,29 @@ def finalize_photo_authenticity_report_fields(
 ) -> dict[str, Any]:
     """Record the configured mode even when the authenticity stage was skipped."""
     row["photo_authenticity_mode"] = config.mode
+    row["photo_authenticity_local_tree_enabled"] = (
+        "on" if config.mode != "off" and config.local_tree_enabled else "off"
+    )
+    row["photo_authenticity_local_tree_artifact_sha256"] = (
+        EXPECTED_LOCAL_TREE_SHA256 if config.mode != "off" and config.local_tree_enabled else ""
+    )
     row["sn_label_auth_review_mode"] = (
         "on" if config.mode != "off" and config.sn_label_auth_review_enabled else "off"
     )
     apply_optional_compliance_baseline(row, os.environ)
     return prepare_photo_authenticity_report_fields(row)
+
+
+def verify_photo_authenticity_local_tree_artifact(config: PhotoAuthenticityConfig) -> None:
+    if config.mode == "off" or not config.local_tree_enabled:
+        return
+    try:
+        LocalTreeNonRealRescue.load(config.local_tree_artifact_path)
+    except Exception as exc:
+        raise RuntimeError(
+            "photo authenticity local tree artifact unavailable: "
+            f"{config.local_tree_artifact_path}: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def summarize_photo_authenticity(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -953,6 +988,8 @@ def summarize_photo_authenticity(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "strong_images": sum(int(row.get("photo_authenticity_strong_count") or 0) for row in rows),
         "manual_images": sum(int(row.get("photo_authenticity_manual_count") or 0) for row in rows),
         "fft_images": sum(int(row.get("photo_authenticity_fft_count") or 0) for row in rows),
+        "local_tree_hit_images": sum(int(row.get("photo_authenticity_local_tree_hit_count") or 0) for row in rows),
+        "local_tree_unavailable_images": sum(int(row.get("photo_authenticity_local_tree_unavailable_count") or 0) for row in rows),
         "failure_orders": sum(bool(row.get("photo_authenticity_service_failure")) for row in rows),
         "fallback_calls": sum(int(row.get("photo_authenticity_fallback_calls") or 0) for row in rows),
         "latency_sec": round(sum(float(row.get("photo_authenticity_elapsed_sec") or 0) for row in rows), 2),
@@ -4016,6 +4053,12 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="可覆盖FFT模型目录；阈值仍强制读取并校验冻结metadata中的0.995",
     )
     parser.add_argument(
+        "--photo-authenticity-local-tree-enabled",
+        choices=["true", "false"],
+        default=os.environ.get("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", "true"),
+        help="图片真实性本地树融合规则；默认true启用，可设false只关闭本地树",
+    )
+    parser.add_argument(
         "--photo-authenticity-baseline-path",
         default=os.environ.get("PHOTO_AUTHENTICITY_BASELINE_PATH"),
         help="可选历史同类订单基线JSON，用于计算合并后的真实增量；缺失时增量标记不可用",
@@ -4043,10 +4086,13 @@ def main() -> None:
     os.environ["PHOTO_AUTH_EDGE_MAPPING_MODE"] = args.photo_auth_edge_mapping_mode
     os.environ["DIGITAL_ACTIVATION_EVIDENCE_MODE"] = args.digital_activation_evidence_mode
     os.environ["PHOTO_AUTHENTICITY_MODE"] = args.photo_authenticity_mode
+    os.environ["PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED"] = args.photo_authenticity_local_tree_enabled
     if args.photo_authenticity_artifact_dir:
         os.environ["PHOTO_AUTHENTICITY_ARTIFACT_DIR"] = args.photo_authenticity_artifact_dir
     if args.photo_authenticity_baseline_path:
         os.environ["PHOTO_AUTHENTICITY_BASELINE_PATH"] = args.photo_authenticity_baseline_path
+
+    verify_photo_authenticity_local_tree_artifact(PhotoAuthenticityConfig.from_env(os.environ))
 
     base_url = os.environ["VISION_API_BASE_URL"]
     api_key = os.environ["VISION_API_KEY"]

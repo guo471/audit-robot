@@ -30,6 +30,8 @@ EXPECTED_MODEL_SHA256 = "49352975e2ef36d3723cbe6fe028687a56101920fef50becc744c65
 EXPECTED_METADATA_SHA256 = "e8c4ba687b702535231d91e001c55f4e0750b07ab79e3cd4829ae1dea5f708cf"
 EXPECTED_V4_PROMPT_SHA256 = "7d4e7224b38c5fc5cbb9293f6d72b091df39d4dc9efb2e983b0daa829a43ca77"
 DEFAULT_ARTIFACT_DIR = Path("photo_authenticity/models/releases/non-real-photo-v2")
+DEFAULT_LOCAL_TREE_ARTIFACT_PATH = Path("photo_authenticity/models/releases/non-real-local-tree-v1/tree.json")
+EXPECTED_LOCAL_TREE_SHA256 = "5e3ea24636dcc0df2f9554a54325be240a6245dc2eb7347cbdf02079d4c618a8"
 UNIFORM_SCREEN_TEXTURE_EXTRACTOR_VERSION = "uniform-orientation-v2-3x3-192"
 UNIFORM_SCREEN_TEXTURE_THRESHOLD = 1.0
 UNIFORM_SCREEN_TEXTURE_LIMITS = {
@@ -57,6 +59,8 @@ class PhotoAuthenticityConfig:
     artifact_dir: Path
     fft_enabled: bool = False
     sn_label_auth_review_enabled: bool = False
+    local_tree_enabled: bool = True
+    local_tree_artifact_path: Path = DEFAULT_LOCAL_TREE_ARTIFACT_PATH
     max_fft_attempts: int = 2
 
     @classmethod
@@ -78,12 +82,24 @@ class PhotoAuthenticityConfig:
             cross_surface_marker_enabled = False
         else:
             raise ValueError("SN_LABEL_AUTH_REVIEW_MODE must be on or off")
+        tree_raw = str(env.get("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", "true")).strip().lower()
+        if tree_raw in {"true", "1", "yes", "on"}:
+            local_tree_enabled = True
+        elif tree_raw in {"false", "0", "no", "off", ""}:
+            local_tree_enabled = False
+        else:
+            raise ValueError("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED must be true or false")
         artifact_dir = Path(env.get("PHOTO_AUTHENTICITY_ARTIFACT_DIR", str(DEFAULT_ARTIFACT_DIR)))
+        local_tree_artifact_path = Path(
+            env.get("PHOTO_AUTHENTICITY_LOCAL_TREE_ARTIFACT_PATH", str(DEFAULT_LOCAL_TREE_ARTIFACT_PATH))
+        )
         return cls(
             mode=mode,
             artifact_dir=artifact_dir,
             fft_enabled=fft_enabled,
             sn_label_auth_review_enabled=cross_surface_marker_enabled,
+            local_tree_enabled=local_tree_enabled,
+            local_tree_artifact_path=local_tree_artifact_path,
         )
 
 
@@ -359,6 +375,60 @@ class FrozenFFTRescue:
         }
 
 
+@dataclass(frozen=True)
+class LocalTreeNonRealRescue:
+    payload: dict[str, Any]
+    artifact_sha256: str
+
+    @property
+    def threshold(self) -> float:
+        return float(self.payload["leaf_positive_ratio"])
+
+    @classmethod
+    def load(cls, artifact_path: Path) -> "LocalTreeNonRealRescue":
+        artifact_path = Path(artifact_path)
+        raw = artifact_path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != EXPECTED_LOCAL_TREE_SHA256:
+            raise ValueError("local tree artifact hash mismatch")
+        payload = json.loads(raw.decode("utf-8"))
+        if payload.get("model_type") != "local_tree_non_real_v1":
+            raise ValueError("unsupported local tree model type")
+        from tools.non_real_local_features import FEATURE_EXTRACTOR_VERSION, FEATURE_NAMES
+
+        if payload.get("feature_extractor_version") != FEATURE_EXTRACTOR_VERSION:
+            raise ValueError("unsupported local tree feature extractor version")
+        if tuple(payload.get("feature_names") or ()) != FEATURE_NAMES:
+            raise ValueError("unsupported local tree feature contract")
+        if payload.get("route_policy") != {"allowed_transition": "no_evidence->high_risk_non_real"}:
+            raise ValueError("unsupported local tree route policy")
+        if float(payload.get("leaf_positive_ratio", -1)) != 0.3:
+            raise ValueError("unsupported local tree threshold")
+        if not isinstance(payload.get("tree"), dict):
+            raise ValueError("local tree payload missing tree")
+        return cls(payload=payload, artifact_sha256=digest)
+
+    def score(self, image_path: Path) -> tuple[float, dict[str, Any]]:
+        from tools.non_real_local_features import extract_features
+
+        features = extract_features(Path(image_path))
+        node = self.payload["tree"]
+        while not bool(node.get("leaf")):
+            metric = str(node.get("metric") or "")
+            if metric not in features:
+                raise ValueError(f"local tree feature missing: {metric}")
+            node = node["left"] if float(features[metric]) <= float(node["threshold"]) else node["right"]
+        total = int(node.get("pos", 0)) + int(node.get("neg", 0))
+        ratio = (int(node.get("pos", 0)) / total) if total else 0.0
+        return ratio, {
+            "source": "local_image_engine",
+            "detector": "local-tree-non-real-v1",
+            "tree_sha256": self.artifact_sha256,
+            "source_feature_jsonl_sha256": self.payload.get("source_feature_jsonl_sha256", ""),
+            "threshold": self.threshold,
+        }
+
+
 def _load_cv2() -> Any:
     import cv2
 
@@ -467,6 +537,7 @@ def evaluate_authenticity_images(
     image_paths: Mapping[str, Path],
     rescue: FrozenFFTRescue | None = None,
     texture_detector: UniformScreenTextureDetector | None = None,
+    local_tree: LocalTreeNonRealRescue | None = None,
     budget_available: Callable[[], bool] = lambda: True,
 ) -> AuthenticityOrderResult:
     if config.mode == "off":
@@ -474,7 +545,9 @@ def evaluate_authenticity_images(
     observations = validate_image_observations(raw_observations, expected_image_ids)
     loaded_rescue = rescue
     loaded_texture_detector = texture_detector
+    loaded_local_tree = local_tree
     artifact_error: Exception | None = None
+    local_tree_error: Exception | None = None
     results: dict[str, AuthenticityImageResult] = {}
     service_failure = False
     for image_id, observation in observations.items():
@@ -482,6 +555,62 @@ def evaluate_authenticity_images(
         if result != "no_evidence":
             results[image_id] = AuthenticityImageResult(image_id, result, rule)
             continue
+        local_tree_no_hit: AuthenticityImageResult | None = None
+        if config.local_tree_enabled:
+            if not budget_available():
+                service_failure = True
+                local_tree_no_hit = AuthenticityImageResult(
+                    image_id, "no_evidence", rule, status="local_tree_unavailable",
+                    evidence_summary={"error": "order budget exhausted before local tree"},
+                )
+            else:
+                image_path = Path(image_paths.get(image_id, Path()))
+                if not image_path.is_file():
+                    service_failure = True
+                    local_tree_no_hit = AuthenticityImageResult(
+                        image_id, "no_evidence", rule, status="local_tree_unavailable",
+                        evidence_summary={"error": "image file missing for local tree"},
+                    )
+                elif loaded_local_tree is None and local_tree_error is None:
+                    try:
+                        loaded_local_tree = LocalTreeNonRealRescue.load(config.local_tree_artifact_path)
+                    except Exception as exc:
+                        local_tree_error = exc
+                if local_tree_error is not None and local_tree_no_hit is None:
+                    service_failure = True
+                    local_tree_no_hit = AuthenticityImageResult(
+                        image_id, "no_evidence", rule, status="local_tree_unavailable",
+                        evidence_summary={"error": f"{type(local_tree_error).__name__}: {local_tree_error}"},
+                    )
+                if local_tree_no_hit is None:
+                    try:
+                        tree_score, tree_summary = loaded_local_tree.score(image_path)
+                    except Exception as exc:
+                        service_failure = True
+                        local_tree_no_hit = AuthenticityImageResult(
+                            image_id,
+                            "no_evidence",
+                            rule,
+                            status="local_tree_unavailable",
+                            evidence_summary={"error": f"{type(exc).__name__}: {exc}"},
+                        )
+                    else:
+                        if tree_score >= loaded_local_tree.threshold:
+                            results[image_id] = AuthenticityImageResult(
+                                image_id,
+                                "high_risk_non_real",
+                                "LOCAL_TREE",
+                                score=tree_score,
+                                evidence_summary=tree_summary,
+                            )
+                            continue
+                        local_tree_no_hit = AuthenticityImageResult(
+                            image_id,
+                            "no_evidence",
+                            rule,
+                            score=tree_score,
+                            evidence_summary=tree_summary,
+                        )
         if config.sn_label_auth_review_enabled:
             if not budget_available():
                 service_failure = True
@@ -531,7 +660,7 @@ def evaluate_authenticity_images(
                 )
                 continue
         if not config.fft_enabled:
-            results[image_id] = AuthenticityImageResult(image_id, "no_evidence", rule)
+            results[image_id] = local_tree_no_hit or AuthenticityImageResult(image_id, "no_evidence", rule)
             continue
         if not budget_available():
             service_failure = True
@@ -592,6 +721,8 @@ def _order_reason(result: AuthenticityOrderResult) -> str:
         return "NON_REAL_PHOTO_STRONG_RISK"
     if any(item.rescued_by_fft for item in values):
         return "NON_REAL_PHOTO_FFT_RESCUE"
+    if any(item.result == "manual_review" and not str(item.status or "").startswith("failed") for item in values):
+        return "NON_REAL_PHOTO_REVIEW"
     if result.service_failure:
         return "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
     return "NON_REAL_PHOTO_REVIEW"

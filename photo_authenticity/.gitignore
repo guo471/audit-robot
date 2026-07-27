@@ -7,6 +7,8 @@ models/releases/*
 !models/releases/non-real-photo-v2/**
 !models/releases/cross-surface-texture-v1/
 !models/releases/cross-surface-texture-v1/**
+!models/releases/non-real-local-tree-v1/
+!models/releases/non-real-local-tree-v1/**
 reports/generated/
 reports/logs/
 *.egg-info/

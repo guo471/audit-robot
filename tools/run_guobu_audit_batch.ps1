@@ -13,6 +13,7 @@ param(
   [switch]$EnableSnCharReviewV2,
   [switch]$EnableSnLabelAuthReview,
   [switch]$EnablePhotoAuthEdgeMapping,
+  [switch]$DisablePhotoAuthenticityLocalTree,
   [switch]$DisableDigitalActivationEvidence,
   [switch]$SkipTimeoutRerun,
   [switch]$PlanOnly
@@ -127,6 +128,17 @@ $photoAuthenticityMode = if ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICIT
   $configuredMode = $env:PHOTO_AUTHENTICITY_MODE.Trim().ToLowerInvariant()
   if ($configuredMode -notin @("off", "shadow", "enforce")) {
     throw "PHOTO_AUTHENTICITY_MODE must be off, shadow, or enforce"
+  }
+  $configuredMode
+}
+$photoAuthenticityLocalTreeEnabled = if ($DisablePhotoAuthenticityLocalTree) {
+  "false"
+} elseif ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED)) {
+  "true"
+} else {
+  $configuredMode = $env:PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED.Trim().ToLowerInvariant()
+  if ($configuredMode -notin @("true", "false")) {
+    throw "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED must be true or false"
   }
   $configuredMode
 }
@@ -255,6 +267,7 @@ function New-RunManifest {
     photo_auth_edge_mapping_mode = $photoAuthEdgeMappingMode
     digital_activation_evidence_mode = $digitalActivationEvidenceMode
     photo_authenticity_mode = $photoAuthenticityMode
+    photo_authenticity_local_tree_enabled = $photoAuthenticityLocalTreeEnabled
     order_timeout_seconds = 60
     git_commit = (Get-GitCommit)
     python_path = $pythonPath
@@ -391,7 +404,8 @@ function Invoke-AuditRun {
     "--sn-label-auth-review-mode", $snLabelAuthReviewMode,
     "--photo-auth-edge-mapping-mode", $photoAuthEdgeMappingMode,
     "--digital-activation-evidence-mode", $digitalActivationEvidenceMode,
-    "--photo-authenticity-mode", $photoAuthenticityMode
+    "--photo-authenticity-mode", $photoAuthenticityMode,
+    "--photo-authenticity-local-tree-enabled", $photoAuthenticityLocalTreeEnabled
   )
   if (-not $EnableTargetedSnReview) { $arguments += "--no-targeted-sn-review" }
 

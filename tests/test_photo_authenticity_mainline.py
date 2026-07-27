@@ -15,9 +15,11 @@ from tools.photo_authenticity_mainline import (
     EXPECTED_EXTRACTOR_VERSION,
     EXPECTED_FEATURE_DIMENSION,
     EXPECTED_MODEL_SHA256,
+    EXPECTED_LOCAL_TREE_SHA256,
     EXPECTED_THRESHOLD,
     EXPECTED_V4_PROMPT_SHA256,
     FrozenFFTRescue,
+    LocalTreeNonRealRescue,
     AuthenticityImageResult,
     AuthenticityOrderResult,
     PhotoAuthenticityConfig,
@@ -64,6 +66,14 @@ def test_fft_enabled_config_defaults_false_and_parses_strict_boolean():
     assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "0"}).fft_enabled is False
     with pytest.raises(ValueError, match="PHOTO_AUTHENTICITY_FFT_ENABLED"):
         PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "sometimes"})
+
+
+def test_local_tree_config_defaults_true_and_parses_strict_boolean():
+    assert PhotoAuthenticityConfig.from_env({}).local_tree_enabled is True
+    assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false"}).local_tree_enabled is False
+    assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "1"}).local_tree_enabled is True
+    with pytest.raises(ValueError, match="PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED"):
+        PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "sometimes"})
 
 
 def test_local_texture_detector_reuses_existing_plugin_switch():
@@ -166,6 +176,7 @@ def test_validator_returns_observations_keyed_by_input_id_not_array_order():
 def test_off_mode_does_not_load_artifact_or_images(monkeypatch, tmp_path):
     config = PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "off"})
     monkeypatch.setattr(FrozenFFTRescue, "load", lambda *_: pytest.fail("artifact loaded"))
+    monkeypatch.setattr(LocalTreeNonRealRescue, "load", lambda *_: pytest.fail("local tree loaded"))
     result = evaluate_authenticity_images(
         config=config,
         raw_observations=None,
@@ -175,6 +186,124 @@ def test_off_mode_does_not_load_artifact_or_images(monkeypatch, tmp_path):
     assert result.mode == "off"
     assert result.would_manual is False
     assert result.image_results == {}
+
+
+def test_local_tree_default_mainline_rescue_routes_non_real_strong(tmp_path):
+    image_path = tmp_path / "image.jpg"
+    Image.new("RGB", (12, 12), (255, 255, 255)).save(image_path)
+
+    class FakeLocalTree:
+        threshold = 0.3
+
+        def score(self, path):
+            assert path == image_path
+            return 1.0, {"source": "local_tree", "tree_sha256": "abc"}
+
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        raw_observations=[raw("i1")],
+        expected_image_ids=["i1"],
+        image_paths={"i1": image_path},
+        local_tree=FakeLocalTree(),
+    )
+
+    assert result.would_manual is True
+    assert result.service_failure is False
+    assert result.image_results["i1"].result == "high_risk_non_real"
+    assert result.image_results["i1"].rule == "LOCAL_TREE"
+
+
+def test_local_tree_can_be_disabled_without_changing_qwen_rules(tmp_path):
+    image_path = tmp_path / "image.jpg"
+    Image.new("RGB", (12, 12), (255, 255, 255)).save(image_path)
+    calls = []
+
+    class FakeLocalTree:
+        threshold = 0.3
+
+        def score(self, path):
+            calls.append(path)
+            return 1.0, {}
+
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
+        }),
+        raw_observations=[raw("i1")],
+        expected_image_ids=["i1"],
+        image_paths={"i1": image_path},
+        local_tree=FakeLocalTree(),
+    )
+
+    assert calls == []
+    assert result.would_manual is False
+    assert result.image_results["i1"].result == "no_evidence"
+
+
+def test_local_tree_missing_image_is_observable_but_does_not_expand_manual(tmp_path):
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        raw_observations=[raw("i1")],
+        expected_image_ids=["i1"],
+        image_paths={"i1": tmp_path / "missing.jpg"},
+    )
+
+    image_result = result.image_results["i1"]
+    assert result.would_manual is False
+    assert result.service_failure is True
+    assert image_result.result == "no_evidence"
+    assert image_result.status == "local_tree_unavailable"
+
+
+def test_local_tree_runtime_failure_is_observable_but_does_not_expand_manual(tmp_path):
+    image_path = tmp_path / "image.jpg"
+    Image.new("RGB", (12, 12), (255, 255, 255)).save(image_path)
+
+    class BrokenLocalTree:
+        threshold = 0.3
+
+        def score(self, path):
+            raise OSError("decode failed")
+
+    result = evaluate_authenticity_images(
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        raw_observations=[raw("i1")],
+        expected_image_ids=["i1"],
+        image_paths={"i1": image_path},
+        local_tree=BrokenLocalTree(),
+    )
+
+    image_result = result.image_results["i1"]
+    assert result.would_manual is False
+    assert result.service_failure is True
+    assert image_result.result == "no_evidence"
+    assert image_result.status == "local_tree_unavailable"
+
+
+def test_local_tree_unavailable_does_not_override_existing_manual_evidence(tmp_path):
+    result = apply_photo_authenticity_gate(
+        legacy_row={
+            "manual_flag": "否",
+            "manual_reason_code": "",
+            "manual_reason_cn": "",
+            "manual_reason": "",
+        },
+        compliance={
+            "photo_authenticity_by_image": [
+                raw("i1"),
+                raw("i2", weak_evidence=[evidence("LOCAL_MOIRE", "background")]),
+            ],
+        },
+        images=[
+            {"image_id": "i1", "local_path": str(tmp_path / "missing.jpg")},
+            {"image_id": "i2", "local_path": str(tmp_path / "missing-too.jpg")},
+        ],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+    )
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "NON_REAL_PHOTO_REVIEW"
 
 
 @pytest.mark.parametrize(
@@ -412,12 +541,76 @@ def _release_dir() -> Path:
     return Path("photo_authenticity/models/releases/non-real-photo-v2")
 
 
+def _local_tree_path() -> Path:
+    return Path("photo_authenticity/models/releases/non-real-local-tree-v1/tree.json")
+
+
 def test_frozen_artifact_contract_and_model_hash():
     rescue = FrozenFFTRescue.load(_release_dir())
     assert rescue.metadata["extractor_version"] == EXPECTED_EXTRACTOR_VERSION
     assert rescue.feature_dimension == EXPECTED_FEATURE_DIMENSION == 795
     assert rescue.threshold == EXPECTED_THRESHOLD == 0.995
     assert hashlib.sha256((_release_dir() / "model.joblib").read_bytes()).hexdigest() == EXPECTED_MODEL_SHA256
+
+
+def test_local_tree_artifact_contract_is_frozen():
+    rescue = LocalTreeNonRealRescue.load(_local_tree_path())
+
+    assert hashlib.sha256(_local_tree_path().read_bytes()).hexdigest() == EXPECTED_LOCAL_TREE_SHA256
+    assert rescue.payload["feature_extractor_version"] == "non-real-local-features-v2"
+    assert rescue.payload["feature_names"] == [
+        "black_edge_any_candidate",
+        "black_edge_any_strong",
+        "black_edge_strong_sides",
+        "black_edge_uncertain_sides",
+        "edge_dark_bottom",
+        "edge_dark_left",
+        "edge_dark_max",
+        "edge_dark_mean",
+        "edge_dark_right",
+        "edge_dark_top",
+        "edge_run_bottom",
+        "edge_run_left",
+        "edge_run_max",
+        "edge_run_right",
+        "edge_run_top",
+        "fft_angular_max",
+        "fft_angular_std",
+        "fft_axis_sum",
+        "fft_entropy",
+        "fft_high_0.18",
+        "fft_high_0.25",
+        "fft_high_0.35",
+        "fft_high_0.50",
+        "fft_high_0.70",
+        "fft_horizontal",
+        "fft_peak_median",
+        "fft_vertical",
+        "grad_mean",
+        "grad_orient_entropy",
+        "grad_orient_max",
+        "grad_orient_std",
+        "grad_p95",
+        "luma_mean",
+        "luma_std",
+        "saturation_mean",
+        "tile_grad_cv",
+        "tile_grad_max",
+        "tile_grad_mean",
+        "tile_grad_min",
+        "tile_grad_std",
+    ]
+    assert rescue.payload["route_policy"] == {"allowed_transition": "no_evidence->high_risk_non_real"}
+
+
+def test_local_tree_artifact_rejects_contract_tampering(tmp_path):
+    payload = json.loads(_local_tree_path().read_text(encoding="utf-8"))
+    payload["feature_extractor_version"] = "changed"
+    target = tmp_path / "tree.json"
+    target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="local tree artifact hash mismatch"):
+        LocalTreeNonRealRescue.load(target)
 
 
 def test_frozen_artifact_rejects_tampering_and_threshold_drift(tmp_path):
@@ -484,6 +677,7 @@ def test_fft_only_rescues_no_evidence_and_retries_twice(monkeypatch, tmp_path):
         config=PhotoAuthenticityConfig.from_env({
             "PHOTO_AUTHENTICITY_MODE": "enforce", "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
             "SN_LABEL_AUTH_REVIEW_MODE": "off",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
         }),
         raw_observations=[raw(item.image_id, edges=item.edges, screen_owner=item.screen_owner,
                               strong_evidence=[evidence(x.code, *x.regions) for x in item.strong_evidence],
@@ -508,6 +702,7 @@ def test_fft_disabled_by_default_keeps_no_evidence_and_performs_zero_io(monkeypa
         config=PhotoAuthenticityConfig.from_env({
             "PHOTO_AUTHENTICITY_MODE": "enforce",
             "SN_LABEL_AUTH_REVIEW_MODE": "off",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
         }),
         raw_observations=[raw("i1")],
         expected_image_ids=["i1"],
@@ -534,6 +729,7 @@ def test_enabled_plugin_does_not_trust_cross_surface_marker_without_structured_e
         config=PhotoAuthenticityConfig.from_env({
             "PHOTO_AUTHENTICITY_MODE": "enforce",
             "SN_LABEL_AUTH_REVIEW_MODE": "on",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
         }),
         raw_observations=[raw(
             "anonymous-image",
@@ -570,6 +766,7 @@ def test_enabled_plugin_runs_local_texture_detector_when_model_returns_no_eviden
         config=PhotoAuthenticityConfig.from_env({
             "PHOTO_AUTHENTICITY_MODE": "enforce",
             "SN_LABEL_AUTH_REVIEW_MODE": "on",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
         }),
         raw_observations=[raw("anonymous-image")],
         expected_image_ids=["anonymous-image"],
@@ -593,23 +790,43 @@ def test_enabled_plugin_runs_local_texture_detector_when_model_returns_no_eviden
     "env, reason",
     [
         (
-            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "off"},
+            {
+                "PHOTO_AUTHENTICITY_MODE": "enforce",
+                "SN_LABEL_AUTH_REVIEW_MODE": "off",
+                "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
+            },
             "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_body,background] explicit marker",
         ),
         (
-            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            {
+                "PHOTO_AUTHENTICITY_MODE": "enforce",
+                "SN_LABEL_AUTH_REVIEW_MODE": "on",
+                "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
+            },
             "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_body] only one physical region",
         ),
         (
-            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            {
+                "PHOTO_AUTHENTICITY_MODE": "enforce",
+                "SN_LABEL_AUTH_REVIEW_MODE": "on",
+                "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
+            },
             "[AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_screen,unknown] product screen only",
         ),
         (
-            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            {
+                "PHOTO_AUTHENTICITY_MODE": "enforce",
+                "SN_LABEL_AUTH_REVIEW_MODE": "on",
+                "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
+            },
             "No marker: ordinary blur and local reflection are not cross-surface evidence",
         ),
         (
-            {"PHOTO_AUTHENTICITY_MODE": "enforce", "SN_LABEL_AUTH_REVIEW_MODE": "on"},
+            {
+                "PHOTO_AUTHENTICITY_MODE": "enforce",
+                "SN_LABEL_AUTH_REVIEW_MODE": "on",
+                "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
+            },
             "Not confirmed [AUTH_EVIDENCE:CROSS_OBJECT_MOIRE:product_body,background]",
         ),
     ],
@@ -654,6 +871,7 @@ def test_artifact_load_failure_is_service_failure_and_never_silently_passes(monk
         config=PhotoAuthenticityConfig.from_env({
             "PHOTO_AUTHENTICITY_MODE": mode, "PHOTO_AUTHENTICITY_FFT_ENABLED": "true",
             "SN_LABEL_AUTH_REVIEW_MODE": "off",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
         }),
         raw_observations=[raw("n0")],
         expected_image_ids=["n0"],
@@ -823,6 +1041,21 @@ def test_strong_reason_wins_over_service_failure():
         config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}), evaluator=lambda **_: result,
     )
     assert row["manual_reason_code"] == "NON_REAL_PHOTO_STRONG_RISK"
+
+
+def test_fft_failure_reason_stays_service_failure():
+    result = AuthenticityOrderResult(
+        "enforce", True,
+        {"failed": AuthenticityImageResult("failed", "manual_review", "FFT_FAILURE", status="failed_after_retries")},
+        service_failure=True,
+    )
+    legacy = {"manual_flag": "否", "manual_reason_code": "", "manual_reason": ""}
+    row = apply_photo_authenticity_gate(
+        legacy_row=legacy, compliance={"photo_authenticity_by_image": [raw("failed")]},
+        images=[{"image_id": "failed"}],
+        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}), evaluator=lambda **_: result,
+    )
+    assert row["manual_reason_code"] == "PHOTO_AUTHENTICITY_SERVICE_FAILURE"
 
 
 def test_approved_v4_prompt_has_frozen_sha_and_loads_current_file():

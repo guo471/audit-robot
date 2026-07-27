@@ -20,6 +20,49 @@ except Exception:  # pragma: no cover
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+FEATURE_EXTRACTOR_VERSION = "non-real-local-features-v2"
+FEATURE_NAMES = (
+    "black_edge_any_candidate",
+    "black_edge_any_strong",
+    "black_edge_strong_sides",
+    "black_edge_uncertain_sides",
+    "edge_dark_bottom",
+    "edge_dark_left",
+    "edge_dark_max",
+    "edge_dark_mean",
+    "edge_dark_right",
+    "edge_dark_top",
+    "edge_run_bottom",
+    "edge_run_left",
+    "edge_run_max",
+    "edge_run_right",
+    "edge_run_top",
+    "fft_angular_max",
+    "fft_angular_std",
+    "fft_axis_sum",
+    "fft_entropy",
+    "fft_high_0.18",
+    "fft_high_0.25",
+    "fft_high_0.35",
+    "fft_high_0.50",
+    "fft_high_0.70",
+    "fft_horizontal",
+    "fft_peak_median",
+    "fft_vertical",
+    "grad_mean",
+    "grad_orient_entropy",
+    "grad_orient_max",
+    "grad_orient_std",
+    "grad_p95",
+    "luma_mean",
+    "luma_std",
+    "saturation_mean",
+    "tile_grad_cv",
+    "tile_grad_max",
+    "tile_grad_mean",
+    "tile_grad_min",
+    "tile_grad_std",
+)
 
 
 def iter_images(root: Path) -> list[Path]:

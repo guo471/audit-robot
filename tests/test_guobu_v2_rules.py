@@ -4521,12 +4521,18 @@ def test_photo_authenticity_image_results_are_serialized_deterministically():
         "photo_authenticity_image_results": {
             "b": {"result": "manual_review", "score": 0.999},
             "a": {"result": "no_evidence", "score": 0.1},
+            "c": {"result": "high_risk_non_real", "rule": "LOCAL_TREE"},
+            "d": {"result": "no_evidence", "status": "local_tree_unavailable"},
         }
     }
     v2.prepare_photo_authenticity_report_fields(row)
+    assert row["photo_authenticity_local_tree_hit_count"] == 1
+    assert row["photo_authenticity_local_tree_unavailable_count"] == 1
     assert row["photo_authenticity_image_results"] == (
         '{"a":{"result":"no_evidence","score":0.1},'
-        '"b":{"result":"manual_review","score":0.999}}'
+        '"b":{"result":"manual_review","score":0.999},'
+        '"c":{"result":"high_risk_non_real","rule":"LOCAL_TREE"},'
+        '"d":{"result":"no_evidence","status":"local_tree_unavailable"}}'
     )
 
 
@@ -4535,6 +4541,7 @@ def test_photo_authenticity_cli_defaults_enforce_and_allows_explicit_off_before_
     args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
     assert args.photo_authenticity_mode == "enforce"
     assert args.photo_authenticity_artifact_dir is None
+    assert args.photo_authenticity_local_tree_enabled == "true"
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     env_off = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
     assert env_off.photo_authenticity_mode == "off"
@@ -4542,8 +4549,10 @@ def test_photo_authenticity_cli_defaults_enforce_and_allows_explicit_off_before_
     explicit_off = v2.parse_cli_args([
         "--tasks-dir", "tasks", "--out-dir", "out",
         "--photo-authenticity-mode", "off",
+        "--photo-authenticity-local-tree-enabled", "false",
     ])
     assert explicit_off.photo_authenticity_mode == "off"
+    assert explicit_off.photo_authenticity_local_tree_enabled == "false"
     with pytest.raises(SystemExit):
         v2.parse_cli_args([
             "--tasks-dir", "tasks", "--out-dir", "out",
@@ -5274,6 +5283,46 @@ def test_photo_authenticity_report_records_effective_sn_label_plugin_state():
     assert enabled["sn_label_auth_review_mode"] == "on"
 
 
+def test_photo_authenticity_report_records_effective_local_tree_state():
+    disabled = v2.finalize_photo_authenticity_report_fields(
+        {},
+        v2.PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "off",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "true",
+        }),
+    )
+    enabled = v2.finalize_photo_authenticity_report_fields(
+        {},
+        v2.PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "true",
+        }),
+    )
+
+    assert disabled["photo_authenticity_local_tree_enabled"] == "off"
+    assert disabled["photo_authenticity_local_tree_artifact_sha256"] == ""
+    assert enabled["photo_authenticity_local_tree_enabled"] == "on"
+    assert enabled["photo_authenticity_local_tree_artifact_sha256"] == v2.EXPECTED_LOCAL_TREE_SHA256
+
+
+def test_photo_authenticity_local_tree_startup_check_fails_fast_when_artifact_missing(tmp_path):
+    config = v2.PhotoAuthenticityConfig.from_env({
+        "PHOTO_AUTHENTICITY_MODE": "enforce",
+        "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "true",
+        "PHOTO_AUTHENTICITY_LOCAL_TREE_ARTIFACT_PATH": str(tmp_path / "missing-tree.json"),
+    })
+
+    with pytest.raises(RuntimeError, match="local tree artifact unavailable"):
+        v2.verify_photo_authenticity_local_tree_artifact(config)
+
+    disabled = v2.PhotoAuthenticityConfig.from_env({
+        "PHOTO_AUTHENTICITY_MODE": "enforce",
+        "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false",
+        "PHOTO_AUTHENTICITY_LOCAL_TREE_ARTIFACT_PATH": str(tmp_path / "missing-tree.json"),
+    })
+    v2.verify_photo_authenticity_local_tree_artifact(disabled)
+
+
 def test_hybrid_uses_enabled_sn_label_auth_review_prompt_only_for_compliance(monkeypatch):
     monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "on")
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
@@ -5322,6 +5371,7 @@ def test_photo_authenticity_summary_counts_routes_and_resources():
     assert v2.summarize_photo_authenticity(rows) == {
         "mode_counts": {"shadow": 2}, "would_manual_orders": 1, "strong_images": 1,
         "manual_images": 2, "fft_images": 1, "failure_orders": 1, "fallback_calls": 1,
+        "local_tree_hit_images": 0, "local_tree_unavailable_images": 0,
         "latency_sec": 4.0, "tokens": 130,
         "merged_compliance_total_tokens": 0, "merged_compliance_total_elapsed_sec": 0,
         "postprocess_tokens": 0, "postprocess_elapsed_sec": 0,
