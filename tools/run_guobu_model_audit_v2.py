@@ -764,6 +764,7 @@ PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM = r'''
 
 【逐图真实性观察（只观察，不裁决）】
 对本次输入的每个 image_id 分别输出一条观察，必须一图一条、完整覆盖且 image_id 不重复。不得跨图拼接证据；每个证据只能属于当前 image_id；不得输出最终真实性裁决，也不得用本段改变其他合规字段。
+审图是否二次翻拍/拍屏/拍纸照，只记录可见证据。禁用水印、定位、时间、文件/路径/尺寸/EXIF、品牌记忆；水印正常，不作为风险证据。商品屏、实物屏、条码、激活页、普通反光、模糊、印刷网点、局部摩尔纹本身不是证据。
 在原 JSON 对象中追加且仅追加字段：
 "photo_authenticity_by_image": [{
   "image_id": "与输入完全一致",
@@ -774,13 +775,19 @@ PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM = r'''
   "reason": "不超过160字的客观观察"
 }]
 枚举必须严格使用：
-- edges: scene_continues | carrier_boundary | abrupt_cutoff | not_visible | uncertain
-- screen_owner: product_screen | external_screen | none | uncertain。只有能看到真实设备边框/机身关系，且屏幕内容属于该设备自身设置页、身份页或激活页时，才使用product_screen；相册、查看器、截图展示或归属不清时使用external_screen或uncertain。
+- edges: scene_continues | carrier_boundary | abrupt_cutoff | not_visible | uncertain。carrier_boundary只用于外部显示屏/照片/纸张等二次载体边界；不用于商品自身电脑/笔记本/显示器的屏幕边框、机身边框或品牌Logo底边。
+- screen_owner: product_screen | external_screen | none | uncertain。只有能看到真实设备边框/机身关系，且屏幕内容属于该设备自身设置页、身份页或激活页时，才使用product_screen；相册、查看器、截图展示或归属不清时使用external_screen或uncertain。商品是电脑/笔记本/显示器时，商品自身屏幕内的系统UI、任务栏、鼠标光标正常，不作为风险；商品自身屏幕内UI不记PHOTO_VIEWER_UI。画面内出现鼠标箭头、桌面光标、电脑窗口控件、系统导航栏等不属于商品自身屏幕，压在包装/背景/照片载体/未知外部画面上的系统UI时，按外部屏画面/外部载体记录。
 - regions: product_body | product_screen | package | hand | background | image_edge | unknown
-strong仅在明确看到时使用：EXTERNAL_PHOTO_CARRIER=外部手机/显示器等照片载体；PHOTO_VIEWER_UI=外部屏幕的相册/查看器界面；PRINTED_PHOTO_CARRIER=纸张、相纸或印刷载体；NESTED_IMAGE_BOUNDARY=画面内另一张图片的完整边界；CROSS_OBJECT_MOIRE=同一图片的同类摩尔纹跨至少2个不同的非商品屏物理区域，regions列出区域。商品自身屏幕内UI不记PHOTO_VIEWER_UI。
+strong仅在明确看到时使用：EXTERNAL_PHOTO_CARRIER=外部手机/显示器等照片载体；PHOTO_VIEWER_UI=外部屏幕的相册/查看器界面；PRINTED_PHOTO_CARRIER=纸张、相纸或印刷载体；NESTED_IMAGE_BOUNDARY=画面内另一张图片的完整边界；CROSS_OBJECT_MOIRE=同一图片的同类摩尔纹跨至少2个不同的非商品屏物理区域、跨product_screen与任一非屏物理区、或跨全图，regions列出区域。
 weak按含义使用：EDGE_CUTOFF=边缘视觉突然缺块、异常截断或不连续，不限于笔直黑边；OUTER_PLANE_OPTICS=疑似外层平面的反光/光学痕迹；PLANAR_APPEARANCE=整体缺乏景深、疑似平面二次成像；LOCAL_MOIRE=单一区域摩尔纹；UI_CANDIDATE=疑似但不明确的外部界面。局部摩尔纹只记LOCAL_MOIRE。真实商品自身屏幕内、仅限product_screen区域的正常拍屏摩尔纹仍可如实记录LOCAL_MOIRE，程序会在无其他证据且四边连续时豁免；摩尔纹延伸到机身、包装、手部或背景时必须列出全部区域，不得错误标成仅product_screen。
 普通反射、模糊、滤镜、常规裁切、局部纹理或单一弱证据不得记为strong。
 无证据时对应 evidence 数组必须为 []；不要虚构证据，不要增加字段。
+'''
+
+PHOTO_AUTHENTICITY_REPLACEMENT_DIRECTIVE = r'''
+
+【图片真实性裁决接管（仅 enforce 模式）】
+本段替代通用强风险中与二次翻拍/拍屏/拍纸照真实性相关的旧裁决规则；不得因真实性观察单独设置顶层 IMAGE_STRONG_RISK、image_risk=true 或 manual_required=true。截图、相册/查看器图、网图、电子屏二次翻拍、AI生成图、明显非真实拍摄图，只按 photo_authenticity_by_image 输出逐图观察，由本地图片真实性规则统一裁决。SN/IMEI篡改、多台设备或多个包装混拍、证据链明显不一致，仍按原业务强风险规则输出 IMAGE_STRONG_RISK。
 '''
 
 COMPLIANCE_PROMPT = ORDINARY_3C_COMPLIANCE_PROMPT
@@ -1308,6 +1315,7 @@ def compliance_prompt_for_category(
     *,
     product_type: str | None = None,
     include_photo_authenticity: bool = False,
+    replace_legacy_authenticity_adjudication: bool = False,
     sn_label_auth_review_mode: str | None = None,
     photo_auth_edge_mapping_mode: str | None = None,
     digital_activation_evidence_mode: str | None = None,
@@ -1323,6 +1331,8 @@ def compliance_prompt_for_category(
         prompt = UNKNOWN_COMPLIANCE_PROMPT
     if include_photo_authenticity:
         prompt = prompt + PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
+        if replace_legacy_authenticity_adjudication:
+            prompt = prompt + PHOTO_AUTHENTICITY_REPLACEMENT_DIRECTIVE
     if include_photo_authenticity and resolve_sn_label_auth_review_mode(sn_label_auth_review_mode) == "on":
         prompt = prompt + "\n\n" + read_sn_label_auth_review_prompt()
     product_text = str(product_type or "").strip().upper()
@@ -2673,14 +2683,7 @@ def _conflicting_observed_sn(decision: dict[str, Any]) -> str:
 
 def _has_photo_integrity_risk(decision: dict[str, Any], evidence_type: str) -> bool:
     integrity = _dict_value(decision.get("photo_integrity"))
-    tamper = _dict_value(decision.get("tamper_checks"))
     screen = _dict_value(decision.get("activation_screen"))
-    non_font_tamper_fields = (
-        "perspective_consistency_ok",
-        "noise_compression_consistency_ok",
-        "edge_blending_ok",
-        "screen_reflection_consistency_ok",
-    )
     return (
         as_bool(decision.get("image_risk"))
         or evidence_type == "COLLAGE_OR_EDIT_RISK"
@@ -2688,7 +2691,21 @@ def _has_photo_integrity_risk(decision: dict[str, Any], evidence_type: str) -> b
         or as_bool(integrity.get("collage_or_edit_risk"))
         or as_bool(integrity.get("screen_shows_photo_or_screenshot"))
         or str(screen.get("screen_content_type") or "").strip().upper() == "PHOTO_VIEWER_OR_SCREENSHOT"
-        or as_bool(integrity.get("erasure_or_overwrite_risk"))
+        or _has_structured_photo_integrity_risk(decision, evidence_type)
+    )
+
+
+def _has_structured_photo_integrity_risk(decision: dict[str, Any], evidence_type: str) -> bool:
+    integrity = _dict_value(decision.get("photo_integrity"))
+    tamper = _dict_value(decision.get("tamper_checks"))
+    non_font_tamper_fields = (
+        "perspective_consistency_ok",
+        "noise_compression_consistency_ok",
+        "edge_blending_ok",
+        "screen_reflection_consistency_ok",
+    )
+    return (
+        as_bool(integrity.get("erasure_or_overwrite_risk"))
         or as_bool(integrity.get("local_background_break_risk"))
         or is_explicit_false(integrity.get("evidence_chain_trustworthy"))
         or as_bool(tamper.get("erasure_or_overwrite_risk"))
@@ -2957,6 +2974,25 @@ def _all_three_duplicate_claim(decision: dict[str, Any]) -> bool:
     )
 
 
+_NON_AUTH_IMAGE_STRONG_RISK_MARKERS = (
+    "SN", "IMEI", "序列号", "条码", "擦除", "覆盖", "贴字", "底纹", "字体", "亮度",
+    "噪声", "篡改", "PS", "P图", "修改", "拼图", "拼接", "图层", "多台", "多个包装",
+    "混拍", "证据链", "同一实物",
+)
+
+
+def _should_defer_image_strong_risk_to_authenticity_gate(decision: dict[str, Any]) -> bool:
+    """Defer only legacy authenticity-only IMAGE_STRONG_RISK claims to the new gate."""
+    evidence_type = str(decision.get("activation_evidence_type") or "").strip().upper()
+    if _has_structured_photo_integrity_risk(decision, evidence_type):
+        return False
+    reason_text = " ".join(
+        str(decision.get(key) or "")
+        for key in ("manual_reason", "manual_reason_cn", "image_risk_reason")
+    )
+    return not any(marker in reason_text for marker in _NON_AUTH_IMAGE_STRONG_RISK_MARKERS)
+
+
 def enforce_photo_noncompliance_manual(
     decision: dict[str, Any],
     *,
@@ -2988,10 +3024,16 @@ def enforce_photo_noncompliance_manual(
             existing_codes.extend(normalize_compliance_reason_codes(normalized.get("manual_reason_code")))
         else:
             existing_codes.append(str(normalized.get("manual_reason_code")))
-    if defer_image_authenticity_to_local:
+    defer_image_strong_risk = (
+        defer_image_authenticity_to_local
+        and "IMAGE_STRONG_RISK" in existing_codes
+        and _should_defer_image_strong_risk_to_authenticity_gate(normalized)
+    )
+    if defer_image_strong_risk:
         protected_code_priority = [code for code in protected_code_priority if code != "IMAGE_STRONG_RISK"]
         protected_codes.discard("IMAGE_STRONG_RISK")
         existing_codes = [code for code in existing_codes if code != "IMAGE_STRONG_RISK"]
+        normalized["image_risk"] = False
 
     all_three_duplicate = _all_three_duplicate_claim(normalized)
     if not all_three_duplicate:
@@ -3084,6 +3126,8 @@ def enforce_photo_noncompliance_manual(
         normalized["manual_required"] = False
         normalized["manual_reason_codes"] = []
         normalized["manual_reason"] = ""
+        if defer_image_strong_risk:
+            normalized["image_risk"] = False
     return normalized
 
 
@@ -3560,6 +3604,7 @@ def audit_task_hybrid(
         precheck["effective_category"],
         product_type=fields.get("product_type", ""),
         include_photo_authenticity=authenticity_config.mode != "off",
+        replace_legacy_authenticity_adjudication=authenticity_config.mode == "enforce",
         photo_auth_edge_mapping_mode=effective_edge_mapping_mode,
         digital_activation_evidence_mode=digital_activation_mode,
     )
@@ -3600,7 +3645,7 @@ def audit_task_hybrid(
     compliance = enforce_photo_noncompliance_manual(
         compliance,
         address_ok=precheck["address_ok"],
-        defer_image_authenticity_to_local=authenticity_config.sn_label_auth_review_enabled,
+        defer_image_authenticity_to_local=authenticity_config.mode == "enforce",
     )
 
     row = _final_row(task, compliance, normalized_sn, compliance, time.time() - started, pre_elapsed, sn_elapsed, compliance_elapsed)

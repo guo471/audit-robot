@@ -40,6 +40,38 @@ def test_authenticity_prompt_defines_evidence_thresholds_and_exemptions():
     assert "普通反射、模糊、滤镜、常规裁切、局部纹理或单一弱证据不得记为strong" in prompt
 
 
+def test_authenticity_prompt_v5_keeps_product_screen_and_external_carrier_boundaries_separate():
+    prompt = v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
+
+    assert "水印、定位、时间、文件/路径/尺寸/EXIF、品牌记忆" in prompt
+    assert "水印正常" in prompt
+    assert "carrier_boundary只用于外部显示屏/照片/纸张等二次载体边界" in prompt
+    assert "不用于商品自身电脑/笔记本/显示器的屏幕边框、机身边框或品牌Logo底边" in prompt
+    assert "商品自身屏幕内的系统UI、任务栏、鼠标光标正常" in prompt
+    assert "压在包装/背景/照片载体/未知外部画面上的系统UI" in prompt
+    assert "跨product_screen与任一非屏物理区" in prompt
+    assert "或跨全图" in prompt
+
+
+def test_authenticity_prompt_replaces_legacy_top_level_authenticity_adjudication():
+    prompt = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        include_photo_authenticity=True,
+        replace_legacy_authenticity_adjudication=True,
+    )
+    shadow_prompt = v2.compliance_prompt_for_category(
+        "ordinary_3c",
+        include_photo_authenticity=True,
+        replace_legacy_authenticity_adjudication=False,
+    )
+
+    assert "本段替代通用强风险中与二次翻拍/拍屏/拍纸照真实性相关的旧裁决规则" in prompt
+    assert "不得因真实性观察单独设置顶层 IMAGE_STRONG_RISK、image_risk=true 或 manual_required=true" in prompt
+    assert "SN/IMEI篡改、多台设备或多个包装混拍、证据链明显不一致" in prompt
+    assert "仍按原业务强风险规则输出 IMAGE_STRONG_RISK" in prompt
+    assert "不得因真实性观察单独设置顶层 IMAGE_STRONG_RISK" not in shadow_prompt
+
+
 def test_authenticity_normalizer_rejects_evidence_that_names_another_image():
     observation = {
         "image_id": "a",

@@ -2670,6 +2670,103 @@ def test_hybrid_edge_plugin_adds_no_model_stage_and_keeps_gate_on_original_image
     assert result["model_calls"] == 2
 
 
+def test_hybrid_enforce_defers_legacy_image_strong_risk_to_authenticity_observations(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
+    stages = []
+
+    def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        stages.append(stage)
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        decision.update({
+            "manual_required": True,
+            "manual_reason_codes": ["IMAGE_STRONG_RISK"],
+            "manual_reason": "legacy model-only authenticity claim",
+            "image_risk": True,
+            "photo_authenticity_by_image": [
+                _auth_observation("img_001"), _auth_observation("img_002"), _auth_observation("img_003"),
+            ],
+        })
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task(), cache_dir=tmp_path)
+
+    assert stages == ["hybrid_sn", "hybrid_compliance"]
+    assert result["model_calls"] == 2
+    assert result["manual_flag"] == "否"
+    assert result["manual_reason_code"] == ""
+    assert result["image_risk"] is False
+    assert result["photo_authenticity_would_manual"] is False
+
+
+def test_hybrid_shadow_keeps_legacy_image_strong_risk_as_rollback_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "shadow")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
+    prompts = {}
+
+    def fake_call(_base, _key, _model, prompt, _payload, _images, *, stage, **_kwargs):
+        prompts[stage] = prompt
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        decision.update({
+            "manual_required": True,
+            "manual_reason_codes": ["IMAGE_STRONG_RISK"],
+            "manual_reason": "legacy model-only authenticity claim",
+            "image_risk": True,
+            "photo_authenticity_by_image": [
+                _auth_observation("img_001"), _auth_observation("img_002"), _auth_observation("img_003"),
+            ],
+        })
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task(), cache_dir=tmp_path)
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "IMAGE_STRONG_RISK"
+    assert result["photo_authenticity_mode"] == "shadow"
+    assert v2.PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM in prompts["hybrid_compliance"]
+    assert v2.PHOTO_AUTHENTICITY_REPLACEMENT_DIRECTIVE not in prompts["hybrid_compliance"]
+
+
+def test_hybrid_enforce_preserves_non_authenticity_image_strong_risk(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
+    monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
+    prompts = {}
+
+    def fake_call(_base, _key, _model, prompt, _payload, _images, *, stage, **_kwargs):
+        prompts[stage] = prompt
+        if stage == "hybrid_sn":
+            return ({"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99}, "sn", 0.1, {}, False)
+        decision = _screen_sn_compliance_pass()
+        decision.update({
+            "manual_required": True,
+            "manual_reason_codes": ["IMAGE_STRONG_RISK"],
+            "manual_reason": "possible strong risk",
+            "image_risk": True,
+            "tamper_checks": {"erasure_or_overwrite_risk": True},
+            "photo_authenticity_by_image": [
+                _auth_observation("img_001"), _auth_observation("img_002"), _auth_observation("img_003"),
+            ],
+        })
+        return (decision, "compliance", 0.1, {}, False)
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+
+    result = audit_task_hybrid("https://unused", "key", "qwen3.7-plus", _base_task(), cache_dir=tmp_path)
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "IMAGE_STRONG_RISK"
+    assert result["image_risk"] is True
+    assert v2.PHOTO_AUTHENTICITY_REPLACEMENT_DIRECTIVE in prompts["hybrid_compliance"]
+
+
 def test_hybrid_edge_plugin_with_no_successful_candidate_uses_baseline_prompt(monkeypatch, tmp_path):
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "enforce")
     monkeypatch.setenv("PHOTO_AUTH_EDGE_MAPPING_MODE", "on")
@@ -4064,6 +4161,7 @@ def test_hybrid_forces_manual_when_activation_evidence_is_screen_on_without_sn(m
 
 
 def test_hybrid_forces_manual_when_image_risk_true_even_if_other_fields_pass(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
 
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
@@ -4143,6 +4241,7 @@ def test_hybrid_forces_manual_when_activation_photo_invalid_after_sn_passes(monk
 
 
 def test_hybrid_forces_manual_when_image_strong_risk_code_returned_without_manual_flag(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     monkeypatch.setenv("SN_LABEL_AUTH_REVIEW_MODE", "off")
 
     def fake_call_model(base_url, api_key, model, prompt, payload, images, *, stage, cache_dir=None, detail="auto", timeout_sec=60):
