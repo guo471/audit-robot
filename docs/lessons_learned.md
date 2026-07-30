@@ -43,3 +43,9 @@
 问题：总负责人在读取分支回执时多次误触 MCP resource。MCP resource 不是 Codex 分支状态入口，连续误触会浪费步骤，并可能再次造成回执延迟。
 
 规避：读取 Codex 分支状态只能使用 `send_message_to_thread`、`wait_threads`、`read_thread`。一旦误调用非线程工具读取分支状态，必须立即停止当前分支协调动作，向用户说明错误和影响；不得继续反复尝试同类错误工具。MCP resource 只用于 MCP 服务器资源，不用于 Codex 任务回执。
+
+## 2026-07-30 模型测试密钥不得反复向用户索取
+
+问题：分支执行真实模型测试时，如果每个会话都临时等待用户复制 API 地址和密钥，会导致 shadow 对比、SN 验收和采集验收反复卡在环境问题上。
+
+规避：模型测试统一通过 `tools/run_with_local_vision_secrets.ps1` 加载本机用户目录中的密钥文件；首次配置或更新时，由总负责人使用 `tools/install_local_vision_secrets_from_clipboard.ps1` 从剪贴板写入 `C:\Users\guoru\.audit_robot\secrets\vision.env`。真实密钥和地址不得写入仓库、日志、报告或回执。分支遇到缺少 `VISION_API_BASE_URL` 或 `VISION_API_KEY` 时，先使用该入口重试，再向总负责人回执是否仍阻塞。
