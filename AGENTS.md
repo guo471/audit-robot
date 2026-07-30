@@ -10,6 +10,8 @@
 
 总负责人会话：`019faca8-a749-7692-9cbd-5327342fef1e`
 
+总负责人宪法：`docs/agent_constitutions/project_owner.md`
+
 模块负责人会话：
 
 - 本地预检优化：`019faca7-2d72-7440-a454-3a92dc83c9b4`
