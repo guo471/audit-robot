@@ -49,3 +49,9 @@
 问题：分支执行真实模型测试时，如果每个会话都临时等待用户复制 API 地址和密钥，会导致 shadow 对比、SN 验收和采集验收反复卡在环境问题上。
 
 规避：模型测试统一通过 `tools/run_with_local_vision_secrets.ps1` 加载本机用户目录中的密钥文件；首次配置或更新时，由总负责人使用 `tools/install_local_vision_secrets_from_clipboard.ps1` 从剪贴板写入 `C:\Users\guoru\.audit_robot\secrets\vision.env`。真实密钥和地址不得写入仓库、日志、报告或回执。分支遇到缺少 `VISION_API_BASE_URL` 或 `VISION_API_KEY` 时，先使用该入口重试，再向总负责人回执是否仍阻塞。
+
+## 2026-07-30 当前终端不是分支回执入口
+
+问题：总负责人检查分支进度时误用 `read_thread_terminal`，该工具只读取当前会话终端，不读取指定分支状态，会造成重复无效动作和回执延迟。
+
+规避：分支状态只使用 `wait_threads` 或 `read_thread`；`read_thread_terminal` 只能用于当前会话本地命令输出，不得用于分支任务回执、进度或状态检查。误触后必须立即停止同类工具调用，改用线程工具。

@@ -50,7 +50,7 @@
 
 ### 线程协同与回执管理
 - 分支任务收发只使用 Codex 线程工具：`send_message_to_thread` 发任务，`wait_threads` 等回执，`read_thread` 读指定线程。
-- 不得用 `navigate_to_codex_page`、shell 占位命令或 MCP resource 读取分支状态，除非用户明确要求打开界面。
+- 不得用 `navigate_to_codex_page`、`read_thread_terminal`、shell 占位命令或 MCP resource 读取分支状态，除非用户明确要求打开界面。
 - 工具入口不可见时，先用 `tool_search` 搜索目标线程工具，再调用对应工具，不得反复试错。
 - 每个已派发任务必须登记为：`等待回执`、`已回执待验收`、`已验收已汇报` 三种状态之一。
 - 派发新任务、回复用户或结束当前轮次前，必须执行“回复前门禁”：若存在任何 `等待回执` 或 `已回执待验收` 任务，先用 `wait_threads` 或 `read_thread` 检查并处理；未执行门禁不得回复用户。
