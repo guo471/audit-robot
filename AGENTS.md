@@ -18,6 +18,16 @@
 - 图片真实性优化：`019fa170-a71f-7f72-a5ea-f0263d6b423f`
 - 采集接口优化：`019fa171-dbb7-79a3-b9f5-3bda012ee3a9`
 
+分宪法读取路径：
+
+- 本地预检优化：无分宪法，按总宪法和任务单行动
+- SN 检测优化：`docs/agent_constitutions/sn_detection.md`
+- 合规检测优化：`docs/agent_constitutions/compliance_detection.md`
+- 图片真实性优化：`docs/agent_constitutions/photo_authenticity.md`
+- 采集接口优化：`docs/agent_constitutions/collection_interface.md`
+
+每个模块只能读取总宪法和自己的分宪法；不得读取、引用或推断其他模块分宪法。
+
 ## 3. 模块边界
 系统链路固定为：采集 -> 预检 -> SN -> 合规 -> 图片真实性 -> 报告。各模块只能通过主入口和明确输入输出协作。禁止跨模块直接调用、复制逻辑、私自改其他模块规则。遇到跨模块问题、业务边界问题、验收争议、误放风险或是否合入主线的不确定事项，必须停下并向总负责人汇报，不得擅自补规则。
 
