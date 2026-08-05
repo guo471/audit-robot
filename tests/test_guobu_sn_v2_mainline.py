@@ -35,7 +35,7 @@ def sn_evidence(value="ABC123"):
     return {
         "schema_version": "guobu_sn_evidence_v2",
         "sn_readable": True,
-        "screen_identity_state": "SCREEN_SN_READABLE",
+        "screen_identity_state": "SCREEN_SN_CLEAR",
         "sn_candidates": [
             {
                 "image_id": "img_003",
@@ -92,7 +92,8 @@ def test_hybrid_v2_sn_match_continues_existing_compliance_chain(monkeypatch):
             serialized = prompt + json.dumps(payload, ensure_ascii=False)
             assert "ABC123" not in serialized
             assert "system_sn" not in serialized.lower()
-            assert "RULE_PHONE" in prompt
+            assert len(prompt) <= 500
+            assert "screen_identity_state" in prompt
             return sn_evidence(), "sn-v2", 0.1, {"total_tokens": 10}, False
         if stage == "hybrid_compliance":
             return compliance_pass(), "compliance", 0.2, {"total_tokens": 20}, False

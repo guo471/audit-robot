@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tools import run_guobu_sn_v2 as runner
-from tools.guobu_sn_policy_v2 import SCHEMA_VERSION
+from tools.guobu_sn_policy_v2 import SCHEMA_VERSION, SN_LOGIC_VERSION
 from tools.run_guobu_sn_v2 import audit_task_sn_v2
 
 
@@ -44,7 +44,7 @@ def screen_evidence(value="SECRET-SN-123"):
     return {
         "schema_version": SCHEMA_VERSION,
         "sn_readable": True,
-        "screen_identity_state": "SCREEN_SN_READABLE",
+        "screen_identity_state": "SCREEN_SN_CLEAR",
         "sn_candidates": [
             {
                 "image_id": "img_003",
@@ -68,8 +68,15 @@ def screen_evidence(value="SECRET-SN-123"):
 
 def home_evidence(value="SECRET-SN-123"):
     result = screen_evidence(value)
-    result["screen_identity_state"] = "NOT_APPLICABLE"
+    result["screen_identity_state"] = "NO_SCREEN_IDENTITY"
     result["sn_candidates"][0]["source"] = "PACKAGE_LABEL"
+    return result
+
+
+def barcode_result(text, *, fmt="CODE_128", field_type=""):
+    result = {"text": text, "format": fmt}
+    if field_type:
+        result["field_type"] = field_type
     return result
 
 
@@ -97,6 +104,8 @@ def test_runner_model_request_contains_no_system_sn_or_derived_hint(tmp_path):
     assert result["row"]["manual_flag"] == "否"
     assert result["row"]["sn_match"] is True
     assert result["row"]["strategy"] == "sn_v2_sidecar"
+    assert result["row"]["sn_version"] == SN_LOGIC_VERSION
+    assert result["row"]["barcode_mode"] == "shadow"
     assert result["row"]["model_calls"] == 1
     assert result["row"]["total_tokens"] == 123
     assert result["_raw"]["model_result"]["schema_version"] == SCHEMA_VERSION
@@ -205,8 +214,8 @@ def test_runner_passes_mainline_effective_category_into_sn_v2(monkeypatch):
     )
 
     def fake_model_caller(_base, _key, _model, prompt, payload, _images, **_kwargs):
-        assert "RULE_HOME_APPLIANCE" in prompt
-        assert "RULE_PHONE" not in prompt
+        assert len(prompt) <= 500
+        assert "screen_identity_state" in prompt
         assert payload["audit_category"] == "HOME_APPLIANCE"
         return home_evidence(), "{}", 0.1, {}, False
 
@@ -220,6 +229,175 @@ def test_runner_passes_mainline_effective_category_into_sn_v2(monkeypatch):
 
     assert result["row"]["audit_category"] == "HOME_APPLIANCE"
     assert result["row"]["manual_flag"] == "否"
+
+
+def test_barcode_enforce_rescues_numeric_system_sn_after_sn_mismatch():
+    calls = []
+
+    def fake_model_caller(*_args, **_kwargs):
+        return screen_evidence("999999999999999"), "{}", 0.1, {}, False
+
+    def fake_barcode_scanner(_task, images):
+        calls.append(images)
+        return [barcode_result("123456789012345")]
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn="123456789012345"),
+        model_caller=fake_model_caller,
+        barcode_scanner=fake_barcode_scanner,
+        barcode_mode="enforce",
+    )
+
+    assert len(calls) == 1
+    assert result["row"]["manual_flag"] == "否"
+    assert result["row"]["sn_match"] is True
+    assert result["row"]["selected_source"] == "BARCODE"
+    assert result["_raw"]["barcode_result"]["match_type"] == "exact"
+
+
+def test_barcode_enforce_accepts_single_leading_s_package_prefix():
+    def fake_model_caller(*_args, **_kwargs):
+        return screen_evidence("WRONG123"), "{}", 0.1, {}, False
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn="H0QW1CDVWD"),
+        model_caller=fake_model_caller,
+        barcode_scanner=lambda _task, _images: [barcode_result("SH0QW1CDVWD")],
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_flag"] == "否"
+    assert result["row"]["observed_sn"] == "SH0QW1CDVWD"
+    assert result["_raw"]["barcode_result"]["match_type"] == "leading_s_prefix"
+
+
+def test_barcode_does_not_clean_slash_to_match_system_sn():
+    def fake_model_caller(*_args, **_kwargs):
+        return screen_evidence("WRONG123"), "{}", 0.1, {}, False
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn="69716F5ZA00395"),
+        model_caller=fake_model_caller,
+        barcode_scanner=lambda _task, _images: [barcode_result("69716/F5ZA00395")],
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_flag"] == "是"
+    assert result["row"]["manual_reason_code"] == "SN_MISMATCH"
+    assert result["_raw"]["barcode_result"]["matched"] is False
+
+
+@pytest.mark.parametrize(
+    "decoded",
+    [
+        barcode_result("123456789012345", field_type="IMEI"),
+        barcode_result("6901234567890", fmt="EAN_13"),
+        barcode_result("123456789012", fmt="UPC_A"),
+    ],
+)
+def test_barcode_rejects_imei_ean_and_upc(decoded):
+    def fake_model_caller(*_args, **_kwargs):
+        return screen_evidence("WRONG123"), "{}", 0.1, {}, False
+
+    system_sn = decoded["text"]
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn=system_sn),
+        model_caller=fake_model_caller,
+        barcode_scanner=lambda _task, _images: [decoded],
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_flag"] == "是"
+    assert result["row"]["manual_reason_code"] == "SN_MISMATCH"
+    assert result["_raw"]["barcode_result"]["matched"] is False
+
+
+def test_barcode_is_not_called_when_local_sn_passes():
+    def fail_barcode_scanner(*_args, **_kwargs):
+        raise AssertionError("barcode scanner must not run after local PASS")
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn="SECRET-SN-123"),
+        model_caller=lambda *_args, **_kwargs: (screen_evidence(), "{}", 0.1, {}, False),
+        barcode_scanner=fail_barcode_scanner,
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_flag"] == "否"
+    assert "barcode_result" not in result["_raw"]
+
+
+def test_barcode_mismatch_keeps_sn_mismatch():
+    def fake_model_caller(*_args, **_kwargs):
+        return screen_evidence("WRONG123"), "{}", 0.1, {}, False
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn="ABC123"),
+        model_caller=fake_model_caller,
+        barcode_scanner=lambda _task, _images: [barcode_result("XYZ999")],
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_flag"] == "是"
+    assert result["row"]["manual_reason_code"] == "SN_MISMATCH"
+    assert result["_raw"]["barcode_result"]["matched"] is False
+
+
+def test_barcode_shadow_records_match_without_rescuing_final_decision():
+    def fake_model_caller(*_args, **_kwargs):
+        return screen_evidence("WRONG123"), "{}", 0.1, {}, False
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn="ABC123"),
+        model_caller=fake_model_caller,
+        barcode_scanner=lambda _task, _images: [barcode_result("ABC123")],
+        barcode_mode="shadow",
+    )
+
+    assert result["row"]["manual_flag"] == "是"
+    assert result["row"]["manual_reason_code"] == "SN_MISMATCH"
+    assert result["_raw"]["barcode_result"]["matched"] is True
+    assert result["_raw"]["barcode_result"]["match_type"] == "exact"
+
+
+def test_barcode_mode_uses_default_scanner_when_no_scanner_is_injected(monkeypatch):
+    def fake_model_caller(*_args, **_kwargs):
+        return screen_evidence("WRONG123"), "{}", 0.1, {}, False
+
+    monkeypatch.setattr(runner, "_scan_activation_barcodes", lambda _task, _images: [barcode_result("ABC123")])
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        task(system_sn="ABC123"),
+        model_caller=fake_model_caller,
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_flag"] == "否"
+    assert result["row"]["selected_source"] == "BARCODE"
 
 
 def test_batch_preserves_input_order_and_records_worker_failure(tmp_path, monkeypatch):

@@ -1900,7 +1900,8 @@ def call_model(
     cache_dir: Path | None = None,
     detail: str = "auto",
     timeout_sec: float = MODEL_TIMEOUT_SEC,
-) -> tuple[dict[str, Any], str, float, dict[str, Any], bool]:
+    allow_non_object: bool = False,
+) -> tuple[Any, str, float, dict[str, Any], bool]:
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / f"{_cache_key(model, stage, prompt, payload, images)}.json"
@@ -1921,6 +1922,9 @@ def call_model(
                 encoded = base64.b64encode(path.read_bytes()).decode("ascii")
                 url = f"data:{mime};base64,{encoded}"
         if url:
+            prompt_label = str(image.get("_prompt_label") or "").strip()
+            if prompt_label:
+                content.append({"type": "text", "text": prompt_label})
             content.append({"type": "image_url", "image_url": {"url": url, "detail": image.get("_detail") or detail}})
     body = {
         "model": model,
@@ -1934,10 +1938,14 @@ def call_model(
     elapsed = time.time() - started
     content_text = response_data["choices"][0]["message"]["content"]
     parsed = json.loads(content_text)
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, dict) and not allow_non_object:
         raise ValueError("model JSON is not an object")
     usage = response_data.get("usage") or {}
-    if cache_dir is not None and _is_cacheable_model_result(stage, prompt, parsed, images):
+    if (
+        cache_dir is not None
+        and isinstance(parsed, dict)
+        and _is_cacheable_model_result(stage, prompt, parsed, images)
+    ):
         _write_json_atomically(
             cache_path,
             {
@@ -1975,7 +1983,8 @@ def call_model_with_retry(
     timeout_sec: float = MODEL_TIMEOUT_SEC,
     retry_timeout_sec: float = MODEL_RETRY_TIMEOUT_SEC,
     order_deadline_at: float | None = None,
-) -> tuple[dict[str, Any], str, float, dict[str, Any], bool]:
+    allow_non_object: bool = False,
+) -> tuple[Any, str, float, dict[str, Any], bool]:
     effective_timeout_sec = _timeout_within_order_deadline(timeout_sec, order_deadline_at)
     kwargs = {
         "stage": stage,
@@ -1984,6 +1993,8 @@ def call_model_with_retry(
     }
     if detail != "auto":
         kwargs["detail"] = detail
+    if allow_non_object:
+        kwargs["allow_non_object"] = True
     try:
         return call_model(
             base_url,

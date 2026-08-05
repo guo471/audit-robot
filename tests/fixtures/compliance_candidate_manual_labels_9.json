@@ -1,0 +1,11 @@
+[
+  {"order_id": "SYNTH-MANUAL-001", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-002", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-003", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-004", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-005", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-006", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-007", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-008", "expected_decision": "manual_review", "expected_reason_code": "UNBOXING_PHOTO_INVALID"},
+  {"order_id": "SYNTH-MANUAL-009", "expected_decision": "manual_review", "expected_reason_code": "PRODUCT_TYPE_MISMATCH"}
+]

@@ -16,119 +16,101 @@ class SnCategory(str, Enum):
 
 
 SCHEMA_VERSION = "guobu_sn_evidence_v2"
+SN_LOGIC_VERSION = "sn_v2_barcode_shadow_20260731"
+PROMPT_CHAR_LIMIT = 500
+
 SCREEN_SOURCES = {"DEVICE_SCREEN", "SCREEN"}
 PACKAGE_SOURCES = {"PACKAGE_LABEL"}
-HOME_SOURCES = {"DEVICE_BODY", "PACKAGE_LABEL"}
-IDENTITY_TYPES = {"IMEI", "IMEI1", "IMEI2", "MEID", "EID"}
+BODY_SOURCES = {"DEVICE_BODY"}
+ALL_SN_SOURCES = SCREEN_SOURCES | PACKAGE_SOURCES | BODY_SOURCES
+HOME_SOURCES = PACKAGE_SOURCES | BODY_SOURCES
+
+SCREEN_SN_CLEAR = "SCREEN_SN_CLEAR"
+SCREEN_SN_UNCLEAR = "SCREEN_SN_UNCLEAR"
+PHONE_IDENTITY_ONLY = "PHONE_IDENTITY_ONLY"
+NO_SCREEN_IDENTITY = "NO_SCREEN_IDENTITY"
+SCREEN_SN_CONFLICT = "SCREEN_SN_CONFLICT"
+LEGACY_STATE_MAP = {
+    "SCREEN_SN_READABLE": SCREEN_SN_CLEAR,
+    "SCREEN_SN_UNREADABLE": SCREEN_SN_UNCLEAR,
+    "NO_SCREEN_SN": NO_SCREEN_IDENTITY,
+    "NOT_APPLICABLE": NO_SCREEN_IDENTITY,
+}
 SCREEN_IDENTITY_STATES = {
-    SnCategory.HOME_APPLIANCE: {"NOT_APPLICABLE"},
-    SnCategory.PHONE: {
-        "SCREEN_SN_READABLE",
-        "SCREEN_SN_UNREADABLE",
-        "PHONE_IDENTITY_ONLY",
-        "NO_SCREEN_SN",
-        "SCREEN_SN_CONFLICT",
-    },
-    SnCategory.TABLET: {
-        "SCREEN_SN_READABLE",
-        "SCREEN_SN_UNREADABLE",
-        "NO_SCREEN_SN",
-        "SCREEN_SN_CONFLICT",
-    },
-    SnCategory.WATCH: {
-        "SCREEN_SN_READABLE",
-        "SCREEN_SN_UNREADABLE",
-        "NO_SCREEN_SN",
-        "SCREEN_SN_CONFLICT",
-    },
-    SnCategory.COMPUTER: {
-        "SCREEN_SN_READABLE",
-        "SCREEN_SN_UNREADABLE",
-        "NO_SCREEN_SN",
-        "SCREEN_SN_CONFLICT",
-    },
-    SnCategory.UNSUPPORTED: {"NOT_APPLICABLE", "NO_SCREEN_SN"},
+    SCREEN_SN_CLEAR,
+    SCREEN_SN_UNCLEAR,
+    PHONE_IDENTITY_ONLY,
+    NO_SCREEN_IDENTITY,
+    SCREEN_SN_CONFLICT,
 }
 
+SN_FIELD_TYPES = {"SN", "S/N", "SN码", "SERIAL", "SERIALNO", "SERIALNUMBER", "SERIAL_NO", "SERIAL_NUMBER"}
+IDENTITY_TYPES = {"IMEI", "IMEI1", "IMEI2", "1码", "2码", "MEID", "EID"}
+NON_SN_FIELD_TYPES = {
+    "IMEI",
+    "IMEI1",
+    "IMEI2",
+    "MEID",
+    "EID",
+    "MODEL",
+    "型号",
+    "产品编号",
+    "PRODUCT_CODE",
+    "BARCODE",
+    "EAN",
+}
 
-_PRIMARY_CATEGORY_FIELDS = (
-    "category_name",
-    "cate_code_name",
-    "product_type",
-    "type",
-)
-_UNSUPPORTED_DIGITAL_KEYWORDS = (
-    "相机",
-    "照相机",
-    "耳机",
-    "耳麦",
-    "camera",
-    "headphone",
-    "headset",
-    "earphone",
-    "earbud",
+_PRIMARY_CATEGORY_FIELDS = ("category_name", "cate_code_name", "product_type", "type")
+_UNSUPPORTED_DIGITAL_KEYWORDS = ("相机", "照相机", "耳机", "耳麦", "camera", "headphone", "headset", "earphone", "earbud")
+
+SN_RECOGNITION_PROMPT = (
+    "你是SN识别员，只看激活/SN照片，只输出JSON，不比对；品类由本地给。"
+    "SN标签：SN/SN码/S/N/序列号/产品序列号/Serial/包装标签S/N。"
+    "sn_candidates项：image_id,source(DEVICE_SCREEN/DEVICE_BODY/PACKAGE_LABEL),field_type,raw_text,normalized_text,readable,complete,confidence。"
+    "不合并猜改，O0/I1L/S5/B8/G6/2Z不清则readable=false。"
+    "家电铭牌/服务贴纸型号下行或二维码下方长字母数字可作PACKAGE_LABEL；型号/电话/地址/容量/普通条码不是SN。"
+    "IMEI/1码/2码/MEID/EID进identity_evidence。"
+    "screen_identity_state:SCREEN_SN_CLEAR/SCREEN_SN_UNCLEAR/PHONE_IDENTITY_ONLY/NO_SCREEN_IDENTITY/SCREEN_SN_CONFLICT。"
+    "无可信SN填SN_NOT_FOUND。输出同名JSON字段。"
 )
 
 
-COMMON_PROMPT = """你是国补审核的SN高精度证据读取员。只输出严格JSON对象。
-
-商品品类已经由本地程序确定，模型不得自行分类或修改品类。你只能执行当前提示词中唯一出现的品类规则，不得借用其他品类规则。
-只能查看“SN码采集 / 激活照片 / 序列号照片”分组，不得使用商品照片或拆封照片中的号码。
-模型只负责如实读取证据，不负责与系统SN比较，也不得推断最终是否一致。
-
-只有以下标签可绑定SN：SN、S/N、SN码、序列号、产品序列号、Serial No.、Serial Number、Serial#。
-出厂编号、主机编号、机器编号、整机编号、设备编号、型号、Model、产品编号、批次号、EAN、普通条码及无明确SN标签的数字均不得作为SN。
-
-每个SN候选必须分别输出image_id、source、field_type、label_text、raw_text、raw_context、normalized_text、label_binding、readable、complete、confidence、visual_ambiguity_notes。
-source只能是DEVICE_SCREEN、DEVICE_BODY或PACKAGE_LABEL。label_binding只能是EXPLICIT、AMBIGUOUS或NONE。
-raw_text只填写图片中SN标签绑定的号码原文，不得包含标签文字。normalized_text仅供诊断，不得增加、删除或替换任何字母数字。
-必须放大后逐字读取。O/0/Q/D、I/1/L、S/5、E/B/8、Y/V、6/G、J/U/L、W/V/N无法确定时，不得猜测或生成多个替代号码；应保留证据项并设置readable=false或complete=false，在visual_ambiguity_notes中记录不确定位置。
-visual_ambiguity_notes必须是JSON字符串数组；没有歧义时必须且只能输出[]，不得填写“无”“none”或其他文字。
-
-sn_readable=true仅当sn_candidates中至少存在一个标签明确、完整且可读的SN证据；否则必须为false。它不表示该SN与系统SN一致。
-confidence沿用现有输出方式，本提示词不新增评分规则。
-"""
+def canonical_sn(value: Any) -> str:
+    return re.sub(r"[^0-9A-Z/]", "", str(value or "").upper())
 
 
-CATEGORY_PROMPTS = {
-    SnCategory.HOME_APPLIANCE: """RULE_HOME_APPLIANCE
-当前SN品类为HOME_APPLIANCE。只执行本段规则。
-家电不要求亮屏。读取机身铭牌和包装标签上明确绑定SN标签的全部候选。屏幕号码不作为家电SN通过证据。
-多个明确SN必须全部如实输出，不得自行选择最终匹配项。
-identity_evidence必须输出空数组，screen_identity_state必须输出NOT_APPLICABLE。
-""",
-    SnCategory.PHONE: """RULE_PHONE
-当前SN品类为PHONE。只执行本段规则。
-读取手机屏幕、包装和机身中的全部明确SN证据，并单独记录屏幕中的IMEI、IMEI1、IMEI2、MEID、EID身份字段。
-identity_evidence只记录上述明确标注且完整可读的身份字段；它们永远不是SN候选。
-每个identity_evidence项必须输出image_id、source、field_type、label_text、raw_text、label_binding、readable、complete；source必须是DEVICE_SCREEN，label_binding必须是EXPLICIT，label_text必须与field_type明确对应。
-IMEI、IMEI1、IMEI2必须是15位数字；MEID必须是14位十六进制字符或18位数字；EID必须是32位数字。
-screen_identity_state含义：SCREEN_SN_READABLE表示存在一个唯一的清晰完整屏幕SN；SCREEN_SN_UNREADABLE表示屏幕SN标签存在但号码模糊、遮挡或不完整，且没有可读屏幕SN；PHONE_IDENTITY_ONLY表示没有屏幕SN证据，但存在明确标注且完整可读的手机身份字段；NO_SCREEN_SN表示屏幕既无SN证据也无有效手机身份字段；SCREEN_SN_CONFLICT表示存在两个或以上不同的清晰完整屏幕SN。
-清晰完整屏幕SN是最高优先证据。屏幕没有SN、屏幕SN不可读或屏幕只有身份字段时，仍须如实读取包装SN，最终是否允许使用包装由本地程序决定。
-""",
-    SnCategory.TABLET: """RULE_TABLET
-当前SN品类为TABLET。只执行本段规则。
-读取平板屏幕、包装和机身中的全部明确SN证据。屏幕中的IMEI、MEID、EID只能记录为诊断身份字段，不能伪装为SN。
-identity_evidence只记录上述身份字段。
-每个identity_evidence项必须输出image_id、source、field_type、label_text、raw_text、label_binding、readable、complete；source必须是DEVICE_SCREEN，label_binding必须是EXPLICIT，label_text必须与field_type明确对应。
-清晰完整屏幕SN是最高优先证据。屏幕SN字段存在但不可读时，仍须如实读取包装SN，最终是否允许使用包装由本地程序决定。
-""",
-    SnCategory.WATCH: """RULE_WATCH
-当前SN品类为WATCH，智能手表和智能手环均执行本段规则。
-读取设备屏幕、包装和机身中的全部明确SN证据。清晰完整屏幕SN是最高优先证据。
-屏幕SN字段存在但不可读时，仍须如实读取包装SN，最终是否允许使用包装由本地程序决定。
-identity_evidence必须输出空数组。
-""",
-    SnCategory.COMPUTER: """RULE_COMPUTER
-当前SN品类为COMPUTER。只执行本段规则。
-读取电脑BIOS、系统信息页或设备信息页中的屏幕SN，并如实记录包装和机身候选。
-只有清晰完整的屏幕或系统页面SN可以成为权威SN；包装和机身候选只作诊断，最终裁决由本地程序完成。
-identity_evidence必须输出空数组。
-""",
-    SnCategory.UNSUPPORTED: """RULE_UNSUPPORTED
-当前商品不属于已配置的SN自动审核品类。不得套用任何其他品类规则，只输出当前照片中的原始证据。
-""",
-}
+_SN_LABEL_PREFIX_RE = re.compile(
+    r"^\s*(?:LENOVO\s*S\s*/\s*N|LENOVO\s*SN|\u8054\u60f3\s*SN|S\s*/\s*N|SN(?:\s*\u7801)?|SERIAL(?:\s*(?:NO\.?|NUMBER))?|\u5e8f\u5217\u53f7|\u4ea7\u54c1\u5e8f\u5217\u53f7)\s*[:\uff1a#._/\-\s]+\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_sn_label_prefix(value: Any) -> str:
+    text = str(value or "").strip()
+    previous = None
+    while previous != text:
+        previous = text
+        text = _SN_LABEL_PREFIX_RE.sub("", text, count=1).strip()
+    return text
+
+
+def canonical_candidate_sn(candidate: dict[str, Any]) -> str:
+    return canonical_sn(strip_sn_label_prefix(candidate.get("raw_text")))
+
+
+SN_RECOGNITION_PROMPT = (
+    "\u4f60\u662fSN\u8bc6\u522b\u5458\uff0c\u53ea\u770b\u6fc0\u6d3b/SN\u7167\u7247\uff0c\u53ea\u8f93\u51faJSON\uff0c\u4e0d\u6bd4\u5bf9\uff1b\u54c1\u7c7b\u672c\u5730\u7ed9\u3002"
+    "\u6807\u7b7e\u53ea\u5b9a\u4f4d\uff0craw/normalized\u53ea\u5199\u7eafSN\uff0c\u7981\u5e26SN:/S/N:/Serial No:/\u5e8f\u5217\u53f7:\u3002"
+    "sn_candidates\u9879\uff1aimage_id,source(DEVICE_SCREEN/DEVICE_BODY/PACKAGE_LABEL),field_type,raw_text,normalized_text,readable,complete,confidence\u3002"
+    "\u5b8c\u6574\u8fde\u7eedSN\u5fc5\u586b\u5019\u9009\uff1b\u4e0d\u5408\u5e76\u4e0d\u731c\uff0cO0/I1L/S5/B8/G6/2Z\u4e0d\u6e05\u5219readable=false\u3002"
+    "\u5bb6\u7535\u94ed\u724c/\u670d\u52a1\u8d34\u7eb8\u578b\u53f7\u4e0b\u884c\u6216\u7801\u4e0b\u957f\u5b57\u6bcd\u6570\u5b57\u53ef\u4f5cPACKAGE_LABEL\uff1b\u578b\u53f7/\u7535\u8bdd/\u5730\u5740/\u5bb9\u91cf\u975eSN\u3002"
+    "IMEI/1\u7801/2\u7801/MEID/EID\u8fdbidentity_evidence\u3002screen_identity_state:SCREEN_SN_CLEAR/SCREEN_SN_UNCLEAR/PHONE_IDENTITY_ONLY/NO_SCREEN_IDENTITY/SCREEN_SN_CONFLICT\u3002"
+    "\u65e0SN\u586bSN_NOT_FOUND\u3002"
+)
+
+
+def _normalize_token(value: Any) -> str:
+    return re.sub(r"[\s./:#_\-]+", "", str(value or "").strip().upper())
 
 
 def _classify_ordinary_3c_subtype(fields: dict[str, Any]) -> SnCategory:
@@ -146,30 +128,14 @@ def _classify_ordinary_3c_subtype(fields: dict[str, Any]) -> SnCategory:
         return SnCategory.UNSUPPORTED
     if any(keyword in text for keyword in ("平板电脑", "平板", "tablet")):
         return SnCategory.TABLET
-    if any(
-        keyword in text
-        for keyword in (
-            "智能手表手环",
-            "智能手表",
-            "智能手环",
-            "手表",
-            "手环",
-            "smartwatch",
-            "watch",
-            "wristband",
-        )
-    ):
+    if any(keyword in text for keyword in ("智能手表手环", "智能手表", "智能手环", "手表", "手环", "smartwatch", "watch", "wristband")):
         return SnCategory.WATCH
     if any(keyword in text for keyword in ("手机", "智能手机", "smartphone", "phone")):
         return SnCategory.PHONE
     return SnCategory.UNSUPPORTED
 
 
-def classify_sn_category(
-    fields: dict[str, Any] | None,
-    *,
-    effective_category: str | None = None,
-) -> SnCategory:
+def classify_sn_category(fields: dict[str, Any] | None, *, effective_category: str | None = None) -> SnCategory:
     values = fields or {}
     mainline_category = str(effective_category or "").strip().lower()
     if mainline_category == "home_appliance":
@@ -188,20 +154,8 @@ def _coerce_category(value: SnCategory | str) -> SnCategory:
 
 
 def build_sn_prompt(category: SnCategory | str) -> str:
-    selected = _coerce_category(category)
-    allowed_states = "、".join(sorted(SCREEN_IDENTITY_STATES[selected]))
-    example_state = "NOT_APPLICABLE" if selected in {SnCategory.HOME_APPLIANCE, SnCategory.UNSUPPORTED} else "NO_SCREEN_SN"
-    schema_prompt = f"""screen_identity_state只能从以下值中选择：{allowed_states}。
-以下是合法JSON结构示例；字段值必须根据图片证据填写，不得机械照抄示例：
-{{
-  "schema_version": "{SCHEMA_VERSION}",
-  "sn_readable": false,
-  "screen_identity_state": "{example_state}",
-  "sn_candidates": [],
-  "identity_evidence": [],
-  "confidence": 0.0
-}}"""
-    return "\n\n".join((COMMON_PROMPT.strip(), CATEGORY_PROMPTS[selected].strip(), schema_prompt.strip()))
+    _coerce_category(category)
+    return SN_RECOGNITION_PROMPT
 
 
 def build_model_payload(
@@ -228,24 +182,27 @@ def build_model_payload(
     }
 
 
-_LABEL_PATTERNS = (
-    re.compile(r"^\s*S\s*/\s*N\s*[:：]?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*SN\s*(?:码)?\s*[:：]?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*(?:产品)?序列号\s*[:：]?\s*$", re.IGNORECASE),
-    re.compile(r"^\s*SERIAL\s*(?:NO\.?|NUMBER|#)\s*[:：]?\s*$", re.IGNORECASE),
-)
-
-
-def canonical_sn(value: Any) -> str:
-    return re.sub(r"[^0-9A-Z]", "", str(value or "").upper())
-
-
-def _approved_label(value: Any) -> bool:
-    return any(pattern.fullmatch(str(value or "")) for pattern in _LABEL_PATTERNS)
-
-
 def _is_true(value: Any) -> bool:
     return value is True or str(value).strip().lower() in {"true", "1", "yes"}
+
+
+def _candidate_source(candidate: dict[str, Any]) -> str:
+    source = str(candidate.get("source") or "").strip().upper()
+    return "DEVICE_SCREEN" if source == "SCREEN" else source
+
+
+def _field_type(candidate: dict[str, Any]) -> str:
+    raw = str(candidate.get("field_type") or "").strip()
+    compact = _normalize_token(raw)
+    if compact in {"LENOVOSN", "LENOVOSN", "联想SN"}:
+        return "SN"
+    if compact in {"SERIALNO", "SERIALNUMBER", "SERIAL"}:
+        return compact
+    if raw in {"\u5e8f\u5217\u53f7", "\u4ea7\u54c1\u5e8f\u5217\u53f7", "\u0053\u004e\u7801"}:
+        return "SN"
+    if raw in {"SN码", "序列号", "产品序列号"}:
+        return "SN"
+    return compact
 
 
 def _ambiguity_present(candidate: dict[str, Any]) -> bool:
@@ -256,29 +213,27 @@ def _ambiguity_present(candidate: dict[str, Any]) -> bool:
 
 
 def _explicit_candidate(candidate: Any) -> bool:
-    return (
-        isinstance(candidate, dict)
-        and str(candidate.get("field_type") or "").strip().upper() in {"SN", "SERIAL"}
-        and str(candidate.get("label_binding") or "").strip().upper() == "EXPLICIT"
-        and _approved_label(candidate.get("label_text"))
-        and str(candidate.get("source") or "").strip().upper()
-        in {"DEVICE_SCREEN", "SCREEN", "DEVICE_BODY", "PACKAGE_LABEL"}
-    )
+    if not isinstance(candidate, dict):
+        return False
+    field_type = _field_type(candidate)
+    if field_type in NON_SN_FIELD_TYPES or field_type not in SN_FIELD_TYPES:
+        return False
+    if _candidate_source(candidate) not in ALL_SN_SOURCES:
+        return False
+    return bool(canonical_candidate_sn(candidate))
 
 
 def _usable_candidate(candidate: Any) -> bool:
-    return (
-        _explicit_candidate(candidate)
-        and _is_true(candidate.get("readable"))
-        and _is_true(candidate.get("complete"))
-        and not _ambiguity_present(candidate)
-        and bool(canonical_sn(candidate.get("raw_text")))
-    )
-
-
-def _candidate_source(candidate: dict[str, Any]) -> str:
-    source = str(candidate.get("source") or "").strip().upper()
-    return "DEVICE_SCREEN" if source == "SCREEN" else source
+    if not _explicit_candidate(candidate):
+        return False
+    if not _is_true(candidate.get("readable")):
+        return False
+    if "complete" in candidate and not _is_true(candidate.get("complete")):
+        return False
+    confidence = candidate.get("confidence", 1)
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or confidence <= 0:
+        return False
+    return not _ambiguity_present(candidate)
 
 
 def _candidates(evidence: dict[str, Any], sources: set[str], *, usable: bool) -> list[dict[str, Any]]:
@@ -290,35 +245,116 @@ def _candidates(evidence: dict[str, Any], sources: set[str], *, usable: bool) ->
     ]
 
 
-def _valid_identities(evidence: dict[str, Any]) -> list[dict[str, Any]]:
-    valid: list[dict[str, Any]] = []
-    for item in evidence.get("identity_evidence", []):
+def _identity_type(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if raw in {"1码", "1CODE", "CODE1"}:
+        return "IMEI1"
+    if raw in {"2码", "2CODE", "CODE2"}:
+        return "IMEI2"
+    return re.sub(r"[\s_\-]+", "", raw)
+
+
+def _identity_entries(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = evidence.get("identity_evidence")
+    if raw_items is None or raw_items == "":
+        return []
+    if isinstance(raw_items, dict):
+        raw_items = [
+            {"source": "DEVICE_SCREEN", "field_type": key, "raw_text": value, "readable": True, "complete": True}
+            for key, value in raw_items.items()
+        ]
+    if not isinstance(raw_items, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in raw_items:
         if not isinstance(item, dict):
             continue
-        field_type = re.sub(r"[ _]", "", str(item.get("field_type") or "").upper())
-        label_text = re.sub(r"[^0-9A-Z]", "", str(item.get("label_text") or "").upper())
-        raw_text = item.get("raw_text")
-        canonical_value = canonical_sn(raw_text) if isinstance(raw_text, str) else ""
-        value_is_complete = (
-            bool(re.fullmatch(r"[0-9]{15}", canonical_value))
-            if field_type in {"IMEI", "IMEI1", "IMEI2"}
-            else bool(re.fullmatch(r"(?:[0-9A-F]{14}|[0-9]{18})", canonical_value))
-            if field_type == "MEID"
-            else bool(re.fullmatch(r"[0-9]{32}", canonical_value))
-            if field_type == "EID"
-            else False
-        )
+        mapped = dict(item)
+        if "field_type" not in mapped and "type" in mapped:
+            mapped["field_type"] = mapped.get("type")
+        if "raw_text" not in mapped and "value" in mapped:
+            mapped["raw_text"] = mapped.get("value")
+        mapped.setdefault("source", "DEVICE_SCREEN")
+        mapped.setdefault("readable", True)
+        mapped.setdefault("complete", True)
+        entries.append(mapped)
+    for item in evidence.get("sn_candidates", []):
+        if not isinstance(item, dict):
+            continue
+        if _identity_type(item.get("field_type")) in IDENTITY_TYPES:
+            entries.append(dict(item))
+    return entries
+
+
+def _sn_candidates_from_identity_evidence(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    rescued: list[dict[str, Any]] = []
+    for item in _identity_entries(evidence):
+        if not isinstance(item, dict):
+            continue
+        if _identity_type(item.get("field_type")) in IDENTITY_TYPES:
+            continue
+        candidate = dict(item)
+        candidate.setdefault("source", "DEVICE_SCREEN")
+        source = _candidate_source(candidate)
+        if source not in SCREEN_SOURCES | PACKAGE_SOURCES:
+            continue
+        if _field_type(candidate) not in SN_FIELD_TYPES:
+            continue
+        candidate.setdefault("readable", True)
+        candidate.setdefault("complete", True)
+        candidate.setdefault("confidence", 1.0)
+        rescued.append(candidate)
+    return rescued
+
+
+def _clean_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(evidence)
+    raw_candidates = evidence.get("sn_candidates") or []
+    cleaned["sn_candidates"] = list(raw_candidates) + _sn_candidates_from_identity_evidence(evidence)
+    return cleaned
+
+
+def _valid_identities(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    valid: list[dict[str, Any]] = []
+    for item in _identity_entries(evidence):
+        field_type = _identity_type(item.get("field_type"))
+        canonical_value = canonical_sn(item.get("raw_text"))
+        if field_type in {"IMEI", "IMEI1", "IMEI2"}:
+            value_is_complete = bool(re.fullmatch(r"[0-9]{15}", canonical_value))
+        elif field_type == "MEID":
+            value_is_complete = bool(re.fullmatch(r"(?:[0-9A-F]{14}|[0-9]{18})", canonical_value))
+        elif field_type == "EID":
+            value_is_complete = bool(re.fullmatch(r"[0-9]{32}", canonical_value))
+        else:
+            value_is_complete = False
         if (
-            field_type in IDENTITY_TYPES
-            and label_text == field_type
-            and str(item.get("source") or "").strip().upper() in SCREEN_SOURCES
-            and str(item.get("label_binding") or "").strip().upper() == "EXPLICIT"
+            field_type in {"IMEI", "IMEI1", "IMEI2", "MEID", "EID"}
+            and _candidate_source(item) == "DEVICE_SCREEN"
             and _is_true(item.get("readable"))
-            and _is_true(item.get("complete"))
+            and ("complete" not in item or _is_true(item.get("complete")))
             and value_is_complete
         ):
             valid.append(item)
     return valid
+
+
+def _screen_state(value: Any) -> str:
+    state = str(value or "").strip().upper()
+    return LEGACY_STATE_MAP.get(state, state)
+
+
+def _derived_screen_state(evidence: dict[str, Any], category: SnCategory) -> str:
+    screen_usable = _candidates(evidence, {"DEVICE_SCREEN"}, usable=True)
+    screen_values = {canonical_candidate_sn(item) for item in screen_usable}
+    if len(screen_values) >= 2:
+        return SCREEN_SN_CONFLICT
+    if screen_values:
+        return SCREEN_SN_CLEAR
+    if _candidates(evidence, {"DEVICE_SCREEN"}, usable=False):
+        return SCREEN_SN_UNCLEAR
+    if category is SnCategory.PHONE and _valid_identities(evidence):
+        return PHONE_IDENTITY_ONLY
+    return NO_SCREEN_IDENTITY
 
 
 def _base_decision(fields: dict[str, Any], category: SnCategory) -> dict[str, Any]:
@@ -336,19 +372,18 @@ def _base_decision(fields: dict[str, Any], category: SnCategory) -> dict[str, An
     }
 
 
-def _manual(
-    fields: dict[str, Any],
-    category: SnCategory,
-    code: str,
-    reason: str,
-    candidate: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _is_tv_order(fields: dict[str, Any]) -> bool:
+    text = " ".join(str(fields.get(key) or "") for key in ("product_type", "cate_code_name", "category_name", "goods_name"))
+    return "电视" in text or "TV" in text.upper()
+
+
+def _manual(fields: dict[str, Any], category: SnCategory, code: str, reason: str, candidate: dict[str, Any] | None = None) -> dict[str, Any]:
     decision = _base_decision(fields, category)
     decision["manual_reason_code"] = code
     decision["manual_reason"] = reason
     if candidate:
-        decision["observed_sn"] = str(candidate.get("raw_text") or "")
-        decision["normalized_observed_sn"] = canonical_sn(candidate.get("raw_text"))
+        decision["observed_sn"] = strip_sn_label_prefix(candidate.get("raw_text"))
+        decision["normalized_observed_sn"] = canonical_candidate_sn(candidate)
         decision["selected_source"] = _candidate_source(candidate)
     return decision
 
@@ -360,8 +395,8 @@ def _pass(fields: dict[str, Any], category: SnCategory, candidate: dict[str, Any
             "manual_required": False,
             "manual_reason_code": "",
             "manual_reason": "",
-            "observed_sn": str(candidate.get("raw_text") or ""),
-            "normalized_observed_sn": canonical_sn(candidate.get("raw_text")),
+            "observed_sn": strip_sn_label_prefix(candidate.get("raw_text")),
+            "normalized_observed_sn": canonical_candidate_sn(candidate),
             "selected_source": _candidate_source(candidate),
             "sn_match": True,
         }
@@ -369,113 +404,131 @@ def _pass(fields: dict[str, Any], category: SnCategory, candidate: dict[str, Any
     return decision
 
 
+def _has_same_priority_conflict(candidates: list[dict[str, Any]]) -> bool:
+    return len({canonical_candidate_sn(candidate) for candidate in candidates}) >= 2
+
+
+def _leading_s_exception_applies(fields: dict[str, Any], candidate: dict[str, Any], all_usable: list[dict[str, Any]]) -> bool:
+    system = canonical_sn(fields.get("system_sn"))
+    observed = canonical_candidate_sn(candidate)
+    if _candidate_source(candidate) != "DEVICE_SCREEN":
+        return False
+    if not system.startswith("S") or observed != system[1:] or not observed:
+        return False
+    for other in all_usable:
+        if other is candidate:
+            continue
+        value = canonical_candidate_sn(other)
+        if value not in {system, observed}:
+            return False
+    return True
+
+
+def _package_prefix_rescue_candidate(
+    fields: dict[str, Any],
+    category: SnCategory,
+    candidate: dict[str, Any],
+    all_usable: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if category not in {SnCategory.TABLET, SnCategory.WATCH, SnCategory.COMPUTER}:
+        return None
+    if _candidate_source(candidate) != "DEVICE_SCREEN":
+        return None
+    system = canonical_sn(fields.get("system_sn"))
+    observed = canonical_candidate_sn(candidate)
+    missing = len(system) - len(observed)
+    if not observed or observed == system or not system.startswith(observed):
+        return None
+    if missing <= 0 or missing > 4 or len(observed) < 8:
+        return None
+    rescue = [
+        item
+        for item in all_usable
+        if _candidate_source(item) in PACKAGE_SOURCES and canonical_candidate_sn(item) == system
+    ]
+    if len(rescue) != 1:
+        return None
+    for other in all_usable:
+        if other is candidate or other is rescue[0]:
+            continue
+        value = canonical_candidate_sn(other)
+        if value not in {observed, system}:
+            return None
+    return rescue[0]
+
+
 def _compare_candidates(
     fields: dict[str, Any],
     category: SnCategory,
     candidates: list[dict[str, Any]],
+    *,
+    all_usable: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     system = canonical_sn(fields.get("system_sn"))
-    matched = next(
-        (candidate for candidate in candidates if canonical_sn(candidate.get("raw_text")) == system),
-        None,
-    )
-    if matched is not None:
-        return _pass(fields, category, matched)
-    first = candidates[0]
-    observed = str(first.get("raw_text") or "")
+    if not candidates:
+        return _manual(fields, category, "SN_NOT_FOUND", "未读取到有效SN")
+    if _has_same_priority_conflict(candidates):
+        return _manual(fields, category, "MODEL_UNCERTAIN", "同优先级SN候选冲突", candidates[0])
+    candidate = candidates[0]
+    observed = canonical_candidate_sn(candidate)
+    if observed == system:
+        return _pass(fields, category, candidate)
+    if _leading_s_exception_applies(fields, candidate, all_usable or candidates):
+        return _pass(fields, category, candidate)
+    rescue = _package_prefix_rescue_candidate(fields, category, candidate, all_usable or candidates)
+    if rescue is not None:
+        return _pass(fields, category, rescue)
     return _manual(
         fields,
         category,
         "SN_MISMATCH",
-        f"系统SN与照片SN不一致（系统：{fields.get('system_sn') or ''}，照片：{observed}）",
-        first,
+        f"系统SN与照片SN不一致（系统：{fields.get('system_sn') or ''}，照片：{candidate.get('raw_text') or ''}）",
+        candidate,
     )
 
 
-def _schema_error(
-    evidence: Any,
-    category: SnCategory,
-    allowed_image_ids: Iterable[str] | None = None,
-) -> str:
+def _schema_error(evidence: Any, category: SnCategory, allowed_image_ids: Iterable[str] | None = None) -> str:
     if not isinstance(evidence, dict):
         return "模型SN证据不是JSON对象"
-    if evidence.get("schema_version") != SCHEMA_VERSION:
+    if evidence.get("schema_version") not in {None, "", SCHEMA_VERSION}:
         return "模型SN证据版本不正确"
-    if not isinstance(evidence.get("sn_readable"), bool):
-        return "模型SN证据缺少sn_readable"
-    if evidence.get("screen_identity_state") not in SCREEN_IDENTITY_STATES[category]:
+    if _screen_state(evidence.get("screen_identity_state")) not in SCREEN_IDENTITY_STATES:
         return "模型SN证据的屏幕状态无效"
     if not isinstance(evidence.get("sn_candidates"), list):
         return "模型SN候选结构无效"
-    if not isinstance(evidence.get("identity_evidence"), list):
-        return "模型身份字段结构无效"
-    candidate_string_fields = {
-        "image_id",
-        "source",
-        "field_type",
-        "label_text",
-        "raw_text",
-        "raw_context",
-        "normalized_text",
-        "label_binding",
-    }
-    for candidate in evidence.get("sn_candidates", []):
-        if not isinstance(candidate, dict):
-            return "模型SN候选字段结构无效"
-        if any(not isinstance(candidate.get(field), str) for field in candidate_string_fields):
-            return "模型SN候选字段结构无效"
-        if not isinstance(candidate.get("readable"), bool) or not isinstance(candidate.get("complete"), bool):
-            return "模型SN候选字段结构无效"
-        notes = candidate.get("visual_ambiguity_notes")
-        if not isinstance(notes, list) or any(not isinstance(note, str) for note in notes):
-            return "模型SN候选字段结构无效"
-        confidence = candidate.get("confidence")
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            return "模型SN候选字段结构无效"
-    identity_string_fields = {
-        "image_id",
-        "source",
-        "field_type",
-        "label_text",
-        "raw_text",
-        "label_binding",
-    }
-    for identity in evidence.get("identity_evidence", []):
-        if not isinstance(identity, dict):
-            return "模型身份字段结构无效"
-        if any(not isinstance(identity.get(field), str) for field in identity_string_fields):
-            return "模型身份字段结构无效"
-        if not isinstance(identity.get("readable"), bool) or not isinstance(identity.get("complete"), bool):
-            return "模型身份字段结构无效"
-    if allowed_image_ids is not None:
-        allowed = {str(image_id) for image_id in allowed_image_ids if str(image_id)}
-        for key in ("sn_candidates", "identity_evidence"):
-            for item in evidence.get(key, []):
-                if not isinstance(item, dict):
-                    continue
+    confidence = evidence.get("confidence", 1)
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        return "模型SN证据置信度无效"
+
+    allowed = {str(image_id) for image_id in allowed_image_ids or [] if str(image_id)}
+    for key in ("sn_candidates",):
+        for item in evidence.get(key, []):
+            if not isinstance(item, dict):
+                return "模型SN证据字段结构无效"
+            if "source" not in item or "field_type" not in item or "raw_text" not in item or "readable" not in item:
+                return "模型SN证据字段结构无效"
+            if not isinstance(item.get("source"), str) or not isinstance(item.get("field_type"), str) or not isinstance(item.get("raw_text"), str):
+                return "模型SN证据字段结构无效"
+            if not isinstance(item.get("readable"), bool):
+                return "模型SN证据字段结构无效"
+            if "complete" in item and not isinstance(item.get("complete"), bool):
+                return "模型SN证据字段结构无效"
+            if "confidence" in item and (isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), (int, float))):
+                return "模型SN证据字段结构无效"
+            notes = item.get("visual_ambiguity_notes", [])
+            if not isinstance(notes, list) or any(not isinstance(note, str) for note in notes):
+                return "模型SN证据字段结构无效"
+            if allowed:
                 image_id = str(item.get("image_id") or "")
                 if not image_id or image_id not in allowed:
                     return "模型SN证据引用了非本单激活照片"
-    expected_sn_readable = any(_usable_candidate(item) for item in evidence.get("sn_candidates", []))
-    if evidence.get("sn_readable") is not expected_sn_readable:
-        return "模型SN可读状态与候选证据不一致"
-    if category is SnCategory.HOME_APPLIANCE:
-        expected_screen_state = "NOT_APPLICABLE"
-    else:
-        readable_screen = _candidates(evidence, {"DEVICE_SCREEN"}, usable=True)
-        readable_values = {canonical_sn(item.get("raw_text")) for item in readable_screen}
-        if len(readable_values) >= 2:
-            expected_screen_state = "SCREEN_SN_CONFLICT"
-        elif readable_values:
-            expected_screen_state = "SCREEN_SN_READABLE"
-        elif _candidates(evidence, {"DEVICE_SCREEN"}, usable=False):
-            expected_screen_state = "SCREEN_SN_UNREADABLE"
-        elif category is SnCategory.PHONE and _valid_identities(evidence):
-            expected_screen_state = "PHONE_IDENTITY_ONLY"
-        else:
-            expected_screen_state = "NO_SCREEN_SN"
-    if evidence.get("screen_identity_state") != expected_screen_state:
-        return "模型屏幕状态与候选证据不一致"
+
+    for item in _identity_entries(evidence):
+        if allowed:
+            image_id = str(item.get("image_id") or "")
+            if image_id and image_id not in allowed:
+                return "模型SN证据引用了非本单激活照片"
+
     return ""
 
 
@@ -497,46 +550,61 @@ def decide_sn(
     if schema_error:
         return _manual(values, category, "MODEL_UNCERTAIN", schema_error)
 
+    evidence = _clean_evidence(evidence)
+    model_state = _screen_state(evidence.get("screen_identity_state"))
+    state = _derived_screen_state(evidence, category)
+    all_usable = _candidates(evidence, ALL_SN_SOURCES, usable=True)
+
+    if state == SCREEN_SN_CONFLICT:
+        return _manual(values, category, "MODEL_UNCERTAIN", "屏幕出现多个不同SN")
+
     if category is SnCategory.HOME_APPLIANCE:
-        usable = _candidates(evidence, HOME_SOURCES, usable=True)
+        home_sources = set(HOME_SOURCES)
+        if _is_tv_order(values):
+            home_sources |= {"DEVICE_SCREEN"}
+        usable = _candidates(evidence, home_sources, usable=True)
         if usable:
-            return _compare_candidates(values, category, usable)
-        if _candidates(evidence, HOME_SOURCES, usable=False):
-            return _manual(values, category, "MODEL_UNCERTAIN", "SN证据存在但无法完整读取")
-        return _manual(values, category, "SN_NOT_FOUND", "未读取到明确标注的有效SN")
-
-    screen = _candidates(evidence, {"DEVICE_SCREEN"}, usable=True)
-    screen_values = {canonical_sn(item.get("raw_text")) for item in screen}
-    if len(screen_values) >= 2:
-        return _manual(values, category, "MODEL_UNCERTAIN", "检测到多个不同的清晰屏幕SN")
-    if screen:
-        return _compare_candidates(values, category, [screen[0]])
-
-    screen_evidence = bool(_candidates(evidence, {"DEVICE_SCREEN"}, usable=False))
-    package = _candidates(evidence, PACKAGE_SOURCES, usable=True)
-
-    if category is SnCategory.PHONE:
-        fallback_allowed = screen_evidence or bool(_valid_identities(evidence))
-        if fallback_allowed and package:
-            return _compare_candidates(values, category, package)
-        if screen_evidence:
-            return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN证据存在但无法完整读取")
+            return _compare_candidates(values, category, usable, all_usable=all_usable)
+        if _candidates(evidence, home_sources, usable=False):
+            return _manual(values, category, "MODEL_UNCERTAIN", "SN证据存在但不完整或不清楚")
         return _manual(values, category, "SN_NOT_FOUND", "未读取到有效SN")
 
-    if category in {SnCategory.TABLET, SnCategory.WATCH}:
-        if screen_evidence and package:
-            return _compare_candidates(values, category, package)
-        if screen_evidence:
-            return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN证据存在但无法完整读取")
-        return _manual(values, category, "SN_NOT_FOUND", "未找到该品类要求的有效屏幕SN")
+    screen = _candidates(evidence, {"DEVICE_SCREEN"}, usable=True)
+    if state == SCREEN_SN_CLEAR:
+        if not screen:
+            return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN状态与候选不一致")
+        return _compare_candidates(values, category, screen, all_usable=all_usable)
 
-    if screen_evidence:
-        return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN证据存在但无法完整读取")
-    return _manual(values, category, "SN_NOT_FOUND", "未找到该品类要求的有效屏幕SN")
+    package = _candidates(evidence, PACKAGE_SOURCES, usable=True)
+    explicit_screen = _candidates(evidence, {"DEVICE_SCREEN"}, usable=False)
+
+    if (
+        category is SnCategory.PHONE
+        and package
+        and not screen
+        and model_state in {SCREEN_SN_CLEAR, SCREEN_SN_UNCLEAR, PHONE_IDENTITY_ONLY}
+    ):
+        return _compare_candidates(values, category, package, all_usable=all_usable)
+
+    if category is SnCategory.PHONE and (state == PHONE_IDENTITY_ONLY or model_state == PHONE_IDENTITY_ONLY):
+        if package:
+            return _compare_candidates(values, category, package, all_usable=all_usable)
+        return _manual(values, category, "SN_NOT_FOUND", "手机屏幕只有身份字段，未读取到包装SN")
+
+    if state == SCREEN_SN_UNCLEAR:
+        if package:
+            return _compare_candidates(values, category, package, all_usable=all_usable)
+        if explicit_screen:
+            return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN证据存在但不完整或不清楚", explicit_screen[0])
+        return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN状态与候选不一致")
+
+    return _manual(values, category, "SN_NOT_FOUND", "未读取到允许自动比对的有效SN")
 
 
 __all__ = [
+    "PROMPT_CHAR_LIMIT",
     "SCHEMA_VERSION",
+    "SN_LOGIC_VERSION",
     "SnCategory",
     "build_model_payload",
     "build_sn_prompt",

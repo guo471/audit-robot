@@ -1,0 +1,12 @@
+[
+  {"order_id": "SYNTH-PASS-001", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-002", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-003", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-004", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-005", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-006", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-007", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-008", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-009", "expected_decision": "pass"},
+  {"order_id": "SYNTH-PASS-010", "expected_decision": "pass"}
+]
