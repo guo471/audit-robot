@@ -2,6 +2,7 @@
 import hashlib
 import http.server
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -25,6 +26,7 @@ from tools.run_guobu_model_audit_v2 import (
 @pytest.fixture(autouse=True)
 def _keep_legacy_sn_tests_on_v1(monkeypatch):
     monkeypatch.setenv("SN_POLICY_VERSION", "v1")
+    monkeypatch.setenv("COMPLIANCE_RULESET", "legacy")
 
 
 def _auth_observation(image_id):
@@ -4538,6 +4540,7 @@ def test_photo_authenticity_image_results_are_serialized_deterministically():
 
 def test_photo_authenticity_cli_defaults_enforce_and_allows_explicit_off_before_runtime(monkeypatch):
     monkeypatch.delenv("PHOTO_AUTHENTICITY_MODE", raising=False)
+    monkeypatch.delenv("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", raising=False)
     args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
     assert args.photo_authenticity_mode == "enforce"
     assert args.photo_authenticity_artifact_dir is None
@@ -5052,6 +5055,21 @@ def test_cache_key_changes_when_local_image_content_changes(tmp_path):
 
 def test_atomic_json_writer_never_leaves_partial_cache_file(tmp_path):
     path = tmp_path / "cache.json"
+
+    v2._write_json_atomically(path, {"ok": True})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"ok": True}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows MAX_PATH regression")
+def test_atomic_json_writer_supports_long_cache_directory(tmp_path):
+    segment_length = 185 - len(str(tmp_path)) - 1
+    assert 0 < segment_length < 200
+    parent = tmp_path / ("x" * segment_length)
+    path = parent / (("a" * 64) + ".json")
+    old_temporary_path = parent / (path.name + "." + ("x" * 8) + ".tmp")
+    assert len(str(path)) < 260
+    assert len(str(old_temporary_path)) >= 260
 
     v2._write_json_atomically(path, {"ok": True})
 
@@ -5887,3 +5905,46 @@ def test_local_three_image_group_blocks_even_when_model_does_not_claim_duplicate
 
     assert result["manual_required"] is True
     assert result["manual_reason_codes"] == ["DUPLICATE_IMAGE_EVIDENCE"]
+
+
+@pytest.mark.parametrize(
+    "candidate_markers",
+    [
+        {
+            "baseline_version": "compliance-candidate-v6-20260804",
+            "structure_anomaly": True,
+        },
+        {
+            "compliance_ruleset": "candidate",
+            "compliance_structure_anomaly": True,
+        },
+    ],
+)
+def test_candidate_structure_anomaly_is_not_rewritten_as_unboxing_failure(
+    candidate_markers,
+):
+    decision = {
+        "_sn_already_verified_by_system": True,
+        "digital_activation_evidence_mode": "off",
+        **candidate_markers,
+        "manual_required": True,
+        "manual_reason_codes": ["MODEL_UNCERTAIN", "IMAGE_STRONG_RISK"],
+        "manual_reason": "候选合规模型答卷结构异常",
+        "effective_category": "home_appliance",
+        "product_type": "[A02] 电冰箱",
+        "product_type_match": "match",
+        "product_photo_ok": True,
+        "unboxing_photo_ok": False,
+        "package_visible": "",
+        "whole_product_visible": "",
+        "image_risk": True,
+        "duplicate_image_evidence": False,
+        "_exact_duplicate_image_groups": [],
+        "confidence": 0.99,
+    }
+
+    result = v2.enforce_photo_noncompliance_manual(decision)
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_codes"] == ["MODEL_UNCERTAIN"]
+    assert result["manual_reason"] == "候选合规模型答卷结构异常"

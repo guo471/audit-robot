@@ -17,6 +17,8 @@ def _manifest() -> dict:
     return {
         "model": "qwen3.7-plus",
         "mode": "hybrid",
+        "compliance_ruleset": "candidate",
+        "sn_policy_version": "v1",
         "workers": 1,
         "targeted_sn_review": False,
         "sn_char_review_mode": "on",
@@ -24,6 +26,7 @@ def _manifest() -> dict:
         "digital_activation_evidence_mode": "on",
         "photo_auth_edge_mapping_mode": "off",
         "photo_authenticity_mode": "enforce",
+        "photo_authenticity_local_tree_enabled": "true",
         "order_timeout_seconds": 60,
         "git_commit": "a" * 40,
         "python_path": r"C:\project\.venv-photo-auth\Scripts\python.exe",
@@ -60,6 +63,33 @@ def test_manifest_compatibility_rejects_sn_character_mode_drift():
     retry["sn_char_review_mode"] = "off"
 
     with pytest.raises(ValueError, match="sn_char_review_mode"):
+        contract.validate_manifest_compatibility(first, retry)
+
+
+def test_manifest_compatibility_rejects_compliance_ruleset_drift():
+    first = _manifest()
+    retry = deepcopy(first)
+    retry["compliance_ruleset"] = "legacy"
+
+    with pytest.raises(ValueError, match="compliance_ruleset"):
+        contract.validate_manifest_compatibility(first, retry)
+
+
+def test_manifest_compatibility_rejects_sn_policy_version_drift():
+    first = _manifest()
+    retry = deepcopy(first)
+    retry["sn_policy_version"] = "v2"
+
+    with pytest.raises(ValueError, match="sn_policy_version"):
+        contract.validate_manifest_compatibility(first, retry)
+
+
+def test_manifest_compatibility_rejects_local_tree_mode_drift():
+    first = _manifest()
+    retry = deepcopy(first)
+    retry["photo_authenticity_local_tree_enabled"] = "false"
+
+    with pytest.raises(ValueError, match="photo_authenticity_local_tree_enabled"):
         contract.validate_manifest_compatibility(first, retry)
 
 

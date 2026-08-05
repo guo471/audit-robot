@@ -6,6 +6,7 @@ param(
   [string]$RunName = "",
   [string]$Model = "qwen3.7-plus",
   [ValidateSet("fast", "hybrid", "v2", "sn_only")][string]$Mode = "hybrid",
+  [string]$ComplianceRuleset = "",
   [ValidateSet("v1", "v2")][string]$SnPolicyVersion = "v1",
   [int]$Workers = 1,
   [switch]$EnableTargetedSnReview,
@@ -42,6 +43,18 @@ if ([string]::IsNullOrWhiteSpace($RunName)) {
 }
 $RunName = $RunName -replace '[^A-Za-z0-9_-]', '_'
 
+if ([string]::IsNullOrWhiteSpace($ComplianceRuleset)) {
+  $ComplianceRuleset = if ([string]::IsNullOrWhiteSpace($env:COMPLIANCE_RULESET)) {
+    "candidate"
+  } else {
+    $env:COMPLIANCE_RULESET
+  }
+}
+$ComplianceRuleset = $ComplianceRuleset.Trim().ToLowerInvariant()
+if ($ComplianceRuleset -notin @("candidate", "legacy")) {
+  throw "ComplianceRuleset must be candidate or legacy"
+}
+
 $projectPath = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $modelScript = Join-Path $projectPath "tools\run_guobu_model_audit_v2.py"
 $businessGenerator = Join-Path $projectPath "tools\guobu_audit_report.py"
@@ -63,9 +76,9 @@ if ($taskCount -le 0) { throw "No task JSON files found in $tasksPath" }
 $reportRoot = Join-Path $projectPath "reports\model_audit"
 $tempRoot = Join-Path $projectPath "temp"
 $firstOut = Join-Path $reportRoot ($RunName + "_first")
-$firstCache = Join-Path $reportRoot ("cache_" + $RunName + "_first")
+$firstCache = Join-Path $tempRoot ("cache_" + $RunName + "_first")
 $secondOut = Join-Path $reportRoot ($RunName + "_network_rerun")
-$secondCache = Join-Path $reportRoot ("cache_" + $RunName + "_network_rerun")
+$secondCache = Join-Path $tempRoot ("cache_" + $RunName + "_network_rerun")
 $retryTasks = Join-Path $tempRoot ($RunName + "_network_retry_tasks")
 $retrySelectionSummary = Join-Path $tempRoot ($RunName + "_network_retry_selection.json")
 $combinedXlsx = Join-Path $reportRoot ($RunName + "_combined.xlsx")
@@ -133,14 +146,8 @@ $photoAuthenticityMode = if ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICIT
 }
 $photoAuthenticityLocalTreeEnabled = if ($DisablePhotoAuthenticityLocalTree) {
   "false"
-} elseif ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED)) {
-  "true"
 } else {
-  $configuredMode = $env:PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED.Trim().ToLowerInvariant()
-  if ($configuredMode -notin @("true", "false")) {
-    throw "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED must be true or false"
-  }
-  $configuredMode
+  "true"
 }
 if ($photoAuthEdgeMappingMode -ne "off" -and $photoAuthenticityMode -eq "off") {
   throw "Photo authenticity edge mapping plugin requires photo authenticity mode shadow or enforce"
@@ -148,7 +155,7 @@ if ($photoAuthEdgeMappingMode -ne "off" -and $photoAuthenticityMode -eq "off") {
 if ($Workers -lt 1) { throw "Workers must be at least 1" }
 
 if ([string]::IsNullOrWhiteSpace($PythonExe)) {
-  $PythonExe = Join-Path $projectPath ".venv-photo-auth\Scripts\python.exe"
+  $PythonExe = "C:\Users\guoru\AppData\Local\Programs\Python\Python314\python.exe"
 }
 $pythonCandidate = if ([System.IO.Path]::IsPathRooted($PythonExe)) {
   $PythonExe
@@ -210,6 +217,9 @@ $runtimePaths = [ordered]@{
   "modules/image_role.py" = Join-Path $projectPath "modules\image_role.py"
   "modules/ocr_engine.py" = Join-Path $projectPath "modules\ocr_engine.py"
 }
+if ($ComplianceRuleset -eq "candidate") {
+  $runtimePaths["tools/compliance_candidate_rules.py"] = Join-Path $projectPath "tools\compliance_candidate_rules.py"
+}
 if ($photoAuthEdgeMappingMode -eq "on") {
   $runtimePaths["tools/black_edge_shadow_detector.py"] = Join-Path $projectPath "tools\black_edge_shadow_detector.py"
 }
@@ -259,6 +269,7 @@ function New-RunManifest {
     run_name = $RunName
     model = $Model
     mode = $Mode
+    compliance_ruleset = $ComplianceRuleset
     sn_policy_version = $SnPolicyVersion
     workers = $Workers
     targeted_sn_review = [bool]$EnableTargetedSnReview
@@ -288,6 +299,7 @@ $plan = [ordered]@{
   runName = $RunName
   model = $Model
   mode = $Mode
+  complianceRuleset = $ComplianceRuleset
   snPolicyVersion = $SnPolicyVersion
   workers = $Workers
   targetedSnReview = [bool]$EnableTargetedSnReview
@@ -398,6 +410,7 @@ function Invoke-AuditRun {
     "--cache-dir", $CacheDir,
     "--model", $Model,
     "--mode", $Mode,
+    "--compliance-ruleset", $ComplianceRuleset,
     "--sn-policy-version", $SnPolicyVersion,
     "--workers", [string]$Workers,
     "--sn-char-review-mode", $snCharReviewMode,

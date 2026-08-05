@@ -6,6 +6,7 @@ import csv
 import http.client
 import hashlib
 import base64
+import importlib
 import json
 import mimetypes
 import os
@@ -46,6 +47,24 @@ from tools.guobu_sn_policy_v2 import (
     classify_sn_category as classify_sn_v2_category,
     decide_sn as decide_sn_v2,
 )
+
+
+COMPLIANCE_RULESETS = {"candidate", "legacy"}
+
+
+def _candidate_rules():
+    return importlib.import_module("tools.compliance_candidate_rules")
+
+
+def resolve_compliance_ruleset(value: Any = None) -> str:
+    selected = str(
+        value
+        if value is not None
+        else os.environ.get("COMPLIANCE_RULESET", "candidate")
+    ).strip().lower()
+    if selected not in COMPLIANCE_RULESETS:
+        raise ValueError("COMPLIANCE_RULESET must be candidate or legacy")
+    return selected
 
 
 def resolve_sn_policy_version(value: Any = None) -> str:
@@ -861,6 +880,16 @@ CSV_COLUMNS = [
     ("sn_char_review_mode", "SN相似字符复核模式"),
     ("sn_label_auth_review_mode", "SN标签真实性插件模式"),
     ("digital_activation_evidence_mode", "普通3C激活证据插件模式"),
+    ("compliance_ruleset", "合规规则集"),
+    ("compliance_version", "合规版本"),
+    ("compliance_stage", "合规模型阶段"),
+    ("compliance_prompt_sha256", "合规基础提示词SHA256"),
+    ("compliance_structure_anomaly", "合规答卷结构异常"),
+    ("compliance_missing_model_fields", "合规答卷缺失字段"),
+    ("compliance_invalid_model_fields", "合规答卷非法字段"),
+    ("compliance_local_corrections", "合规本地一致性修正"),
+    ("compliance_input_error", "合规输入异常"),
+    ("compliance_evidence_summary", "合规可见事实"),
 ]
 
 
@@ -1351,6 +1380,7 @@ def compliance_prompt_for_category(
     category: str,
     *,
     product_type: str | None = None,
+    ruleset: str = "legacy",
     include_photo_authenticity: bool = False,
     replace_legacy_authenticity_adjudication: bool = False,
     sn_label_auth_review_mode: str | None = None,
@@ -1358,14 +1388,19 @@ def compliance_prompt_for_category(
     digital_activation_evidence_mode: str | None = None,
 ) -> str:
     normalized = str(category or "").strip().lower()
-    if normalized == "home_appliance":
-        prompt = HOME_APPLIANCE_COMPLIANCE_PROMPT
-    elif normalized == "computer":
-        prompt = COMPUTER_COMPLIANCE_PROMPT
-    elif normalized == "ordinary_3c" or normalized == "3c":
-        prompt = ORDINARY_3C_COMPLIANCE_PROMPT
+    selected_ruleset = resolve_compliance_ruleset(ruleset)
+    candidate_category = "ordinary_3c" if normalized == "3c" else normalized
+    if selected_ruleset == "candidate":
+        prompt = _candidate_rules().prompt_for_category(candidate_category)
     else:
-        prompt = UNKNOWN_COMPLIANCE_PROMPT
+        if normalized == "home_appliance":
+            prompt = HOME_APPLIANCE_COMPLIANCE_PROMPT
+        elif normalized == "computer":
+            prompt = COMPUTER_COMPLIANCE_PROMPT
+        elif normalized == "ordinary_3c" or normalized == "3c":
+            prompt = ORDINARY_3C_COMPLIANCE_PROMPT
+        else:
+            prompt = UNKNOWN_COMPLIANCE_PROMPT
     if include_photo_authenticity:
         prompt = prompt + PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM
         if replace_legacy_authenticity_adjudication:
@@ -1382,23 +1417,76 @@ def compliance_prompt_for_category(
         and digital_product_supported
         and resolve_digital_activation_evidence_mode(digital_activation_evidence_mode) == "on"
     ):
-        legacy_rules = """3. 激活照片应为设备真实亮屏页面，并显示 SN、序列号、IMEI1、IMEI2 等身份信息之一。
+        if selected_ruleset == "legacy":
+            legacy_rules = """3. 激活照片应为设备真实亮屏页面，并显示 SN、序列号、IMEI1、IMEI2 等身份信息之一。
 4. 只有亮屏、锁屏、桌面、开机画面，但没有身份信息，返回 ACTIVATION_PHOTO_INVALID。
 5. 仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。
 6. 禁止把 3C 产品正常亮屏激活页、设置页、关于本机页误判为二次翻拍。
 7. 智能手表/手环的配对页、设备名称、开机标志、二维码不属于 SN/IMEI/序列号身份信息；屏幕没有身份信息时，即使包装 SN 清晰也返回 ACTIVATION_PHOTO_INVALID。
 8. 必须在 activation_screen 中区分 PAIRING_OR_SETUP 与 ABOUT_DEVICE_SN/DEVICE_INFO_WITH_ID。
 9. screen_sn_visible 和 screen_sn_text 只用于明确标注为 SN、S/N、Serial Number、序列号的内容；屏幕只有 IMEI 时，screen_sn_visible=false、screen_sn_text=""，IMEI 写入 screen_identity_text。"""
-        plugin_bridge = """3. 普通3C激活照片按文末《普通3C激活证据统一口径插件》逐图记录并由本地程序裁决。
+            plugin_bridge = """3. 普通3C激活照片按文末《普通3C激活证据统一口径插件》逐图记录并由本地程序裁决。
 4. activation_photo_ok、activation_evidence_type、activation_screen 和自由文本只作兼容输出，不能替代 activation_identity_by_image。
 5. 仅根据照片中可明确辨认的商品形态，判断其是否与订单商品类型（category_name）属于同类商品，不得增加订单未提及的条件。仅当两者明显不属于同一类商品时才返回 PRODUCT_TYPE_MISMATCH，无法判断时返回 MODEL_UNCERTAIN。"""
-        if legacy_rules not in prompt:
-            raise RuntimeError("ordinary 3C activation rules changed without updating the digital activation plugin bridge")
-        prompt = prompt.replace(legacy_rules, plugin_bridge)
+            if legacy_rules not in prompt:
+                raise RuntimeError("ordinary 3C activation rules changed without updating the digital activation plugin bridge")
+            prompt = prompt.replace(legacy_rules, plugin_bridge)
         prompt = prompt + "\n\n" + read_digital_activation_evidence_prompt()
     if include_photo_authenticity and resolve_photo_auth_edge_mapping_mode(photo_auth_edge_mapping_mode) == "on":
         prompt = prompt + "\n\n" + read_photo_auth_edge_mapping_prompt()
     return prompt
+
+
+def normalize_candidate_compliance_response(
+    category: str,
+    product_type: str,
+    response: Any,
+    *,
+    unboxing_image_ids: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
+    candidate_rules = _candidate_rules()
+    validation = candidate_rules.validate_candidate_response(
+        category,
+        product_type,
+        response,
+        unboxing_image_ids=unboxing_image_ids,
+    )
+    normalized = dict(response) if isinstance(response, dict) else {}
+    normalized.update(
+        {
+            "manual_required": validation["manual_required"],
+            "manual_reason_codes": validation["manual_reason_codes"],
+            "manual_reason": (
+                "候选合规模型答卷结构异常"
+                if validation["structure_anomaly"]
+                else ""
+            ),
+            "compliance_ruleset": "candidate",
+            "compliance_version": candidate_rules.CANDIDATE_VERSION,
+            "compliance_stage": candidate_rules.CANDIDATE_STAGE,
+            "compliance_prompt_sha256": candidate_rules.PROMPT_SHA256[
+                category
+            ],
+            "compliance_structure_anomaly": validation["structure_anomaly"],
+            "compliance_missing_model_fields": validation["missing_model_fields"],
+            "compliance_invalid_model_fields": validation["invalid_model_fields"],
+            "compliance_local_corrections": validation["local_corrections"],
+            "package_visible": validation["package_visible"],
+            "whole_product_visible": validation["whole_product_visible"],
+            "product_and_package_same_image": validation[
+                "product_and_package_same_image"
+            ],
+            "home_or_installation_scene_visible": validation[
+                "home_or_installation_scene_visible"
+            ],
+        }
+    )
+    effective_unboxing = validation["effective_unboxing_photo_ok"]
+    if isinstance(effective_unboxing, bool):
+        normalized["unboxing_photo_ok"] = effective_unboxing
+    normalized.setdefault("image_risk", False)
+    normalized.setdefault("invoice_orange_warning", False)
+    return normalized
 
 
 def _normalize_photo_authenticity_observations(
@@ -1459,6 +1547,97 @@ def precheck_task(task: dict[str, Any]) -> dict[str, Any]:
         "address_ok": address_ok,
         "effective_category": effective_category,
     }
+
+
+def _candidate_group_images(
+    groups: dict[str, list[dict[str, Any]]],
+    markers: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    return [
+        image
+        for title, images in groups.items()
+        if any(marker in str(title) for marker in markers)
+        for image in images
+    ]
+
+
+def _candidate_group_image_ids(
+    groups: dict[str, list[dict[str, Any]]],
+    markers: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        image_id
+        for image in _candidate_group_images(groups, markers)
+        if (image_id := str(image.get("image_id") or "").strip())
+    )
+
+
+def _image_is_usable_by_model(image: dict[str, Any]) -> bool:
+    if str(image.get("source_url") or image.get("url") or "").strip():
+        return True
+    local_path = str(image.get("local_path") or "").strip()
+    if not local_path:
+        return False
+    try:
+        return Path(local_path).is_file()
+    except OSError:
+        return False
+
+
+def _candidate_input_gate(
+    precheck: dict[str, Any],
+    fields: dict[str, Any],
+) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+    category = str(precheck.get("effective_category") or "").strip().lower()
+    product_type = str(fields.get("product_type") or "").strip()
+    groups = precheck.get("groups") or {}
+    product_images = _candidate_group_images(
+        groups, ("商品照片", "商品照", "鍟嗗搧")
+    )
+    unboxing_images = _candidate_group_images(
+        groups, ("拆封", "安装", "鎷嗗皝")
+    )
+    unboxing_image_ids = tuple(
+        image_id
+        for image in unboxing_images
+        if (image_id := str(image.get("image_id") or "").strip())
+    )
+    activation_images = list(precheck.get("activation_images") or [])
+    candidate_rules = _candidate_rules()
+    reason = ""
+    if category not in candidate_rules.PROMPTS:
+        reason = "候选合规无法识别订单品类"
+    elif not candidate_rules.product_subtype_for_category(
+        category, product_type
+    ):
+        reason = "候选合规无法确定具体商品类型"
+    elif not any(_image_is_usable_by_model(image) for image in product_images):
+        reason = "候选合规缺少商品照片组"
+    elif not any(_image_is_usable_by_model(image) for image in unboxing_images):
+        reason = "候选合规缺少拆封/安装照片组"
+    elif category in {"ordinary_3c", "computer"} and not any(
+        _image_is_usable_by_model(image) for image in activation_images
+    ):
+        reason = "候选合规缺少激活/SN照片组"
+    if not reason:
+        return None, unboxing_image_ids
+    return (
+        {
+            "manual_required": True,
+            "manual_reason_codes": ["MODEL_UNCERTAIN"],
+            "manual_reason": reason,
+            "address_ok": precheck.get("address_ok"),
+            "compliance_ruleset": "candidate",
+            "compliance_version": candidate_rules.CANDIDATE_VERSION,
+            "compliance_stage": candidate_rules.CANDIDATE_STAGE,
+            "compliance_structure_anomaly": False,
+            "compliance_missing_model_fields": [],
+            "compliance_invalid_model_fields": [],
+            "compliance_local_corrections": [],
+            "compliance_input_error": reason,
+        },
+        unboxing_image_ids,
+    )
 
 
 def _manual_precheck(task: dict[str, Any], code: str, reason: str, address_ok: bool | None = None) -> dict[str, Any]:
@@ -1544,7 +1723,7 @@ def _write_json_atomically(path: Path, value: Any) -> None:
             mode="w",
             encoding="utf-8",
             newline="\n",
-            prefix=path.name + ".",
+            prefix=".tmp-",
             suffix=".tmp",
             dir=path.parent,
             delete=False,
@@ -1578,6 +1757,7 @@ def _cache_key(model: str, stage: str, prompt: str, payload: dict[str, Any], ima
             "local_path": image.get("local_path"),
             "local_content_sha256": _local_image_content_digest(image),
             "detail": image.get("_detail"),
+            "prompt_label": image.get("_prompt_label"),
         }
         for image in images
     ]
@@ -1589,7 +1769,31 @@ def _cache_key(model: str, stage: str, prompt: str, payload: dict[str, Any], ima
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _is_cacheable_model_result(stage: str, prompt: str, parsed: dict[str, Any], images: list[dict[str, Any]]) -> bool:
+def _candidate_category_from_prompt(prompt: str) -> str:
+    if any(
+        prompt.startswith(legacy_prompt)
+        for legacy_prompt in (
+            HOME_APPLIANCE_COMPLIANCE_PROMPT,
+            ORDINARY_3C_COMPLIANCE_PROMPT,
+            COMPUTER_COMPLIANCE_PROMPT,
+            UNKNOWN_COMPLIANCE_PROMPT,
+        )
+    ):
+        return ""
+    candidate_rules = _candidate_rules()
+    for category in candidate_rules.PROMPTS:
+        if prompt.startswith(candidate_rules.prompt_for_category(category)):
+            return category
+    return ""
+
+
+def _is_cacheable_model_result(
+    stage: str,
+    prompt: str,
+    parsed: dict[str, Any],
+    images: list[dict[str, Any]],
+    payload: dict[str, Any] | None = None,
+) -> bool:
     if stage == "hybrid_photo_authenticity_fallback":
         if len(images) != 1:
             return False
@@ -1601,6 +1805,22 @@ def _is_cacheable_model_result(stage: str, prompt: str, parsed: dict[str, Any], 
             return True
         except PhotoAuthenticitySchemaError:
             return False
+    if stage == "hybrid_compliance":
+        candidate_category = _candidate_category_from_prompt(prompt)
+        if candidate_category:
+            candidate_rules = _candidate_rules()
+            candidate_payload = payload or {}
+            groups = candidate_payload.get("image_groups") or {}
+            validation = candidate_rules.validate_candidate_response(
+                candidate_category,
+                str(candidate_payload.get("product_type") or ""),
+                parsed,
+                unboxing_image_ids=_candidate_group_image_ids(
+                    groups, ("拆封", "安装", "鎷嗗皝")
+                ),
+            )
+            if validation["structure_anomaly"]:
+                return False
     if stage != "hybrid_compliance" or PHOTO_AUTHENTICITY_COMPLIANCE_ADDENDUM not in prompt:
         return True
     expected_image_ids = [str(image.get("image_id") or "") for image in images]
@@ -1907,7 +2127,7 @@ def call_model(
         cache_path = cache_dir / f"{_cache_key(model, stage, prompt, payload, images)}.json"
         if cache_path.exists():
             cached = _read_json_cache(cache_path)
-            if cached is not None and isinstance(cached.get("parsed"), dict) and _is_cacheable_model_result(stage, prompt, cached["parsed"], images):
+            if cached is not None and isinstance(cached.get("parsed"), dict) and _is_cacheable_model_result(stage, prompt, cached["parsed"], images, payload):
                 return cached["parsed"], cached["content_text"], 0.0, cached.get("usage") or {}, True
             if cached is not None:
                 cache_path.unlink(missing_ok=True)
@@ -1937,14 +2157,19 @@ def call_model(
     response_data = _post_chat_completion_json(base_url, api_key, body, read_timeout_sec=timeout_sec)
     elapsed = time.time() - started
     content_text = response_data["choices"][0]["message"]["content"]
-    parsed = json.loads(content_text)
+    try:
+        parsed = json.loads(content_text)
+    except json.JSONDecodeError:
+        if not allow_non_object:
+            raise
+        parsed = None
     if not isinstance(parsed, dict) and not allow_non_object:
         raise ValueError("model JSON is not an object")
     usage = response_data.get("usage") or {}
     if (
         cache_dir is not None
         and isinstance(parsed, dict)
-        and _is_cacheable_model_result(stage, prompt, parsed, images)
+        and _is_cacheable_model_result(stage, prompt, parsed, images, payload)
     ):
         _write_json_atomically(
             cache_path,
@@ -2124,11 +2349,34 @@ def _with_detail(images: list[dict[str, Any]], detail: str) -> list[dict[str, An
     return [dict(image, _detail=detail) for image in images]
 
 
-def _all_grouped_images(groups: dict[str, list[dict[str, Any]]], activation_detail: str, other_detail: str) -> list[dict[str, Any]]:
+def _candidate_prompt_group_name(title: str) -> str:
+    value = str(title or "")
+    if any(marker in value for marker in ("商品照片", "商品照", "鍟嗗搧")):
+        return "商品照片"
+    if any(marker in value for marker in ("拆封", "安装", "鎷嗗皝")):
+        return "拆封/安装照片"
+    if is_activation_title(value):
+        return "激活/SN照片"
+    return value
+
+
+def _all_grouped_images(
+    groups: dict[str, list[dict[str, Any]]],
+    activation_detail: str,
+    other_detail: str,
+    *,
+    include_candidate_labels: bool = False,
+) -> list[dict[str, Any]]:
     prepared: list[dict[str, Any]] = []
     for title, images in groups.items():
         detail = activation_detail if is_activation_title(title) else other_detail
-        prepared.extend(_with_detail(images, detail))
+        for image in _with_detail(images, detail):
+            if include_candidate_labels:
+                image_id = str(image.get("image_id") or "").strip() or "unknown"
+                image["_prompt_label"] = (
+                    f"【{_candidate_prompt_group_name(title)}｜{image_id}】"
+                )
+            prepared.append(image)
     return prepared
 
 
@@ -3063,6 +3311,28 @@ def enforce_photo_noncompliance_manual(
         protected_code_priority.insert(3, "SN_NOT_FOUND")
     protected_codes = set(protected_code_priority)
     normalized = dict(decision)
+    candidate_contract = (
+        normalized.get("compliance_ruleset") == "candidate"
+        or str(normalized.get("baseline_version") or "").startswith(
+            "compliance-candidate-"
+        )
+        or str(normalized.get("compliance_stage") or "").startswith(
+            "compliance_candidate_"
+        )
+    )
+    candidate_structure_anomaly = candidate_contract and (
+        as_bool(normalized.get("compliance_structure_anomaly"))
+        or as_bool(normalized.get("structure_anomaly"))
+    )
+    if candidate_structure_anomaly:
+        normalized["manual_required"] = True
+        normalized["manual_reason_codes"] = ["MODEL_UNCERTAIN"]
+        normalized["manual_reason"] = (
+            normalized.get("manual_reason") or "候选合规模型答卷结构异常"
+        )
+        if address_ok is not None and "address_ok" not in normalized:
+            normalized["address_ok"] = address_ok
+        return normalized
     if sn_already_verified:
         existing_codes = normalize_compliance_reason_codes(normalized.get("manual_reason_codes"))
     else:
@@ -3072,6 +3342,14 @@ def enforce_photo_noncompliance_manual(
             existing_codes.extend(normalize_compliance_reason_codes(normalized.get("manual_reason_code")))
         else:
             existing_codes.append(str(normalized.get("manual_reason_code")))
+    candidate_veto_code = (
+        next(
+            (code for code in protected_code_priority if code in existing_codes),
+            "",
+        )
+        if normalized.get("compliance_ruleset") == "candidate"
+        else ""
+    )
     defer_image_strong_risk = (
         defer_image_authenticity_to_local
         and "IMAGE_STRONG_RISK" in existing_codes
@@ -3084,7 +3362,11 @@ def enforce_photo_noncompliance_manual(
         normalized["image_risk"] = False
 
     all_three_duplicate = _all_three_duplicate_claim(normalized)
-    if not all_three_duplicate:
+    candidate_duplicate_veto = (
+        normalized.get("compliance_ruleset") == "candidate"
+        and "DUPLICATE_IMAGE_EVIDENCE" in existing_codes
+    )
+    if not all_three_duplicate and not candidate_duplicate_veto:
         existing_codes = [item for item in existing_codes if item != "DUPLICATE_IMAGE_EVIDENCE"]
 
     code = next((item for item in protected_code_priority if item in existing_codes), "")
@@ -3160,6 +3442,9 @@ def enforce_photo_noncompliance_manual(
             code = "MODEL_UNCERTAIN"
         else:
             code = "" if sn_already_verified else (_observed_sn_conflict_reason(normalized) or _activation_pass_gate_reason(normalized))
+
+    if candidate_veto_code and not code:
+        code = candidate_veto_code
 
     if code:
         normalized["manual_required"] = True
@@ -3406,6 +3691,7 @@ def audit_task_hybrid(
     started = time.time()
     order_deadline = _order_deadline(started)
     active_sn_policy = resolve_sn_policy_version(sn_policy_version)
+    active_compliance_ruleset = resolve_compliance_ruleset()
     authenticity_config = PhotoAuthenticityConfig.from_env(os.environ)
     digital_activation_mode = resolve_digital_activation_evidence_mode()
     pre_started = time.time()
@@ -3419,6 +3705,7 @@ def audit_task_hybrid(
         return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     fields = task["fields"]
+    candidate_unboxing_image_ids: tuple[str, ...] = ()
     sn_images = _with_detail(precheck["activation_images"], "high")
     if active_sn_policy == "v2":
         sn_category = classify_sn_v2_category(
@@ -3618,6 +3905,33 @@ def audit_task_hybrid(
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
         return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
+    if active_compliance_ruleset == "candidate":
+        input_manual, candidate_unboxing_image_ids = _candidate_input_gate(
+            precheck, fields
+        )
+        if input_manual is not None:
+            row = _final_row(
+                task,
+                input_manual,
+                normalized_sn,
+                input_manual,
+                time.time() - started,
+                pre_elapsed,
+                sn_elapsed,
+                0.0,
+            )
+            row["strategy"] = "candidate_compliance_input_manual"
+            row["model_calls"] = model_calls
+            row["total_tokens"] = total_tokens
+            row["_raw"] = {
+                "sn_raw": sn_raw,
+                "sn_usage": sn_usage,
+                "sn_cached": sn_cached,
+            }
+            return finalize_photo_authenticity_report_fields(
+                row, authenticity_config
+            )
+
     compliance_payload = {
         "id": task["channel_order_no"],
         "product_type": fields.get("product_type", ""),
@@ -3634,7 +3948,12 @@ def audit_task_hybrid(
             for title, images in precheck["groups"].items()
         },
     }
-    compliance_images = _all_grouped_images(precheck["groups"], activation_detail="high", other_detail="low")
+    compliance_images = _all_grouped_images(
+        precheck["groups"],
+        activation_detail="high",
+        other_detail="low",
+        include_candidate_labels=active_compliance_ruleset == "candidate",
+    )
     edge_mapping_mode = (
         resolve_photo_auth_edge_mapping_mode()
         if authenticity_config.mode != "off"
@@ -3651,6 +3970,7 @@ def audit_task_hybrid(
     compliance_prompt = compliance_prompt_for_category(
         precheck["effective_category"],
         product_type=fields.get("product_type", ""),
+        ruleset=active_compliance_ruleset,
         include_photo_authenticity=authenticity_config.mode != "off",
         replace_legacy_authenticity_adjudication=authenticity_config.mode == "enforce",
         photo_auth_edge_mapping_mode=effective_edge_mapping_mode,
@@ -3669,10 +3989,29 @@ def audit_task_hybrid(
         timeout_sec=_stage_timeout_from_budget(started),
         retry_timeout_sec=0,
         order_deadline_at=order_deadline,
+        allow_non_object=active_compliance_ruleset == "candidate",
     )
     model_calls += 0 if compliance_cached else 1
     total_tokens += _usage_total(compliance_usage)
-    compliance = apply_photo_auth_edge_candidate_reviews(compliance, photo_auth_edge_candidates)
+    if isinstance(compliance, dict):
+        compliance = apply_photo_auth_edge_candidate_reviews(
+            compliance, photo_auth_edge_candidates
+        )
+    if active_compliance_ruleset == "candidate":
+        compliance = normalize_candidate_compliance_response(
+            precheck["effective_category"],
+            fields.get("product_type", ""),
+            compliance,
+            unboxing_image_ids=candidate_unboxing_image_ids,
+        )
+    else:
+        compliance["compliance_ruleset"] = "legacy"
+        compliance["compliance_version"] = "legacy"
+        compliance["compliance_stage"] = "hybrid_compliance"
+        compliance["compliance_structure_anomaly"] = False
+        compliance["compliance_missing_model_fields"] = []
+        compliance["compliance_invalid_model_fields"] = []
+        compliance["compliance_local_corrections"] = []
     model_effective_category = compliance.get("effective_category", "")
     compliance["model_effective_category"] = model_effective_category
     compliance["product_type"] = fields.get("product_type", "")
@@ -3903,6 +4242,7 @@ def _final_row(
         if primary_reason_code == "SN_MISMATCH" and not authoritative_sn
         else ""
     )
+    compliance_metadata = {**decision, **compliance}
     observed_sn = sn_result.get("observed_sn") or fields.get("system_sn", "") if as_bool(sn_result.get("sn_match")) else sn_result.get("observed_sn", "")
     sn_match = as_bool(sn_result.get("sn_match")) if sn_result else False
     if authoritative_sn:
@@ -3931,6 +4271,32 @@ def _final_row(
         "sn_char_review_mode": resolve_sn_char_review_mode(),
         "sn_label_auth_review_mode": resolve_sn_label_auth_review_mode(),
         "digital_activation_evidence_mode": resolve_digital_activation_evidence_mode(),
+        "compliance_ruleset": compliance_metadata.get(
+            "compliance_ruleset", ""
+        ),
+        "compliance_version": compliance_metadata.get("compliance_version", ""),
+        "compliance_stage": compliance_metadata.get("compliance_stage", ""),
+        "compliance_prompt_sha256": compliance_metadata.get(
+            "compliance_prompt_sha256", ""
+        ),
+        "compliance_structure_anomaly": compliance_metadata.get(
+            "compliance_structure_anomaly", False
+        ),
+        "compliance_missing_model_fields": compliance_metadata.get(
+            "compliance_missing_model_fields", []
+        ),
+        "compliance_invalid_model_fields": compliance_metadata.get(
+            "compliance_invalid_model_fields", []
+        ),
+        "compliance_local_corrections": compliance_metadata.get(
+            "compliance_local_corrections", []
+        ),
+        "compliance_input_error": compliance_metadata.get(
+            "compliance_input_error", ""
+        ),
+        "compliance_evidence_summary": compliance_metadata.get(
+            "evidence_summary", ""
+        ),
         "product_type_match": compliance.get("product_type_match", ""),
         "address_ok": decision.get("address_ok", compliance.get("address_ok", "")),
         "product_photo_ok": compliance.get("product_photo_ok", ""),
@@ -4020,6 +4386,12 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-dir", default="reports/model_audit/cache_v2")
     parser.add_argument("--mode", choices=["fast", "hybrid", "v2", "sn_only"], default="hybrid")
     parser.add_argument(
+        "--compliance-ruleset",
+        choices=["candidate", "legacy"],
+        default=os.environ.get("COMPLIANCE_RULESET", "candidate"),
+        help="hybrid合规规则集；默认candidate，设为legacy可一键回退旧合规规则",
+    )
+    parser.add_argument(
         "--sn-policy-version",
         choices=["v1", "v2"],
         default=os.environ.get("SN_POLICY_VERSION", "v1"),
@@ -4079,6 +4451,12 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         resolve_sn_char_review_mode(args.sn_char_review_mode)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        args.compliance_ruleset = resolve_compliance_ruleset(
+            args.compliance_ruleset
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.mode == "sn_only" and args.sn_char_review_mode != "off":
         parser.error("SN character review plugins are not applied in sn_only mode")
     if args.mode != "hybrid" and args.photo_auth_edge_mapping_mode != "off":
@@ -4091,6 +4469,7 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main() -> None:
     configure_utf8_stdio()
     args = parse_cli_args()
+    os.environ["COMPLIANCE_RULESET"] = args.compliance_ruleset
     os.environ["SN_CHAR_REVIEW_MODE"] = args.sn_char_review_mode
     os.environ["SN_POLICY_VERSION"] = args.sn_policy_version
     os.environ["SN_LABEL_AUTH_REVIEW_MODE"] = args.sn_label_auth_review_mode

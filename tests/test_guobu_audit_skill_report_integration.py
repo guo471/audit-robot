@@ -14,7 +14,10 @@ SHARED_WRAPPER = Path(os.environ.get(
 ))
 PROJECT_WRAPPER = PROJECT_ROOT / "tools/run_guobu_audit_batch.ps1"
 WRAPPER = PROJECT_WRAPPER
-PROJECT_PYTHON = PROJECT_ROOT / ".venv-photo-auth/Scripts/python.exe"
+PROJECT_PYTHON = Path(
+    r"C:\Users\guoru\AppData\Local\Programs\Python\Python314\python.exe"
+)
+DEFAULT_BATCH_PYTHON = PROJECT_PYTHON
 
 
 def wrapper_text():
@@ -30,7 +33,7 @@ def run_plan(project_root, tasks_dir, *extra, env=None):
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(WRAPPER),
          "-ProjectRoot", str(project_root), "-TasksDir", str(tasks_dir),
          "-RunName", "integration_contract", "-PlanOnly", *extra],
-        text=True, capture_output=True, timeout=60, env=env,
+        text=True, encoding="utf-8", capture_output=True, timeout=60, env=env,
     )
 
 
@@ -73,7 +76,8 @@ def make_stub_project(tmp_path, output_order_ids):
     (tasks / "one.json").write_text(json.dumps({"channel_order_no": "order-1"}), encoding="utf-8")
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
                  "guobu_audit_contract.py", "photo_authenticity_mainline.py",
-                 "guobu_sn_policy_v2.py"):
+                 "guobu_sn_policy_v2.py", "compliance_candidate_rules.py",
+                 "black_edge_shadow_detector.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     (tools / "run_guobu_model_audit_v2.py").write_text(
         "import argparse,json\nfrom pathlib import Path\np=argparse.ArgumentParser();"
@@ -96,7 +100,7 @@ def invoke_offline_wrapper(project, tasks, run_name):
     return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
         str(project / "tools/run_guobu_audit_batch.ps1"), "-ProjectRoot", str(project),
         "-TasksDir", str(tasks), "-RunName", run_name, "-PythonExe", str(PROJECT_PYTHON)],
-        text=True, capture_output=True, timeout=30, env=env)
+        text=True, encoding="utf-8", capture_output=True, timeout=30, env=env)
 
 
 def test_plan_exposes_only_business_report_generator(tmp_path):
@@ -233,8 +237,8 @@ def test_plan_preflights_project_python_and_exposes_run_manifest(tmp_path):
     assert completed.returncode == 0, completed.stderr
     plan = json.loads(completed.stdout)
 
-    assert Path(plan["pythonPath"]) == PROJECT_PYTHON
-    assert plan["pythonVersion"] == "3.11.9"
+    assert Path(plan["pythonPath"]) == DEFAULT_BATCH_PYTHON
+    assert plan["pythonVersion"].startswith("3.14.")
     assert plan["cv2Version"] == "5.0.0"
     manifest = plan["runManifest"]
     for field in (
@@ -258,7 +262,7 @@ def test_plan_preflights_project_python_and_exposes_run_manifest(tmp_path):
         assert field in manifest
     assert manifest["sn_char_review_mode"] == "on"
     assert manifest["order_timeout_seconds"] == 60
-    assert Path(manifest["python_path"]) == PROJECT_PYTHON
+    assert Path(manifest["python_path"]) == DEFAULT_BATCH_PYTHON
     assert set(manifest["prompt_sha256"]) == {
         "sn_similar_char_review.txt",
         "sn_similar_char_review_v2.txt",
@@ -355,7 +359,6 @@ def test_business_generator_is_the_only_report_contract():
     text = wrapper_text()
     dense = compact(text)
     assert '$businessgenerator=join-path$projectpath"tools\\guobu_audit_report.py"' in dense
-    assert "legacy" not in dense
     assert "merge_guobu_audit_results.py" not in dense
     assert not (PROJECT_ROOT / "tools/merge_guobu_audit_results.py").exists()
     assert '"--first-jsonl",$firstjsonl' in dense
@@ -373,6 +376,13 @@ def test_retry_directory_is_run_scoped_cleaned_and_selector_count_controls_rerun
     assert '$retrycount=[int]$selection.selected' in dense
     assert 'if($retrycount-gt0)' in dense
     assert 'get-childitem-literalpath$retrytasks' not in dense
+
+
+def test_batch_uses_short_temp_cache_root_for_windows_path_safety():
+    dense = compact(wrapper_text())
+
+    assert '$firstcache=join-path$temproot("cache_"+$runname+"_first")' in dense
+    assert '$secondcache=join-path$temproot("cache_"+$runname+"_network_rerun")' in dense
 
 
 def test_business_retry_selection_is_only_passed_with_nonempty_retry_jsonl():
@@ -403,6 +413,7 @@ def test_prices_are_forwarded_only_as_one_numeric_triplet_without_secrets():
     )
 
 
+@pytest.mark.skipif(not SHARED_WRAPPER.is_file(), reason="shared audit wrapper is not installed")
 def test_shared_wrapper_is_thin_delegate_to_versioned_project_wrapper():
     shared = compact(SHARED_WRAPPER.read_text(encoding="utf-8"))
     assert 'tools\\run_guobu_audit_batch.ps1' in shared
@@ -410,10 +421,10 @@ def test_shared_wrapper_is_thin_delegate_to_versioned_project_wrapper():
     assert 'enablesncharreviewv2=$enablesncharreviewv2' in shared
     assert 'enablesnlabelauthreview=$enablesnlabelauthreview' in shared
     assert 'invoke-auditrun' not in shared
-    assert "legacy" not in shared
     assert PROJECT_WRAPPER.is_file()
 
 
+@pytest.mark.skipif(not SHARED_WRAPPER.is_file(), reason="shared audit wrapper is not installed")
 def test_shared_wrapper_forwards_sn_character_review_v2_to_project_plan(tmp_path):
     tasks = tmp_path / "tasks"
     tasks.mkdir()
@@ -426,6 +437,7 @@ def test_shared_wrapper_forwards_sn_character_review_v2_to_project_plan(tmp_path
             "-RunName", "shared_v2_contract", "-EnableSnCharReviewV2", "-PlanOnly",
         ],
         text=True,
+        encoding="utf-8",
         capture_output=True,
         timeout=30,
     )
@@ -507,6 +519,8 @@ p.add_argument('--sn-label-auth-review-mode')
 p.add_argument('--photo-auth-edge-mapping-mode')
 p.add_argument('--digital-activation-evidence-mode')
 p.add_argument('--photo-authenticity-mode')
+p.add_argument('--photo-authenticity-local-tree-enabled')
+p.add_argument('--compliance-ruleset')
 p.add_argument('--sn-policy-version')
 p.add_argument('--no-targeted-sn-review', action='store_true')
 a = p.parse_args()
@@ -554,7 +568,7 @@ while ((Get-ChildItem -LiteralPath $env:ATOMIC_BARRIER_DIR -Filter "*.ready" | M
         subprocess.Popen(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
              "-WorkerId", worker_id],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            text=True, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
         )
         for worker_id in ("one", "two")
     ]
@@ -580,7 +594,7 @@ def test_runtime_hash_drift_is_rejected_before_network_retry(tmp_path):
     copy_required_runtime_modules(project)
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
                  "guobu_audit_contract.py", "photo_authenticity_mainline.py",
-                 "guobu_sn_policy_v2.py"):
+                 "guobu_sn_policy_v2.py", "compliance_candidate_rules.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     (tasks / "one.json").write_text(
         json.dumps({"channel_order_no": "order-1"}), encoding="utf-8")
@@ -597,6 +611,8 @@ p.add_argument('--sn-label-auth-review-mode')
 p.add_argument('--photo-auth-edge-mapping-mode')
 p.add_argument('--digital-activation-evidence-mode')
 p.add_argument('--photo-authenticity-mode')
+p.add_argument('--photo-authenticity-local-tree-enabled')
+p.add_argument('--compliance-ruleset')
 p.add_argument('--sn-policy-version')
 p.add_argument('--no-targeted-sn-review', action='store_true')
 a = p.parse_args()
@@ -633,7 +649,7 @@ Path(a.output_json).write_text(json.dumps({'summary': {'stub': True}}), encoding
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(WRAPPER),
          "-ProjectRoot", str(project), "-TasksDir", str(tasks), "-RunName", run_name,
          "-PythonExe", str(PROJECT_PYTHON)],
-        text=True, capture_output=True, timeout=30, env=env,
+        text=True, encoding="utf-8", capture_output=True, timeout=30, env=env,
     )
 
     assert completed.returncode != 0
@@ -653,7 +669,7 @@ def test_stale_retry_task_directory_rejects_run_name_before_audit(tmp_path):
     copy_required_runtime_modules(project)
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
                  "guobu_audit_contract.py", "photo_authenticity_mainline.py",
-                 "guobu_sn_policy_v2.py"):
+                 "guobu_sn_policy_v2.py", "compliance_candidate_rules.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     tasks.mkdir()
     (tasks / "one.json").write_text(
@@ -671,6 +687,8 @@ p.add_argument('--sn-label-auth-review-mode')
 p.add_argument('--photo-auth-edge-mapping-mode')
 p.add_argument('--digital-activation-evidence-mode')
 p.add_argument('--photo-authenticity-mode')
+p.add_argument('--photo-authenticity-local-tree-enabled')
+p.add_argument('--compliance-ruleset')
 p.add_argument('--sn-policy-version')
 p.add_argument('--no-targeted-sn-review', action='store_true')
 a = p.parse_args()
@@ -704,7 +722,7 @@ Path(a.output_json).write_text(json.dumps({'summary': {'stub': True}}), encoding
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(WRAPPER),
          "-ProjectRoot", str(project), "-TasksDir", str(tasks), "-RunName", run_name,
          "-PythonExe", str(PROJECT_PYTHON)],
-        text=True, capture_output=True, timeout=30, env=env,
+        text=True, encoding="utf-8", capture_output=True, timeout=30, env=env,
     )
 
     assert completed.returncode != 0
