@@ -1442,7 +1442,7 @@ def normalize_candidate_compliance_response(
     product_type: str,
     response: Any,
     *,
-    unboxing_image_ids: tuple[str, ...] | list[str] | None = None,
+    unboxing_image_ids: tuple[Any, ...] | list[Any] | None = None,
 ) -> dict[str, Any]:
     candidate_rules = _candidate_rules()
     validation = candidate_rules.validate_candidate_response(
@@ -1564,12 +1564,21 @@ def _candidate_group_images(
 def _candidate_group_image_ids(
     groups: dict[str, list[dict[str, Any]]],
     markers: tuple[str, ...],
-) -> tuple[str, ...]:
+) -> tuple[Any, ...]:
     return tuple(
-        image_id
+        image.get("image_id")
         for image in _candidate_group_images(groups, markers)
-        if (image_id := str(image.get("image_id") or "").strip())
     )
+
+
+def _candidate_image_ids_are_valid(image_ids: tuple[Any, ...]) -> bool:
+    if not image_ids or not all(
+        isinstance(image_id, str) and bool(image_id.strip())
+        for image_id in image_ids
+    ):
+        return False
+    normalized = tuple(image_id.strip() for image_id in image_ids)
+    return len(set(normalized)) == len(normalized)
 
 
 def _image_is_usable_by_model(image: dict[str, Any]) -> bool:
@@ -1587,7 +1596,7 @@ def _image_is_usable_by_model(image: dict[str, Any]) -> bool:
 def _candidate_input_gate(
     precheck: dict[str, Any],
     fields: dict[str, Any],
-) -> tuple[dict[str, Any] | None, tuple[str, ...]]:
+) -> tuple[dict[str, Any] | None, tuple[Any, ...]]:
     category = str(precheck.get("effective_category") or "").strip().lower()
     product_type = str(fields.get("product_type") or "").strip()
     groups = precheck.get("groups") or {}
@@ -1597,11 +1606,7 @@ def _candidate_input_gate(
     unboxing_images = _candidate_group_images(
         groups, ("拆封", "安装", "鎷嗗皝")
     )
-    unboxing_image_ids = tuple(
-        image_id
-        for image in unboxing_images
-        if (image_id := str(image.get("image_id") or "").strip())
-    )
+    unboxing_image_ids = tuple(image.get("image_id") for image in unboxing_images)
     activation_images = list(precheck.get("activation_images") or [])
     candidate_rules = _candidate_rules()
     reason = ""
@@ -1611,6 +1616,8 @@ def _candidate_input_gate(
         category, product_type
     ):
         reason = "候选合规无法确定具体商品类型"
+    elif not _candidate_image_ids_are_valid(unboxing_image_ids):
+        reason = "候选合规拆封/安装照片ID异常"
     elif not any(_image_is_usable_by_model(image) for image in product_images):
         reason = "候选合规缺少商品照片组"
     elif not any(_image_is_usable_by_model(image) for image in unboxing_images):
@@ -1621,6 +1628,7 @@ def _candidate_input_gate(
         reason = "候选合规缺少激活/SN照片组"
     if not reason:
         return None, unboxing_image_ids
+    input_id_anomaly = reason == "候选合规拆封/安装照片ID异常"
     return (
         {
             "manual_required": True,
@@ -1630,9 +1638,11 @@ def _candidate_input_gate(
             "compliance_ruleset": "candidate",
             "compliance_version": candidate_rules.CANDIDATE_VERSION,
             "compliance_stage": candidate_rules.CANDIDATE_STAGE,
-            "compliance_structure_anomaly": False,
+            "compliance_structure_anomaly": input_id_anomaly,
             "compliance_missing_model_fields": [],
-            "compliance_invalid_model_fields": [],
+            "compliance_invalid_model_fields": (
+                ["$input.unboxing_image_ids"] if input_id_anomaly else []
+            ),
             "compliance_local_corrections": [],
             "compliance_input_error": reason,
         },
@@ -3705,7 +3715,7 @@ def audit_task_hybrid(
         return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     fields = task["fields"]
-    candidate_unboxing_image_ids: tuple[str, ...] = ()
+    candidate_unboxing_image_ids: tuple[Any, ...] = ()
     sn_images = _with_detail(precheck["activation_images"], "high")
     if active_sn_policy == "v2":
         sn_category = classify_sn_v2_category(

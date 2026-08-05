@@ -395,7 +395,7 @@ def validate_candidate_response(
     product_type: str,
     response: Any,
     *,
-    unboxing_image_ids: tuple[str, ...] | list[str] | None = None,
+    unboxing_image_ids: tuple[Any, ...] | list[Any] | None = None,
 ) -> dict[str, Any]:
     normalized = _normalized_category(category)
     if not isinstance(response, dict):

@@ -531,6 +531,71 @@ def test_candidate_prompt_labels_are_part_of_cache_key():
     assert labeled_key != unlabeled_key
 
 
+def test_candidate_input_gate_rejects_invalid_unboxing_image_ids_before_model():
+    invalid_groups = (
+        [{"image_id": 2, "source_url": "https://example.invalid/2.jpg"}],
+        [{"image_id": "", "source_url": "https://example.invalid/2.jpg"}],
+        [
+            {"image_id": "img_002", "source_url": "https://example.invalid/2a.jpg"},
+            {"image_id": "img_002", "source_url": "https://example.invalid/2b.jpg"},
+        ],
+    )
+
+    for unboxing_images in invalid_groups:
+        task = _phone_task()
+        task["image_groups"]["拆封照片"] = unboxing_images
+        precheck = v2.precheck_task(task)
+
+        manual, raw_ids = v2._candidate_input_gate(precheck, task["fields"])
+
+        assert manual is not None
+        assert manual["manual_reason_codes"] == ["MODEL_UNCERTAIN"]
+        assert manual["compliance_structure_anomaly"] is True
+        assert manual["compliance_invalid_model_fields"] == [
+            "$input.unboxing_image_ids"
+        ]
+        assert raw_ids == tuple(image.get("image_id") for image in unboxing_images)
+
+
+def test_candidate_cache_validation_preserves_invalid_raw_unboxing_id():
+    prompt = v2.compliance_prompt_for_category(
+        "home_appliance",
+        product_type="[A02] 电冰箱",
+        ruleset="candidate",
+        include_photo_authenticity=False,
+        digital_activation_evidence_mode="off",
+    )
+    parsed = {
+        "manual_reason_codes": [],
+        "product_type_match": "match",
+        "product_photo_ok": True,
+        "unboxing_photo_ok": True,
+        "unboxing_image_evidence": [
+            {
+                "image_id": "2",
+                "product_visible": True,
+                "package_visible": True,
+                "home_or_installation_scene_visible": False,
+            }
+        ],
+        "duplicate_image_evidence": False,
+        "evidence_summary": "商品与包装同图可见",
+        "confidence": 0.99,
+    }
+    payload = {
+        "product_type": "[A02] 电冰箱",
+        "image_groups": {
+            "拆封照片": [
+                {"image_id": 2, "source_url": "https://example.invalid/2.jpg"}
+            ]
+        },
+    }
+
+    assert v2._is_cacheable_model_result(
+        "hybrid_compliance", prompt, parsed, [], payload
+    ) is False
+
+
 def test_hybrid_defaults_to_candidate_and_maps_complete_response(monkeypatch):
     monkeypatch.delenv("COMPLIANCE_RULESET", raising=False)
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
