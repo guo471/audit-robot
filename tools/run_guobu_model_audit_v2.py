@@ -4103,8 +4103,8 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--photo-authenticity-local-tree-enabled",
         choices=["true", "false"],
-        default=os.environ.get("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", "true"),
-        help="图片真实性本地树融合规则；默认true启用，可设false只关闭本地树",
+        default=os.environ.get("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", "false"),
+        help="图片真实性本地树融合规则；默认false关闭，可显式设true用于实验/回放",
     )
     parser.add_argument(
         "--photo-authenticity-baseline-path",

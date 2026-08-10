@@ -68,8 +68,9 @@ def test_fft_enabled_config_defaults_false_and_parses_strict_boolean():
         PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_FFT_ENABLED": "sometimes"})
 
 
-def test_local_tree_config_defaults_true_and_parses_strict_boolean():
-    assert PhotoAuthenticityConfig.from_env({}).local_tree_enabled is True
+def test_local_tree_config_defaults_false_and_parses_strict_boolean():
+    assert PhotoAuthenticityConfig(mode="enforce", artifact_dir=Path("unused")).local_tree_enabled is False
+    assert PhotoAuthenticityConfig.from_env({}).local_tree_enabled is False
     assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "false"}).local_tree_enabled is False
     assert PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "1"}).local_tree_enabled is True
     with pytest.raises(ValueError, match="PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED"):
@@ -188,7 +189,7 @@ def test_off_mode_does_not_load_artifact_or_images(monkeypatch, tmp_path):
     assert result.image_results == {}
 
 
-def test_local_tree_default_mainline_rescue_routes_non_real_strong(tmp_path):
+def test_local_tree_explicit_true_mainline_rescue_routes_non_real_strong(tmp_path):
     image_path = tmp_path / "image.jpg"
     Image.new("RGB", (12, 12), (255, 255, 255)).save(image_path)
 
@@ -200,7 +201,10 @@ def test_local_tree_default_mainline_rescue_routes_non_real_strong(tmp_path):
             return 1.0, {"source": "local_tree", "tree_sha256": "abc"}
 
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "true",
+        }),
         raw_observations=[raw("i1")],
         expected_image_ids=["i1"],
         image_paths={"i1": image_path},
@@ -243,7 +247,10 @@ def test_local_tree_can_be_disabled_without_changing_qwen_rules(tmp_path):
 
 def test_local_tree_missing_image_is_observable_but_does_not_expand_manual(tmp_path):
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "true",
+        }),
         raw_observations=[raw("i1")],
         expected_image_ids=["i1"],
         image_paths={"i1": tmp_path / "missing.jpg"},
@@ -267,7 +274,10 @@ def test_local_tree_runtime_failure_is_observable_but_does_not_expand_manual(tmp
             raise OSError("decode failed")
 
     result = evaluate_authenticity_images(
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "true",
+        }),
         raw_observations=[raw("i1")],
         expected_image_ids=["i1"],
         image_paths={"i1": image_path},
@@ -299,7 +309,10 @@ def test_local_tree_unavailable_does_not_override_existing_manual_evidence(tmp_p
             {"image_id": "i1", "local_path": str(tmp_path / "missing.jpg")},
             {"image_id": "i2", "local_path": str(tmp_path / "missing-too.jpg")},
         ],
-        config=PhotoAuthenticityConfig.from_env({"PHOTO_AUTHENTICITY_MODE": "enforce"}),
+        config=PhotoAuthenticityConfig.from_env({
+            "PHOTO_AUTHENTICITY_MODE": "enforce",
+            "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED": "true",
+        }),
     )
 
     assert result["manual_flag"] == "是"

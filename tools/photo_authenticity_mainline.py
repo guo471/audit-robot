@@ -59,7 +59,7 @@ class PhotoAuthenticityConfig:
     artifact_dir: Path
     fft_enabled: bool = False
     sn_label_auth_review_enabled: bool = False
-    local_tree_enabled: bool = True
+    local_tree_enabled: bool = False
     local_tree_artifact_path: Path = DEFAULT_LOCAL_TREE_ARTIFACT_PATH
     max_fft_attempts: int = 2
 
@@ -82,7 +82,7 @@ class PhotoAuthenticityConfig:
             cross_surface_marker_enabled = False
         else:
             raise ValueError("SN_LABEL_AUTH_REVIEW_MODE must be on or off")
-        tree_raw = str(env.get("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", "true")).strip().lower()
+        tree_raw = str(env.get("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", "false")).strip().lower()
         if tree_raw in {"true", "1", "yes", "on"}:
             local_tree_enabled = True
         elif tree_raw in {"false", "0", "no", "off", ""}:
