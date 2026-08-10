@@ -39,9 +39,13 @@ python3 -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install -r photo_authenticity/requirements-runtime.txt
+npm --version
+node --version
 ```
 
 如果服务器不需要训练真实性模型，不安装 `photo_authenticity/requirements-train.txt`。
+
+上线前必须能导入这些运行时依赖：`zxingcpp`、`cv2`、`joblib`、`sklearn`、`numpy`、`Pillow`。其中 `zxingcpp` 用于 SN 条码/二维码二次确认，`cv2`、`joblib`、`sklearn`、`numpy`、`Pillow` 用于图片真实性运行时。缺任一项时启动预检会直接失败，失败信息只显示变量名或模块名，不显示真实 token、Authorization、模型密钥或模型地址。
 
 启动脚本会优先使用项目目录下的 `.venv/bin/python`；没有 `.venv` 时才回退到 `python3`。如果服务器有固定解释器，也可以在 `.env` 中设置 `PYTHON_BIN=/opt/audit_robot/.venv/bin/python`。
 
@@ -65,6 +69,21 @@ GUOBU_EXIT_NONZERO_ON_ERRORS=true
 日志、SQLite、报告和异常栈不得打印真实密钥。
 
 ## 手工试跑
+
+先做启动前强预检，不抓订单、不审核、不回显：
+
+```bash
+bash tools/start_guobu_linux_auto_audit.sh --preflight-only
+```
+
+也可以直接验收 Python 预检入口：
+
+```bash
+. .env
+.venv/bin/python -m tools.guobu_linux_auto_audit --preflight-only
+```
+
+预检会检查 `VISION_API_BASE_URL`、`VISION_API_KEY`、`GUOBU_COLLECTOR_BASE_URL`、`GUOBU_AUTH_TOKEN`、`MACHINE_APPROVAL_AUTH_TOKEN`、Python 版本、`node --version`、`zxingcpp`、`cv2`、`joblib`、`sklearn`、`numpy`、`PIL`。通过时输出只包含 `set` 状态和版本号；失败时只报缺失的变量/模块名。
 
 先只跑一轮：
 
@@ -93,6 +112,14 @@ cd /opt/audit_robot
 GUOBU_AUTO_AUDIT_ENV_FILE=/opt/audit_robot/.env \
 GUOBU_EXIT_NONZERO_ON_ERRORS=true \
 bash tools/start_guobu_linux_auto_audit.sh --once
+```
+
+上线验收任务可先配置一次预检专用任务：
+
+```bash
+cd /opt/audit_robot
+GUOBU_AUTO_AUDIT_ENV_FILE=/opt/audit_robot/.env \
+bash tools/start_guobu_linux_auto_audit.sh --preflight-only
 ```
 
 调度建议：

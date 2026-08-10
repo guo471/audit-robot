@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -33,6 +34,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REASON_CN = "图片信息无法确认"
 DONE_STATUSES = {"FEEDBACK_DONE"}
 FINAL_STATUSES = {"FEEDBACK_DONE", "MANUAL_FEEDBACK_REQUIRED"}
+REQUIRED_STARTUP_ENV = (
+    "VISION_API_BASE_URL",
+    "VISION_API_KEY",
+    "GUOBU_COLLECTOR_BASE_URL",
+    "GUOBU_AUTH_TOKEN",
+    "MACHINE_APPROVAL_AUTH_TOKEN",
+)
+REQUIRED_STARTUP_MODULES = ("zxingcpp", "cv2", "joblib", "sklearn", "numpy", "PIL")
+MIN_STARTUP_PYTHON = (3, 11)
 
 REASON_CN_BY_CODE = {
     "ADDRESS_TOO_COARSE": "收货地址不符合要求",
@@ -161,6 +171,70 @@ def redact_secret_text(value: Any) -> str:
         if secret:
             text = text.replace(secret, "[REDACTED]")
     return text[:2000]
+
+
+def _presence_status(env: Mapping[str, str], name: str) -> str:
+    return "set" if str(env.get(name) or "").strip() else "missing"
+
+
+def _module_version(module: Any) -> str:
+    return str(getattr(module, "__version__", "") or "available")
+
+
+def run_startup_preflight(
+    *,
+    env: Mapping[str, str] | None = None,
+    import_module: Callable[[str], Any] = importlib.import_module,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    python_version: tuple[int, ...] | None = None,
+) -> dict[str, Any]:
+    """Fail fast before collection/audit/feedback can touch real orders."""
+    env = dict(os.environ if env is None else env)
+    version_tuple = tuple(python_version or sys.version_info[:3])
+    failures: list[str] = []
+    required_env = {name: _presence_status(env, name) for name in REQUIRED_STARTUP_ENV}
+    for name, status in required_env.items():
+        if status != "set":
+            failures.append(f"missing env: {name}")
+
+    python_version_text = ".".join(str(part) for part in version_tuple[:3])
+    if version_tuple < MIN_STARTUP_PYTHON:
+        failures.append(f"Python >= 3.11 required, got {python_version_text}")
+
+    module_versions: dict[str, str] = {}
+    for name in REQUIRED_STARTUP_MODULES:
+        try:
+            module_versions[name] = _module_version(import_module(name))
+        except Exception as exc:
+            module_versions[name] = "missing"
+            failures.append(f"missing python module: {name} ({type(exc).__name__})")
+
+    node_version = ""
+    try:
+        node = run_command(
+            ["node", "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        node_version = str(getattr(node, "stdout", "") or "").strip()
+        if int(getattr(node, "returncode", 1) or 0) != 0 or not node_version:
+            failures.append("Node runtime unavailable: node --version failed")
+    except Exception as exc:
+        failures.append(f"Node runtime unavailable: {type(exc).__name__}")
+
+    report = {
+        "ok": not failures,
+        "required_env": required_env,
+        "python_version": python_version_text,
+        "python_modules": module_versions,
+        "node_version": node_version,
+    }
+    if failures:
+        report["failures"] = failures
+        raise SystemExit("startup preflight failed: " + "; ".join(failures))
+    return report
 
 
 def _maybe_int(value: Any) -> Any:
@@ -1961,6 +2035,7 @@ def config_from_env(args: argparse.Namespace) -> LinuxAutoAuditConfig:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Linux unattended Guobu audit loop.")
+    parser.add_argument("--preflight-only", action="store_true", help="validate startup environment and exit")
     parser.add_argument("--once", action="store_true", help="run one collection/audit/feedback loop and exit")
     parser.add_argument(
         "--exit-nonzero-on-errors",
@@ -1993,6 +2068,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    preflight = run_startup_preflight()
+    if args.preflight_only:
+        print(json.dumps(preflight, ensure_ascii=False, indent=2))
+        return
     config = config_from_env(args)
     metadata = collect_runtime_metadata()
     assert_production_startup_allowed(

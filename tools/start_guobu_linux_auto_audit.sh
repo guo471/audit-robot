@@ -48,6 +48,8 @@ if [[ "${GUOBU_EXIT_NONZERO_ON_ERRORS:-false}" == "true" ]]; then
   MODE_ARGS+=(--exit-nonzero-on-errors)
 fi
 
+"${PYTHON_BIN}" -m tools.guobu_linux_auto_audit --preflight-only >/dev/null
+
 exec "${PYTHON_BIN}" -m tools.guobu_linux_auto_audit \
   "${MODE_ARGS[@]}" \
   --state-dir "${STATE_DIR}" \

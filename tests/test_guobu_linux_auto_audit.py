@@ -22,6 +22,7 @@ from tools.guobu_linux_auto_audit import (
     machine_examine_status_is_pending,
     normalize_audit_result_observability,
     parse_args,
+    run_startup_preflight,
     sn_barcode_observability_from_audit_result,
 )
 from tools.auto_audit_dashboard_server import HTML, load_status
@@ -2093,6 +2094,77 @@ def test_linux_start_script_sets_utf8_and_production_policy_switches():
     assert "--max-fetch-pages" in script
     assert "GUOBU_EXIT_NONZERO_ON_ERRORS" in script
     assert "--exit-nonzero-on-errors" in script
+    assert "--preflight-only" in script
+
+
+def test_startup_preflight_reports_all_missing_runtime_inputs_without_secret_values():
+    secret_env = {
+        "VISION_API_BASE_URL": "https://secret.example.invalid/v1",
+        "VISION_API_KEY": "secret-vision-key",
+        "GUOBU_AUTH_TOKEN": "secret-collector-token",
+    }
+
+    def fake_import(name: str):
+        if name in {"zxingcpp", "cv2", "sklearn"}:
+            raise ModuleNotFoundError(name)
+        return type("Module", (), {"__version__": "1.0"})()
+
+    def fake_run(*_args, **_kwargs):
+        raise FileNotFoundError("node")
+
+    with pytest.raises(SystemExit) as excinfo:
+        run_startup_preflight(
+            env=secret_env,
+            import_module=fake_import,
+            run_command=fake_run,
+            python_version=(3, 10, 12),
+        )
+
+    message = str(excinfo.value)
+    assert "https://secret.example.invalid" not in message
+    assert "secret-" not in message
+    assert "MACHINE_APPROVAL_AUTH_TOKEN" in message
+    assert "GUOBU_COLLECTOR_BASE_URL" in message
+    assert "zxingcpp" in message
+    assert "cv2" in message
+    assert "sklearn" in message
+    assert "Node" in message
+    assert "Python >= 3.11" in message
+
+
+def test_startup_preflight_success_records_versions_without_tokens():
+    env = {
+        "VISION_API_BASE_URL": "https://secret.example.invalid/v1",
+        "VISION_API_KEY": "secret-vision-key",
+        "GUOBU_COLLECTOR_BASE_URL": "https://approval.secret.invalid",
+        "GUOBU_APPROVAL_BASE_URL": "https://approval.secret.invalid",
+        "GUOBU_AUTH_TOKEN": "secret-collector-token",
+        "MACHINE_APPROVAL_AUTH_TOKEN": "secret-callback-token",
+    }
+
+    def fake_import(name: str):
+        return type("Module", (), {"__version__": f"{name}-version"})()
+
+    class Completed:
+        returncode = 0
+        stdout = "v24.18.0\n"
+        stderr = ""
+
+    report = run_startup_preflight(
+        env=env,
+        import_module=fake_import,
+        run_command=lambda *_args, **_kwargs: Completed(),
+        python_version=(3, 14, 4),
+    )
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert report["ok"] is True
+    assert report["python_version"] == "3.14.4"
+    assert report["node_version"] == "v24.18.0"
+    assert report["required_env"]["VISION_API_KEY"] == "set"
+    assert report["required_env"]["MACHINE_APPROVAL_AUTH_TOKEN"] == "set"
+    assert report["python_modules"]["zxingcpp"] == "zxingcpp-version"
+    assert "secret-" not in serialized
 
 
 def test_windows_auto_audit_launcher_productizes_token_and_secret_bootstrap():
@@ -2123,8 +2195,9 @@ def test_windows_auto_audit_launcher_productizes_token_and_secret_bootstrap():
 
 
 def test_parse_args_supports_xxljob_error_exit_mode():
-    args = parse_args(["--once", "--exit-nonzero-on-errors", "--max-fetch-pages", "7"])
+    args = parse_args(["--preflight-only", "--once", "--exit-nonzero-on-errors", "--max-fetch-pages", "7"])
 
+    assert args.preflight_only is True
     assert args.once is True
     assert args.exit_nonzero_on_errors is True
     assert args.max_fetch_pages == 7
@@ -2145,6 +2218,14 @@ def test_linux_deployment_doc_records_timer_idle_and_feedback_contract():
     assert "XXL-JOB" in doc
     assert "GUOBU_EXIT_NONZERO_ON_ERRORS=true" in doc
     assert "0 0/10 * * * ?" in doc
+    assert "--preflight-only" in doc
+    assert "zxingcpp" in doc
+    assert "cv2" in doc
+    assert "joblib" in doc
+    assert "sklearn" in doc
+    assert "numpy" in doc
+    assert "Pillow" in doc
+    assert "node --version" in doc
 
 
 def test_machine_approval_feedback_script_is_merged_into_mainline():
