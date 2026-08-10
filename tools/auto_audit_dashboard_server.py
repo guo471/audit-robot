@@ -174,7 +174,7 @@ def load_status(db_path):
                 "final_reason": final_summary["final_reason"],
                 "manual_flag": audit.get("manual_flag", ""),
                 "reason_code": audit.get("manual_reason_code", ""),
-                "reason_cn": audit.get("manual_reason_cn", ""),
+                "reason_cn": final_summary["reason_code_cn"] or audit.get("manual_reason_cn", ""),
                 "product_type": audit.get("product_type") or fields.get("product_type") or "",
                 "system_sn": audit.get("system_sn") or fields.get("system_sn") or "",
                 "model_sn": audit.get("model_sn") or audit.get("observed_sn") or "",

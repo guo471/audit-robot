@@ -1614,6 +1614,7 @@ def test_dashboard_exposes_final_result_and_reason_per_order(tmp_path: Path):
 
     assert row["final_result"] == "不通过"
     assert row["final_reason"] == "SN不一致"
+    assert row["reason_cn"] == "SN不一致"
 
 
 def test_runner_persists_loop_summary_for_dashboard(tmp_path: Path):
