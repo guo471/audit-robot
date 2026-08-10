@@ -160,9 +160,9 @@ def test_hybrid_v2_system_sn_letter_o_is_not_rewritten_to_match_model_zero(monke
     assert result["strategy"] == "hybrid_sn_v2_manual"
 
 
-def test_batch_wrapper_defaults_to_sn_v1_and_forwards_the_switch():
+def test_batch_wrapper_defaults_to_sn_v2_and_forwards_the_switch():
     source = (PROJECT_ROOT / "tools" / "run_guobu_audit_batch.ps1").read_text(encoding="utf-8-sig")
-    assert '[ValidateSet("v1", "v2")][string]$SnPolicyVersion = "v1"' in source
+    assert '[ValidateSet("v1", "v2")][string]$SnPolicyVersion = "v2"' in source
     assert '"--sn-policy-version", $SnPolicyVersion' in source
     assert "sn_policy_version = $SnPolicyVersion" in source
     assert "snPolicyVersion = $SnPolicyVersion" in source
