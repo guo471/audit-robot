@@ -427,6 +427,401 @@ def _screen_sn_compliance_pass():
     }
 
 
+def test_hybrid_sn_v2_barcode_downloads_source_url_before_scanning(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    task = _base_task()
+    task["fields"]["product_type"] = "手机 [B01]"
+    task["fields"]["system_sn"] = "ABC123"
+    task["images"][2].pop("local_path", None)
+    task["images"][2]["source_url"] = "https://static.jhddsz.com/approval/sn.jpg"
+    calls = []
+
+    def fake_call(_base_url, _api_key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        calls.append(stage)
+        if stage == "hybrid_sn_v2":
+            return (
+                {
+                    "screen_identity_state": "SCREEN_SN_CLEAR",
+                    "sn_candidates": [
+                        {
+                            "image_id": "img_003",
+                            "source": "DEVICE_SCREEN",
+                            "field_type": "SN",
+                            "raw_text": "WRONG123",
+                            "normalized_text": "WRONG123",
+                            "readable": True,
+                            "complete": True,
+                            "confidence": 0.99,
+                        }
+                    ],
+                    "identity_evidence": [],
+                    "confidence": 0.99,
+                },
+                "sn",
+                0.1,
+                {},
+                False,
+            )
+        if stage == "hybrid_compliance":
+            return (_screen_sn_compliance_pass(), "compliance", 0.1, {}, False)
+        raise AssertionError(stage)
+
+    class FakeResponse:
+        headers = {"Content-Type": "image/jpeg"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _size=-1):
+            return b"barcode-image"
+
+    def fake_urlopen(request, timeout=0):
+        assert request.full_url == "https://static.jhddsz.com/approval/sn.jpg"
+        assert 0 < timeout <= 5
+        return FakeResponse()
+
+    def fake_barcode_scanner(_task, images):
+        assert len(images) == 1
+        image_path = Path(images[0]["local_path"])
+        assert image_path.is_file()
+        assert image_path.parent == tmp_path / "sn_barcode_images"
+        assert image_path.read_bytes() == b"barcode-image"
+        assert images[0]["source_url"] == "https://static.jhddsz.com/approval/sn.jpg"
+        return [{"image_id": images[0]["image_id"], "text": "ABC123", "format": "CODE_128"}]
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    monkeypatch.setattr(v2, "_open_barcode_image_request", fake_urlopen)
+
+    result = audit_task_hybrid(
+        "https://unused",
+        "key",
+        "qwen3.7-plus",
+        task,
+        cache_dir=tmp_path,
+        sn_policy_version="v2",
+        sn_barcode_mode="enforce",
+        barcode_scanner=fake_barcode_scanner,
+    )
+
+    assert calls == ["hybrid_sn_v2", "hybrid_compliance"]
+    assert result["manual_flag"] == "否"
+    assert result["sn_match"] is True
+    assert result["observed_sn"] == "ABC123"
+    assert result["_raw"]["sn_barcode_result"]["matched"] is True
+    assert result["_raw"]["sn_barcode_result"]["decoded"][0]["text"] == "ABC123"
+
+
+def test_hybrid_sn_v2_barcode_rejects_untrusted_source_url_before_download(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    task = _base_task()
+    task["fields"]["product_type"] = "手机 [B01]"
+    task["fields"]["system_sn"] = "ABC123"
+    task["images"][2].pop("local_path", None)
+    task["images"][2]["source_url"] = "https://example.invalid/sn.jpg"
+
+    def fake_call(_base_url, _api_key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        assert stage == "hybrid_sn_v2"
+        return (
+            {
+                "screen_identity_state": "SCREEN_SN_CLEAR",
+                "sn_candidates": [
+                    {
+                        "image_id": "img_003",
+                        "source": "DEVICE_SCREEN",
+                        "field_type": "SN",
+                        "raw_text": "WRONG123",
+                        "normalized_text": "WRONG123",
+                        "readable": True,
+                        "complete": True,
+                        "confidence": 0.99,
+                    }
+                ],
+                "identity_evidence": [],
+                "confidence": 0.99,
+            },
+            "sn",
+            0.1,
+            {},
+            False,
+        )
+
+    def fake_barcode_scanner(_task, images):
+        assert "local_path" not in images[0] or not images[0]["local_path"]
+        return []
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "_open_barcode_image_request", lambda *_args, **_kwargs: pytest.fail("untrusted source_url should not be downloaded"))
+
+    result = audit_task_hybrid(
+        "https://unused",
+        "key",
+        "qwen3.7-plus",
+        task,
+        cache_dir=tmp_path,
+        sn_policy_version="v2",
+        sn_barcode_mode="enforce",
+        barcode_scanner=fake_barcode_scanner,
+    )
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["_raw"]["sn_barcode_result"]["matched"] is False
+
+
+def test_hybrid_sn_v2_barcode_rejects_private_resolved_source_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    task = _base_task()
+    task["fields"]["product_type"] = "手机 [B01]"
+    task["fields"]["system_sn"] = "ABC123"
+    task["images"][2].pop("local_path", None)
+    task["images"][2]["source_url"] = "https://static.jhddsz.com/approval/sn.jpg"
+
+    def fake_call(_base_url, _api_key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        assert stage == "hybrid_sn_v2"
+        return (
+            {
+                "screen_identity_state": "SCREEN_SN_CLEAR",
+                "sn_candidates": [
+                    {
+                        "image_id": "img_003",
+                        "source": "DEVICE_SCREEN",
+                        "field_type": "SN",
+                        "raw_text": "WRONG123",
+                        "normalized_text": "WRONG123",
+                        "readable": True,
+                        "complete": True,
+                        "confidence": 0.99,
+                    }
+                ],
+                "identity_evidence": [],
+                "confidence": 0.99,
+            },
+            "sn",
+            0.1,
+            {},
+            False,
+        )
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("127.0.0.1", 443))])
+    monkeypatch.setattr(v2, "_open_barcode_image_request", lambda *_args, **_kwargs: pytest.fail("private resolved host should not be downloaded"))
+
+    result = audit_task_hybrid(
+        "https://unused",
+        "key",
+        "qwen3.7-plus",
+        task,
+        cache_dir=tmp_path,
+        sn_policy_version="v2",
+        sn_barcode_mode="enforce",
+        barcode_scanner=lambda _task, _images: [],
+    )
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["_raw"]["sn_barcode_result"]["matched"] is False
+
+
+def test_hybrid_sn_v2_barcode_uses_default_scanner_after_source_url_download(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    task = _base_task()
+    task["fields"]["product_type"] = "手机 [B01]"
+    task["fields"]["system_sn"] = "ABC123"
+    task["images"][2].pop("local_path", None)
+    task["images"][2]["source_url"] = "https://static.jhddsz.com/approval/sn.jpg"
+
+    def fake_call(_base_url, _api_key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        if stage == "hybrid_sn_v2":
+            return (
+                {
+                    "screen_identity_state": "SCREEN_SN_CLEAR",
+                    "sn_candidates": [
+                        {
+                            "image_id": "img_003",
+                            "source": "DEVICE_SCREEN",
+                            "field_type": "SN",
+                            "raw_text": "WRONG123",
+                            "normalized_text": "WRONG123",
+                            "readable": True,
+                            "complete": True,
+                            "confidence": 0.99,
+                        }
+                    ],
+                    "identity_evidence": [],
+                    "confidence": 0.99,
+                },
+                "sn",
+                0.1,
+                {},
+                False,
+            )
+        if stage == "hybrid_compliance":
+            return (_screen_sn_compliance_pass(), "compliance", 0.1, {}, False)
+        raise AssertionError(stage)
+
+    class FakeResponse:
+        headers = {"Content-Type": "image/jpeg"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _size=-1):
+            return b"barcode-image"
+
+    scanned_paths = []
+
+    def fake_scan_image_barcodes(image_path, image_id):
+        scanned_paths.append(Path(image_path))
+        assert Path(image_path).parent == tmp_path / "sn_barcode_images"
+        return [{"image_id": image_id, "text": "ABC123", "format": "CODE_128"}]
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    monkeypatch.setattr(v2, "_open_barcode_image_request", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr("tools.guobu_sn_barcode.scan_image_barcodes", fake_scan_image_barcodes)
+
+    result = audit_task_hybrid(
+        "https://unused",
+        "key",
+        "qwen3.7-plus",
+        task,
+        cache_dir=tmp_path,
+        sn_policy_version="v2",
+        sn_barcode_mode="enforce",
+    )
+
+    assert scanned_paths and scanned_paths[0].is_file()
+    assert result["manual_flag"] == "否"
+    assert result["sn_match"] is True
+    assert result["_raw"]["sn_barcode_result"]["matched"] is True
+
+
+def test_hybrid_sn_v2_barcode_rejects_untrusted_redirect_before_following(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    task = _base_task()
+    task["fields"]["product_type"] = "手机 [B01]"
+    task["fields"]["system_sn"] = "ABC123"
+    task["images"][2].pop("local_path", None)
+    task["images"][2]["source_url"] = "https://static.jhddsz.com/approval/sn.jpg"
+
+    def fake_call(_base_url, _api_key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        assert stage == "hybrid_sn_v2"
+        return (
+            {
+                "screen_identity_state": "SCREEN_SN_CLEAR",
+                "sn_candidates": [
+                    {
+                        "image_id": "img_003",
+                        "source": "DEVICE_SCREEN",
+                        "field_type": "SN",
+                        "raw_text": "WRONG123",
+                        "normalized_text": "WRONG123",
+                        "readable": True,
+                        "complete": True,
+                        "confidence": 0.99,
+                    }
+                ],
+                "identity_evidence": [],
+                "confidence": 0.99,
+            },
+            "sn",
+            0.1,
+            {},
+            False,
+        )
+
+    calls = []
+
+    def fake_open(request, timeout=0):
+        calls.append(request.full_url)
+        raise v2.urllib.error.HTTPError(
+            request.full_url,
+            302,
+            "Found",
+            {"Location": "http://127.0.0.1/internal.jpg"},
+            None,
+        )
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    monkeypatch.setattr(v2, "_open_barcode_image_request", fake_open)
+
+    result = audit_task_hybrid(
+        "https://unused",
+        "key",
+        "qwen3.7-plus",
+        task,
+        cache_dir=tmp_path,
+        sn_policy_version="v2",
+        sn_barcode_mode="enforce",
+        barcode_scanner=lambda _task, _images: [],
+    )
+
+    assert calls == ["https://static.jhddsz.com/approval/sn.jpg"]
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["_raw"]["sn_barcode_result"]["matched"] is False
+
+
+def test_hybrid_sn_v2_does_not_download_barcode_images_when_barcode_mode_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    task = _base_task()
+    task["fields"]["product_type"] = "手机 [B01]"
+    task["fields"]["system_sn"] = "ABC123"
+    task["images"][2].pop("local_path", None)
+    task["images"][2]["source_url"] = "https://example.invalid/sn.jpg"
+
+    def fake_call(_base_url, _api_key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        assert stage == "hybrid_sn_v2"
+        return (
+            {
+                "screen_identity_state": "SCREEN_SN_CLEAR",
+                "sn_candidates": [
+                    {
+                        "image_id": "img_003",
+                        "source": "DEVICE_SCREEN",
+                        "field_type": "SN",
+                        "raw_text": "WRONG123",
+                        "normalized_text": "WRONG123",
+                        "readable": True,
+                        "complete": True,
+                        "confidence": 0.99,
+                    }
+                ],
+                "identity_evidence": [],
+                "confidence": 0.99,
+            },
+            "sn",
+            0.1,
+            {},
+            False,
+        )
+
+    monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
+    monkeypatch.setattr(v2, "_open_barcode_image_request", lambda *_args, **_kwargs: pytest.fail("barcode image download should not run"))
+
+    result = audit_task_hybrid(
+        "https://unused",
+        "key",
+        "qwen3.7-plus",
+        task,
+        cache_dir=tmp_path,
+        sn_policy_version="v2",
+        sn_barcode_mode="off",
+    )
+
+    assert result["manual_flag"] == "是"
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert "sn_barcode_result" not in result.get("_raw", {})
+
+
 def test_normalize_sn_ignores_case_and_punctuation():
     assert normalize_sn("S/N: 7urbb-26409200425") == "7URBB26409200425"
     assert normalize_sn("511-320Q1063-A815-1040160") == "511320Q1063A8151040160"

@@ -6,11 +6,13 @@ import csv
 import http.client
 import hashlib
 import base64
+import ipaddress
 import importlib
 import json
 import mimetypes
 import os
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -51,6 +53,23 @@ from tools.guobu_sn_barcode import BarcodeScanner, apply_barcode_second_check
 
 
 COMPLIANCE_RULESETS = {"candidate", "legacy"}
+BARCODE_IMAGE_DOWNLOAD_TIMEOUT_SEC = 5
+BARCODE_IMAGE_MAX_BYTES = 25 * 1024 * 1024
+BARCODE_IMAGE_MAX_DOWNLOADS = 3
+BARCODE_IMAGE_ALLOWED_HOSTS = {"static.jhddsz.com"}
+BARCODE_IMAGE_MAX_REDIRECTS = 2
+BARCODE_IMAGE_SUFFIX_BY_MIME = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
+
+
+class _NoBarcodeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
 
 
 def _candidate_rules():
@@ -2368,6 +2387,157 @@ def _with_detail(images: list[dict[str, Any]], detail: str) -> list[dict[str, An
     return [dict(image, _detail=detail) for image in images]
 
 
+def _safe_barcode_image_id(image_id: Any, index: int) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(image_id or "").strip())
+    return value[:48] or f"img_{index:03d}"
+
+
+def _barcode_image_suffix(url: str, headers: Any) -> str:
+    suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    content_type = ""
+    try:
+        content_type = str(headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    except Exception:
+        content_type = ""
+    return BARCODE_IMAGE_SUFFIX_BY_MIME.get(content_type, ".jpg")
+
+
+def _is_trusted_barcode_image_host(hostname: str | None) -> bool:
+    host = str(hostname or "").strip().lower().rstrip(".")
+    return host in BARCODE_IMAGE_ALLOWED_HOSTS
+
+
+def _host_resolves_to_public_ip(hostname: str, port: int) -> bool:
+    try:
+        addresses = socket.getaddrinfo(hostname, port)
+    except Exception:
+        return False
+    if not addresses:
+        return False
+    for address in addresses:
+        try:
+            ip_text = address[4][0]
+            ip = ipaddress.ip_address(ip_text)
+        except Exception:
+            return False
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
+def _barcode_source_url_is_allowed(source_url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(source_url or "").strip())
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not _is_trusted_barcode_image_host(parsed.hostname):
+        return False
+    return _host_resolves_to_public_ip(str(parsed.hostname), port)
+
+
+def _open_barcode_image_request(request: urllib.request.Request, timeout: int):
+    opener = urllib.request.build_opener(_NoBarcodeRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
+def _download_barcode_image_to_local(
+    image: dict[str, Any],
+    target_dir: Path,
+    *,
+    index: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prepared = dict(image)
+    existing_path = Path(str(prepared.get("local_path") or prepared.get("path") or ""))
+    if existing_path.is_file():
+        return prepared, {"image_id": prepared.get("image_id"), "status": "existing_local"}
+
+    source_url = str(prepared.get("source_url") or prepared.get("url") or "").strip()
+    if not _barcode_source_url_is_allowed(source_url):
+        return prepared, {"image_id": prepared.get("image_id"), "status": "skipped_no_downloadable_url"}
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = _safe_barcode_image_id(prepared.get("image_id"), index)
+    url_digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:16]
+    temp_path = target_dir / f"{safe_id}-{url_digest}.download"
+    current_url = source_url
+    try:
+        for _redirect_index in range(BARCODE_IMAGE_MAX_REDIRECTS + 1):
+            if not _barcode_source_url_is_allowed(current_url):
+                return prepared, {"image_id": prepared.get("image_id"), "status": "skipped_untrusted_redirect"}
+            request = urllib.request.Request(current_url, headers={"User-Agent": "audit-robot-sn-barcode/1.0"})
+            try:
+                with _open_barcode_image_request(request, timeout=BARCODE_IMAGE_DOWNLOAD_TIMEOUT_SEC) as response:
+                    data = response.read(BARCODE_IMAGE_MAX_BYTES + 1)
+                    if len(data) > BARCODE_IMAGE_MAX_BYTES:
+                        return prepared, {"image_id": prepared.get("image_id"), "status": "download_too_large"}
+                    if not data:
+                        return prepared, {"image_id": prepared.get("image_id"), "status": "download_empty"}
+                    suffix = _barcode_image_suffix(current_url, getattr(response, "headers", {}))
+                    break
+            except urllib.error.HTTPError as exc:
+                if 300 <= int(getattr(exc, "code", 0) or 0) < 400:
+                    location = ""
+                    try:
+                        location = str(exc.headers.get("Location") or "")
+                    except Exception:
+                        location = ""
+                    redirected_url = urllib.parse.urljoin(current_url, location)
+                    if not location or not _barcode_source_url_is_allowed(redirected_url):
+                        return prepared, {
+                            "image_id": prepared.get("image_id"),
+                            "status": "skipped_untrusted_redirect",
+                        }
+                    current_url = redirected_url
+                    continue
+                raise
+        else:
+            return prepared, {"image_id": prepared.get("image_id"), "status": "too_many_redirects"}
+        final_path = target_dir / f"{safe_id}-{url_digest}{suffix}"
+        temp_path.write_bytes(data)
+        temp_path.replace(final_path)
+    except Exception as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return prepared, {
+            "image_id": prepared.get("image_id"),
+            "status": "download_failed",
+            "error": type(exc).__name__,
+        }
+
+    prepared["local_path"] = str(final_path)
+    return prepared, {"image_id": prepared.get("image_id"), "status": "downloaded"}
+
+
+def _prepare_barcode_activation_images(
+    activation_images: list[dict[str, Any]],
+    *,
+    cache_dir: Path,
+) -> list[dict[str, Any]]:
+    target_dir = Path(cache_dir) / "sn_barcode_images"
+    prepared_images: list[dict[str, Any]] = []
+    for index, image in enumerate(activation_images, start=1):
+        if index <= BARCODE_IMAGE_MAX_DOWNLOADS:
+            prepared, _status = _download_barcode_image_to_local(dict(image), target_dir, index=index)
+        else:
+            prepared = dict(image)
+        prepared_images.append(prepared)
+    return prepared_images
+
+
 def _candidate_prompt_group_name(title: str) -> str:
     value = str(title or "")
     if any(marker in value for marker in ("商品照片", "商品照", "鍟嗗搧")):
@@ -3770,10 +3940,20 @@ def audit_task_hybrid(
             },
             effective_category=precheck["effective_category"],
         )
+        barcode_activation_images = precheck["activation_images"]
+        if (
+            active_sn_barcode_mode in {"shadow", "enforce"}
+            and sn_decision.get("manual_reason_code") == "SN_MISMATCH"
+            and cache_dir is not None
+        ):
+            barcode_activation_images = _prepare_barcode_activation_images(
+                precheck["activation_images"],
+                cache_dir=cache_dir,
+            )
         sn_decision, sn_barcode_result = apply_barcode_second_check(
             task,
             sn_decision,
-            precheck["activation_images"],
+            barcode_activation_images,
             barcode_scanner=barcode_scanner,
             barcode_mode=active_sn_barcode_mode,
         )
