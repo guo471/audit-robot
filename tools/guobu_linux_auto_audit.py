@@ -952,10 +952,18 @@ class MonthlyAuditStateStore:
                         next_audit_after = NULL
                     WHERE dedup_key = ? AND (
                         status = 'NEW'
-                        OR (status = 'AUDITING' AND updated_at <= ?)
+                        OR (
+                            status = 'AUDITING'
+                            AND (
+                                lease_expires_at IS NULL
+                                OR lease_expires_at = ''
+                                OR lease_expires_at <= ?
+                                OR updated_at <= ?
+                            )
+                        )
                     )
                     """,
-                    (_iso(stamp), lease_expires_at, dedup_key, stale_before),
+                    (_iso(stamp), lease_expires_at, dedup_key, _iso(stamp), stale_before),
                 )
                 if cursor.rowcount == 1:
                     row = conn.execute(

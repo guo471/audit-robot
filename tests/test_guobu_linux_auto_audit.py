@@ -222,6 +222,43 @@ def test_state_store_merges_channel_only_order_when_apply_id_arrives_later(tmp_p
     assert store.count_pending(now=now) == 1
 
 
+def test_state_store_recovers_legacy_auditing_row_without_lease(tmp_path: Path):
+    store = MonthlyAuditStateStore(tmp_path)
+    now = datetime(2026, 8, 7, 12, 30, 0)
+    later = now + timedelta(minutes=5)
+    assert store.reserve_order(valid_minimal_order(9101, "order-9101"), now=now) is True
+
+    with sqlite3.connect(store.db_path_for(now)) as conn:
+        conn.execute(
+            """
+            UPDATE orders
+            SET status = 'AUDITING',
+                updated_at = ?,
+                lease_expires_at = NULL
+            WHERE dedup_key = ?
+            """,
+            (later.isoformat(timespec="seconds"), "apply:9101"),
+        )
+
+    assert store.reserve_order(valid_minimal_order(9101, "order-9101"), now=later) is False
+
+    attempt = store.claim_order_attempt(
+        "apply:9101",
+        now=later,
+        stale_after_seconds=3600,
+    )
+    assert attempt == 1
+
+    with sqlite3.connect(store.db_path_for(now)) as conn:
+        row = conn.execute(
+            "SELECT status, lease_expires_at FROM orders WHERE dedup_key = ?",
+            ("apply:9101",),
+        ).fetchone()
+
+    assert row[0] == "AUDITING"
+    assert row[1] == (later + timedelta(seconds=3600)).isoformat(timespec="seconds")
+
+
 def test_state_store_collapses_legacy_duplicate_channel_rows_when_apply_id_arrives(tmp_path: Path):
     store = MonthlyAuditStateStore(tmp_path)
     now = datetime(2026, 8, 7, 12, 30, 0)
