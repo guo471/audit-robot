@@ -311,7 +311,7 @@ def build_examine_page_payload(
     payload["currentPage"] = int(current_page)
     payload["pageSize"] = int(page_size)
     payload["status"] = 0
-    payload["machineExamineStatus"] = None
+    payload["machineExamineStatus"] = 0
     return payload
 
 

@@ -140,13 +140,13 @@ def valid_minimal_order(apply_id: int, channel_order_no: str) -> dict[str, objec
     }
 
 
-def test_build_examine_page_payload_filters_pending_and_null_machine_status_for_production_pending():
+def test_build_examine_page_payload_filters_pending_machine_status_with_backend_zero_sentinel():
     payload = build_examine_page_payload(current_page=3, page_size=20)
 
     assert payload["currentPage"] == 3
     assert payload["pageSize"] == 20
     assert payload["status"] == 0
-    assert payload["machineExamineStatus"] is None
+    assert payload["machineExamineStatus"] == 0
 
 
 def test_machine_examine_status_filter_rejects_any_non_pending_alias():
