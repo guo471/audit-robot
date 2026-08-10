@@ -2,20 +2,28 @@
 param(
   [string]$ProjectRoot = (Get-Location).Path,
   [string]$PythonExe = "",
+  [string]$CacheRoot = "",
+  [string]$TempRoot = "",
   [Parameter(Mandatory = $true)][string]$TasksDir,
   [string]$RunName = "",
-  [string]$Model = "qwen3.7-plus",
+  [ValidateSet("qwen3.7-plus")][string]$Model = "qwen3.7-plus",
   [ValidateSet("fast", "hybrid", "v2", "sn_only")][string]$Mode = "hybrid",
-  [ValidateSet("v1", "v2")][string]$SnPolicyVersion = "v1",
+  [ValidateSet("v1", "v2")][string]$SnPolicyVersion = "v2",
+  [ValidateSet("off", "shadow", "enforce")][string]$SnBarcodeMode = "enforce",
+  [ValidateSet("", "off", "shadow", "enforce")][string]$PhotoAuthenticityMode = "",
+  [ValidateSet("", "true", "false")][string]$PhotoAuthenticityNewRuleEnabled = "",
   [int]$Workers = 1,
   [switch]$EnableTargetedSnReview,
   [switch]$EnableSnCharReview,
   [switch]$EnableSnCharReviewV2,
   [switch]$EnableSnLabelAuthReview,
   [switch]$EnablePhotoAuthEdgeMapping,
+  [switch]$EnablePhotoAuthenticityLocalTreeConfirmation,
+  [switch]$DisablePhotoAuthenticityNewRules,
   [switch]$DisablePhotoAuthenticityLocalTree,
   [switch]$DisableDigitalActivationEvidence,
   [switch]$SkipTimeoutRerun,
+  [switch]$Resume,
   [switch]$PlanOnly
 )
 
@@ -61,11 +69,30 @@ $taskCount = (Get-ChildItem -LiteralPath $tasksPath -Filter "*.json" | Measure-O
 if ($taskCount -le 0) { throw "No task JSON files found in $tasksPath" }
 
 $reportRoot = Join-Path $projectPath "reports\model_audit"
-$tempRoot = Join-Path $projectPath "temp"
+$tempRoot = if ([string]::IsNullOrWhiteSpace($TempRoot)) {
+  Join-Path $projectPath "temp"
+} elseif ([System.IO.Path]::IsPathRooted($TempRoot)) {
+  [System.IO.Path]::GetFullPath($TempRoot)
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $projectPath $TempRoot))
+}
+$cacheRoot = if ([string]::IsNullOrWhiteSpace($CacheRoot)) {
+  $reportRoot
+} elseif ([System.IO.Path]::IsPathRooted($CacheRoot)) {
+  [System.IO.Path]::GetFullPath($CacheRoot)
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $projectPath $CacheRoot))
+}
+if (-not [string]::IsNullOrWhiteSpace($CacheRoot) -and $cacheRoot.Length -gt 180) {
+  throw "CacheRoot is too long for safe Windows model-cache writes before model calls: $cacheRoot"
+}
+if (-not [string]::IsNullOrWhiteSpace($TempRoot) -and $tempRoot.Length -gt 180) {
+  throw "TempRoot is too long for safe Windows retry/temp writes before model calls: $tempRoot"
+}
 $firstOut = Join-Path $reportRoot ($RunName + "_first")
-$firstCache = Join-Path $reportRoot ("cache_" + $RunName + "_first")
+$firstCache = Join-Path $cacheRoot ("cache_" + $RunName + "_first")
 $secondOut = Join-Path $reportRoot ($RunName + "_network_rerun")
-$secondCache = Join-Path $reportRoot ("cache_" + $RunName + "_network_rerun")
+$secondCache = Join-Path $cacheRoot ("cache_" + $RunName + "_network_rerun")
 $retryTasks = Join-Path $tempRoot ($RunName + "_network_retry_tasks")
 $retrySelectionSummary = Join-Path $tempRoot ($RunName + "_network_retry_selection.json")
 $combinedXlsx = Join-Path $reportRoot ($RunName + "_combined.xlsx")
@@ -86,7 +113,35 @@ $snCharReviewMode = if ($EnableSnCharReviewV2) {
 if ($Mode -eq "sn_only" -and $snCharReviewMode -ne "off") {
   throw "SN character review plugins are not applied in sn_only mode"
 }
-$snLabelAuthReviewMode = if ($EnableSnLabelAuthReview) {
+$photoAuthenticityMode = if ($Mode -ne "hybrid") {
+  "off"
+} elseif (-not [string]::IsNullOrWhiteSpace($PhotoAuthenticityMode)) {
+  $PhotoAuthenticityMode
+} elseif ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICITY_MODE)) {
+  "enforce"
+} else {
+  $configuredMode = $env:PHOTO_AUTHENTICITY_MODE.Trim().ToLowerInvariant()
+  if ($configuredMode -notin @("off", "shadow", "enforce")) {
+    throw "PHOTO_AUTHENTICITY_MODE must be off, shadow, or enforce"
+  }
+  $configuredMode
+}
+$photoAuthenticityNewRuleEnabled = if ($photoAuthenticityMode -eq "off" -or $DisablePhotoAuthenticityNewRules) {
+  "false"
+} elseif (-not [string]::IsNullOrWhiteSpace($PhotoAuthenticityNewRuleEnabled)) {
+  $PhotoAuthenticityNewRuleEnabled
+} elseif ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICITY_NEW_RULE_ENABLED)) {
+  "true"
+} else {
+  $configuredMode = $env:PHOTO_AUTHENTICITY_NEW_RULE_ENABLED.Trim().ToLowerInvariant()
+  if ($configuredMode -notin @("true", "false")) {
+    throw "PHOTO_AUTHENTICITY_NEW_RULE_ENABLED must be true or false"
+  }
+  $configuredMode
+}
+$snLabelAuthReviewMode = if ($photoAuthenticityNewRuleEnabled -eq "false") {
+  "off"
+} elseif ($EnableSnLabelAuthReview) {
   "on"
 } elseif ([string]::IsNullOrWhiteSpace($env:SN_LABEL_AUTH_REVIEW_MODE)) {
   "off"
@@ -97,7 +152,9 @@ $snLabelAuthReviewMode = if ($EnableSnLabelAuthReview) {
   }
   $configuredMode
 }
-$photoAuthEdgeMappingMode = if ($EnablePhotoAuthEdgeMapping) {
+$photoAuthEdgeMappingMode = if ($photoAuthenticityNewRuleEnabled -eq "false") {
+  "off"
+} elseif ($EnablePhotoAuthEdgeMapping) {
   "on"
 } elseif ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTH_EDGE_MAPPING_MODE)) {
   "off"
@@ -122,19 +179,12 @@ $digitalActivationEvidenceMode = if ($DisableDigitalActivationEvidence) {
   }
   $configuredMode
 }
-$photoAuthenticityMode = if ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICITY_MODE)) {
-  "enforce"
-} else {
-  $configuredMode = $env:PHOTO_AUTHENTICITY_MODE.Trim().ToLowerInvariant()
-  if ($configuredMode -notin @("off", "shadow", "enforce")) {
-    throw "PHOTO_AUTHENTICITY_MODE must be off, shadow, or enforce"
-  }
-  $configuredMode
-}
-$photoAuthenticityLocalTreeEnabled = if ($DisablePhotoAuthenticityLocalTree) {
+$photoAuthenticityLocalTreeEnabled = if ($photoAuthenticityNewRuleEnabled -eq "false") {
+  "false"
+} elseif ($DisablePhotoAuthenticityLocalTree) {
   "false"
 } elseif ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED)) {
-  "true"
+  "false"
 } else {
   $configuredMode = $env:PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED.Trim().ToLowerInvariant()
   if ($configuredMode -notin @("true", "false")) {
@@ -142,8 +192,18 @@ $photoAuthenticityLocalTreeEnabled = if ($DisablePhotoAuthenticityLocalTree) {
   }
   $configuredMode
 }
-if ($photoAuthEdgeMappingMode -ne "off" -and $photoAuthenticityMode -eq "off") {
-  throw "Photo authenticity edge mapping plugin requires photo authenticity mode shadow or enforce"
+$photoAuthenticityLocalTreeConfirmationEnabled = if ($photoAuthenticityNewRuleEnabled -eq "false") {
+  "false"
+} elseif ($EnablePhotoAuthenticityLocalTreeConfirmation) {
+  "true"
+} elseif ([string]::IsNullOrWhiteSpace($env:PHOTO_AUTHENTICITY_LOCAL_TREE_CONFIRMATION_ENABLED)) {
+  "false"
+} else {
+  $configuredMode = $env:PHOTO_AUTHENTICITY_LOCAL_TREE_CONFIRMATION_ENABLED.Trim().ToLowerInvariant()
+  if ($configuredMode -notin @("true", "false")) {
+    throw "PHOTO_AUTHENTICITY_LOCAL_TREE_CONFIRMATION_ENABLED must be true or false"
+  }
+  $configuredMode
 }
 if ($Workers -lt 1) { throw "Workers must be at least 1" }
 
@@ -159,33 +219,54 @@ if (-not (Test-Path -LiteralPath $pythonCandidate -PathType Leaf)) {
   throw "PythonExe not found: $pythonCandidate"
 }
 $pythonPath = (Resolve-Path -LiteralPath $pythonCandidate).Path
+$requireCv2Preflight = $photoAuthenticityNewRuleEnabled -eq "true"
+$requireSnBarcodePreflight = $SnBarcodeMode -ne "off"
+$env:GUOBU_REQUIRE_CV2_PREFLIGHT = if ($requireCv2Preflight) { "1" } else { "0" }
+$env:GUOBU_REQUIRE_SN_BARCODE_PREFLIGHT = if ($requireSnBarcodePreflight) { "1" } else { "0" }
 $pythonPreflightScript = @'
 import json
+import os
 import platform
 import sys
 
-try:
-    import cv2
-except Exception as exc:
-    raise SystemExit('cv2 preflight failed: {}: {}'.format(type(exc).__name__, exc))
+cv2_version = ''
+zxingcpp_available = False
+zxingcpp_version = ''
+if os.environ.get('GUOBU_REQUIRE_CV2_PREFLIGHT') == '1':
+    try:
+        import cv2
+    except Exception as exc:
+        raise SystemExit('cv2 preflight failed: {}: {}'.format(type(exc).__name__, exc))
+    cv2_version = getattr(cv2, '__version__', '')
+if os.environ.get('GUOBU_REQUIRE_SN_BARCODE_PREFLIGHT') == '1':
+    try:
+        import zxingcpp
+    except Exception as exc:
+        raise SystemExit('zxingcpp preflight failed: {}: {}'.format(type(exc).__name__, exc))
+    zxingcpp_available = True
+    zxingcpp_version = getattr(zxingcpp, '__version__', '')
 
 print(json.dumps({
     'path': sys.executable,
     'version': platform.python_version(),
-    'cv2_version': getattr(cv2, '__version__', ''),
+    'cv2_version': cv2_version,
+    'zxingcpp_available': zxingcpp_available,
+    'zxingcpp_version': zxingcpp_version,
 }, ensure_ascii=False))
 '@
 $pythonPreflightOutput = & $pythonPath -X utf8 -c $pythonPreflightScript 2>&1
 if ($LASTEXITCODE -ne 0) {
-  throw "Python/cv2 preflight failed for ${pythonPath}: $($pythonPreflightOutput -join [Environment]::NewLine)"
+  throw "Python dependency preflight failed for ${pythonPath}: $($pythonPreflightOutput -join [Environment]::NewLine)"
 }
 $pythonInfo = ($pythonPreflightOutput | Select-Object -Last 1) | ConvertFrom-Json
 
 $promptPaths = [ordered]@{
   "sn_similar_char_review.txt" = Join-Path $projectPath "prompts\sn_similar_char_review.txt"
   "sn_similar_char_review_v2.txt" = Join-Path $projectPath "prompts\sn_similar_char_review_v2.txt"
-  "sn_label_authenticity_review.txt" = Join-Path $projectPath "prompts\sn_label_authenticity_review.txt"
   "digital_activation_evidence_review.txt" = Join-Path $projectPath "prompts\digital_activation_evidence_review.txt"
+}
+if ($photoAuthenticityNewRuleEnabled -eq "true") {
+  $promptPaths["sn_label_authenticity_review.txt"] = Join-Path $projectPath "prompts\sn_label_authenticity_review.txt"
 }
 if ($photoAuthEdgeMappingMode -eq "on") {
   $promptPaths["photo_auth_edge_mapping_review.txt"] = Join-Path $projectPath "prompts\photo_auth_edge_mapping_review.txt"
@@ -195,6 +276,7 @@ $runtimePaths = [ordered]@{
   "tools/run_guobu_audit_batch.ps1" = Join-Path $projectPath "tools\run_guobu_audit_batch.ps1"
   "tools/run_guobu_model_audit_v2.py" = $modelScript
   "tools/guobu_sn_policy_v2.py" = Join-Path $projectPath "tools\guobu_sn_policy_v2.py"
+  "tools/guobu_sn_barcode.py" = Join-Path $projectPath "tools\guobu_sn_barcode.py"
   "tools/guobu_audit_contract.py" = $contractValidator
   "tools/guobu_audit_report.py" = $businessGenerator
   "tools/select_guobu_tasks.py" = $selector
@@ -210,10 +292,12 @@ $runtimePaths = [ordered]@{
   "modules/image_role.py" = Join-Path $projectPath "modules\image_role.py"
   "modules/ocr_engine.py" = Join-Path $projectPath "modules\ocr_engine.py"
 }
-if ($photoAuthEdgeMappingMode -eq "on") {
+if ($photoAuthenticityLocalTreeEnabled -eq "true") {
+  $runtimePaths["tools/non_real_local_features.py"] = Join-Path $projectPath "tools\non_real_local_features.py"
+  $runtimePaths["tools/black_edge_shadow_detector.py"] = Join-Path $projectPath "tools\black_edge_shadow_detector.py"
+} elseif ($photoAuthEdgeMappingMode -eq "on") {
   $runtimePaths["tools/black_edge_shadow_detector.py"] = Join-Path $projectPath "tools\black_edge_shadow_detector.py"
 }
-
 function Get-Sha256Map {
   param(
     [Parameter(Mandatory = $true)]$Paths
@@ -260,6 +344,7 @@ function New-RunManifest {
     model = $Model
     mode = $Mode
     sn_policy_version = $SnPolicyVersion
+    sn_barcode_mode = $SnBarcodeMode
     workers = $Workers
     targeted_sn_review = [bool]$EnableTargetedSnReview
     sn_char_review_mode = $snCharReviewMode
@@ -267,8 +352,12 @@ function New-RunManifest {
     photo_auth_edge_mapping_mode = $photoAuthEdgeMappingMode
     digital_activation_evidence_mode = $digitalActivationEvidenceMode
     photo_authenticity_mode = $photoAuthenticityMode
+    photo_authenticity_new_rule_enabled = $photoAuthenticityNewRuleEnabled
     photo_authenticity_local_tree_enabled = $photoAuthenticityLocalTreeEnabled
+    photo_authenticity_local_tree_confirmation_enabled = $photoAuthenticityLocalTreeConfirmationEnabled
     order_timeout_seconds = 60
+    cache_root = $cacheRoot
+    temp_root = $tempRoot
     git_commit = (Get-GitCommit)
     python_path = $pythonPath
     python_version = [string]$pythonInfo.version
@@ -289,6 +378,7 @@ $plan = [ordered]@{
   model = $Model
   mode = $Mode
   snPolicyVersion = $SnPolicyVersion
+  snBarcodeMode = $SnBarcodeMode
   workers = $Workers
   targetedSnReview = [bool]$EnableTargetedSnReview
   snCharReview = $snCharReviewMode -ne "off"
@@ -297,10 +387,20 @@ $plan = [ordered]@{
   photoAuthEdgeMapping = $photoAuthEdgeMappingMode -eq "on"
   digitalActivationEvidence = $digitalActivationEvidenceMode -eq "on"
   photoAuthenticityMode = $photoAuthenticityMode
+  photoAuthenticityNewRuleEnabled = $photoAuthenticityNewRuleEnabled -eq "true"
+  photoAuthenticityLocalTreeEnabled = $photoAuthenticityLocalTreeEnabled -eq "true"
+  photoAuthenticityLocalTreeConfirmationEnabled = $photoAuthenticityLocalTreeConfirmationEnabled -eq "true"
   timeoutRerun = -not [bool]$SkipTimeoutRerun
+  resume = [bool]$Resume
   pythonPath = $pythonPath
   pythonVersion = [string]$pythonInfo.version
   cv2Version = [string]$pythonInfo.cv2_version
+  snBarcodeRuntimeAvailable = [bool]$pythonInfo.zxingcpp_available
+  zxingcppVersion = [string]$pythonInfo.zxingcpp_version
+  cacheRoot = $cacheRoot
+  tempRoot = $tempRoot
+  firstCacheDir = $firstCache
+  secondCacheDir = $secondCache
   runManifest = $runManifest
   firstManifest = $firstManifest
   secondManifest = $secondManifest
@@ -345,9 +445,13 @@ function Assert-RunNameUnused {
   }
 }
 
-Assert-RunNameUnused
+if (-not $Resume) {
+  Assert-RunNameUnused
+} elseif (-not (Test-Path -LiteralPath $firstManifest -PathType Leaf)) {
+  throw "RunName '$RunName' cannot resume because the first run manifest does not exist: $firstManifest"
+}
 
-New-Item -ItemType Directory -Force -Path $reportRoot, $tempRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $reportRoot, $tempRoot, $cacheRoot | Out-Null
 $reservationStream = $null
 $persistentReservationReady = $false
 try {
@@ -365,8 +469,12 @@ try {
   throw "RunName '$RunName' is already reserved by an existing or concurrent run. Use a new RunName."
 }
 try {
-  Assert-RunNameUnused -IgnoreReservation
-  New-Item -ItemType Directory -Path $firstOut -ErrorAction Stop | Out-Null
+  if (-not $Resume) {
+    Assert-RunNameUnused -IgnoreReservation
+    New-Item -ItemType Directory -Path $firstOut -ErrorAction Stop | Out-Null
+  } else {
+    New-Item -ItemType Directory -Force -Path $firstOut | Out-Null
+  }
   $persistentReservationReady = $true
 } catch {
   throw "RunName '$RunName' is already reserved by an existing or concurrent run. Use a new RunName."
@@ -399,13 +507,16 @@ function Invoke-AuditRun {
     "--model", $Model,
     "--mode", $Mode,
     "--sn-policy-version", $SnPolicyVersion,
+    "--sn-barcode-mode", $SnBarcodeMode,
     "--workers", [string]$Workers,
     "--sn-char-review-mode", $snCharReviewMode,
     "--sn-label-auth-review-mode", $snLabelAuthReviewMode,
     "--photo-auth-edge-mapping-mode", $photoAuthEdgeMappingMode,
     "--digital-activation-evidence-mode", $digitalActivationEvidenceMode,
     "--photo-authenticity-mode", $photoAuthenticityMode,
-    "--photo-authenticity-local-tree-enabled", $photoAuthenticityLocalTreeEnabled
+    "--photo-authenticity-new-rule-enabled", $photoAuthenticityNewRuleEnabled,
+    "--photo-authenticity-local-tree-enabled", $photoAuthenticityLocalTreeEnabled,
+    "--photo-authenticity-local-tree-confirmation-enabled", $photoAuthenticityLocalTreeConfirmationEnabled
   )
   if (-not $EnableTargetedSnReview) { $arguments += "--no-targeted-sn-review" }
 

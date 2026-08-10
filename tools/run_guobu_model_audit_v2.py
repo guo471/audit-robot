@@ -46,12 +46,20 @@ from tools.guobu_sn_policy_v2 import (
     classify_sn_category as classify_sn_v2_category,
     decide_sn as decide_sn_v2,
 )
+from tools.guobu_sn_barcode import BarcodeScanner, apply_barcode_second_check
 
 
 def resolve_sn_policy_version(value: Any = None) -> str:
     selected = str(value if value is not None else os.environ.get("SN_POLICY_VERSION", "v1")).strip().lower()
     if selected not in {"v1", "v2"}:
         raise ValueError("SN_POLICY_VERSION must be v1 or v2")
+    return selected
+
+
+def resolve_sn_barcode_mode(value: Any = None) -> str:
+    selected = str(value if value is not None else os.environ.get("SN_BARCODE_MODE", "enforce")).strip().lower()
+    if selected not in {"off", "shadow", "enforce"}:
+        raise ValueError("SN_BARCODE_MODE must be off, shadow, or enforce")
     return selected
 
 
@@ -859,6 +867,7 @@ CSV_COLUMNS = [
     ("photo_authenticity_incremental_elapsed_sec", "真实性可计算增量耗时秒"),
     ("photo_authenticity_incremental_available", "真实性增量是否可计算"),
     ("sn_char_review_mode", "SN相似字符复核模式"),
+    ("sn_barcode_mode", "SN条码二次确认模式"),
     ("sn_label_auth_review_mode", "SN标签真实性插件模式"),
     ("digital_activation_evidence_mode", "普通3C激活证据插件模式"),
 ]
@@ -1448,7 +1457,7 @@ def precheck_task(task: dict[str, Any]) -> dict[str, Any]:
     if is_home:
         address_ok = is_address_precise_enough(fields.get("address"))
         if not address_ok:
-            return _manual_precheck(task, "ADDRESS_TOO_COARSE", "瀹剁數鍦板潃涓嶅绮剧‘", address_ok=False)
+            return _manual_precheck(task, "ADDRESS_TOO_COARSE", reason_code_to_chinese("ADDRESS_TOO_COARSE"), address_ok=False)
 
     return {
         "manual_required": False,
@@ -3402,10 +3411,13 @@ def audit_task_hybrid(
     allow_review: bool = True,
     allow_targeted_review: bool = True,
     sn_policy_version: str | None = None,
+    sn_barcode_mode: str | None = None,
+    barcode_scanner: BarcodeScanner | None = None,
 ) -> dict[str, Any]:
     started = time.time()
     order_deadline = _order_deadline(started)
     active_sn_policy = resolve_sn_policy_version(sn_policy_version)
+    active_sn_barcode_mode = resolve_sn_barcode_mode(sn_barcode_mode)
     authenticity_config = PhotoAuthenticityConfig.from_env(os.environ)
     digital_activation_mode = resolve_digital_activation_evidence_mode()
     pre_started = time.time()
@@ -3416,6 +3428,7 @@ def audit_task_hybrid(
         row["strategy"] = "local_precheck"
         row["model_calls"] = 0
         row["total_tokens"] = 0
+        row["sn_barcode_mode"] = active_sn_barcode_mode
         return finalize_photo_authenticity_report_fields(row, authenticity_config)
 
     fields = task["fields"]
@@ -3460,6 +3473,13 @@ def audit_task_hybrid(
             },
             effective_category=precheck["effective_category"],
         )
+        sn_decision, sn_barcode_result = apply_barcode_second_check(
+            task,
+            sn_decision,
+            precheck["activation_images"],
+            barcode_scanner=barcode_scanner,
+            barcode_mode=active_sn_barcode_mode,
+        )
         normalized_sn = _normalize_sn_v2_result(sn_result, sn_decision)
     else:
         sn_payload = build_sn_payload(task, fields, precheck["activation_images"])
@@ -3478,8 +3498,15 @@ def audit_task_hybrid(
             order_deadline_at=order_deadline,
         )
         normalized_sn = _normalize_sn_result(fields, sn_result)
+        sn_barcode_result = None
     model_calls = 0 if sn_cached else 1
     total_tokens = _usage_total(sn_usage)
+
+    def attach_sn_barcode_result(row: dict[str, Any]) -> dict[str, Any]:
+        row["sn_barcode_mode"] = active_sn_barcode_mode
+        if sn_barcode_result is not None:
+            row.setdefault("_raw", {})["sn_barcode_result"] = sn_barcode_result
+        return row
 
     if _order_budget_exhausted(started):
         manual = _order_timeout_manual(precheck)
@@ -3488,7 +3515,7 @@ def audit_task_hybrid(
         row["model_calls"] = model_calls
         row["total_tokens"] = total_tokens
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-        return finalize_photo_authenticity_report_fields(row, authenticity_config)
+        return finalize_photo_authenticity_report_fields(attach_sn_barcode_result(row), authenticity_config)
 
     if active_sn_policy == "v1" and allow_review and needs_high_detail_review(normalized_sn):
         if _order_budget_exhausted(started):
@@ -3607,7 +3634,7 @@ def audit_task_hybrid(
         row["model_calls"] = model_calls
         row["total_tokens"] = total_tokens
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-        return finalize_photo_authenticity_report_fields(row, authenticity_config)
+        return finalize_photo_authenticity_report_fields(attach_sn_barcode_result(row), authenticity_config)
 
     if _order_budget_exhausted(started):
         manual = _order_timeout_manual(precheck)
@@ -3616,7 +3643,7 @@ def audit_task_hybrid(
         row["model_calls"] = model_calls
         row["total_tokens"] = total_tokens
         row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-        return finalize_photo_authenticity_report_fields(row, authenticity_config)
+        return finalize_photo_authenticity_report_fields(attach_sn_barcode_result(row), authenticity_config)
 
     compliance_payload = {
         "id": task["channel_order_no"],
@@ -3734,6 +3761,7 @@ def audit_task_hybrid(
         "compliance_usage": compliance_usage,
         "compliance_cached": compliance_cached,
     }
+    attach_sn_barcode_result(row)
     if authenticity_config.mode != "off":
         row["_raw"].update({
             "photo_authenticity_fallback_raw": fallback_raw,
@@ -3929,6 +3957,7 @@ def _final_row(
         "observed_sn": observed_sn,
         "sn_match": sn_match,
         "sn_char_review_mode": resolve_sn_char_review_mode(),
+        "sn_barcode_mode": resolve_sn_barcode_mode(),
         "sn_label_auth_review_mode": resolve_sn_label_auth_review_mode(),
         "digital_activation_evidence_mode": resolve_digital_activation_evidence_mode(),
         "product_type_match": compliance.get("product_type_match", ""),
@@ -3956,6 +3985,7 @@ def audit_task_path(
     cache_dir: Path,
     allow_review: bool,
     allow_targeted_review: bool,
+    sn_barcode_mode: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     task = json.loads(task_path.read_text(encoding="utf-8-sig"))
     task_started = time.time()
@@ -3989,6 +4019,7 @@ def audit_task_path(
                 cache_dir=cache_dir,
                 allow_review=allow_review,
                 allow_targeted_review=allow_targeted_review,
+                sn_barcode_mode=sn_barcode_mode,
             )
         else:
             result = audit_task_v2(base_url, api_key, model, task, cache_dir=cache_dir)
@@ -4024,6 +4055,12 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["v1", "v2"],
         default=os.environ.get("SN_POLICY_VERSION", "v1"),
         help="hybrid模式SN策略；默认v1，v2仅用于显式对比测试",
+    )
+    parser.add_argument(
+        "--sn-barcode-mode",
+        choices=["off", "shadow", "enforce"],
+        default=os.environ.get("SN_BARCODE_MODE", "enforce"),
+        help="SN条码/二维码二次确认插件；默认enforce参与救回，可设shadow只记录",
     )
     parser.add_argument("--no-review", action="store_true")
     parser.add_argument("--no-targeted-sn-review", action="store_true")
@@ -4093,6 +4130,7 @@ def main() -> None:
     args = parse_cli_args()
     os.environ["SN_CHAR_REVIEW_MODE"] = args.sn_char_review_mode
     os.environ["SN_POLICY_VERSION"] = args.sn_policy_version
+    os.environ["SN_BARCODE_MODE"] = args.sn_barcode_mode
     os.environ["SN_LABEL_AUTH_REVIEW_MODE"] = args.sn_label_auth_review_mode
     os.environ["PHOTO_AUTH_EDGE_MAPPING_MODE"] = args.photo_auth_edge_mapping_mode
     os.environ["DIGITAL_ACTIVATION_EVIDENCE_MODE"] = args.digital_activation_evidence_mode
@@ -4135,6 +4173,7 @@ def main() -> None:
                     cache_dir=cache_dir,
                     allow_review=not args.no_review,
                     allow_targeted_review=not args.no_targeted_sn_review,
+                    sn_barcode_mode=args.sn_barcode_mode,
                 )
             )
 

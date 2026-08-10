@@ -247,11 +247,14 @@ def test_shadow_compare_normalizes_sn_photo_group_alias_with_spaces(tmp_path):
     assert report["missingRequiredCounts"]["image_groups.SN码采集/激活照片"] == 0
 
 
-def test_entry_has_clear_login_failure_message_and_local_storage_fallback():
+def test_entry_has_clear_login_failure_message_and_safe_token_cache():
     script = SCRIPT.read_text(encoding="utf-8")
 
-    assert "collectTokenCandidates" in script
-    assert "Local Storage" in script
+    assert "collectTokenCandidates" not in script
+    assert "leveldb" not in script.lower()
+    assert "saveTokenEnv" in script
+    assert "GUOBU_AUTH_TOKEN" in script
+    assert "MACHINE_APPROVAL_AUTH_TOKEN" in script
     assert "没有找到可用的后台登录态" in script
     assert "approval.jhddsz.com" in script
 

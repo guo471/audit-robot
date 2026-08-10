@@ -30,9 +30,9 @@ def test_audit_rejects_wrong_token(monkeypatch):
     assert response.status_code == 401
 
 
-def test_audit_rejects_default_token_unless_enabled(monkeypatch):
+def test_audit_rejects_default_token_even_if_legacy_flag_is_set(monkeypatch):
     monkeypatch.delenv("AUDIT_SERVICE_TOKEN", raising=False)
-    monkeypatch.delenv("AUDIT_ALLOW_DEFAULT_TOKEN", raising=False)
+    monkeypatch.setenv("AUDIT_ALLOW_DEFAULT_TOKEN", "true")
 
     response = TestClient(audit_service.app).post(
         "/audit",

@@ -10,8 +10,6 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from config import (
-    AUDIT_ALLOW_DEFAULT_TOKEN_ENV,
-    AUDIT_DEFAULT_TOKEN,
     AUDIT_ORDER_TIMEOUT_SEC,
     AUDIT_SERVICE_HOST,
     AUDIT_SERVICE_PORT,
@@ -48,9 +46,6 @@ def expected_token() -> str | None:
     configured = os.environ.get(AUDIT_SERVICE_TOKEN_ENV)
     if configured:
         return configured
-    allow_default = os.environ.get(AUDIT_ALLOW_DEFAULT_TOKEN_ENV, "").strip().lower()
-    if allow_default in {"1", "true", "yes"}:
-        return AUDIT_DEFAULT_TOKEN
     return None
 
 

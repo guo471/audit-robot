@@ -2352,6 +2352,7 @@ def test_precheck_rejects_home_appliance_coarse_address():
 
     assert result["manual_required"] is True
     assert result["manual_reason_codes"] == ["ADDRESS_TOO_COARSE"]
+    assert result["manual_reason"] == "家电收货地址不够精确"
 
 
 def test_precheck_does_not_reject_computer_as_home_appliance_address():
@@ -4030,6 +4031,7 @@ def test_audit_task_path_passes_targeted_review_flag_to_hybrid(monkeypatch, tmp_
         cache_dir=None,
         allow_review=True,
         allow_targeted_review=True,
+        sn_barcode_mode=None,
     ):
         captured["allow_targeted_review"] = allow_targeted_review
         return {"id": task["channel_order_no"], "manual_reason_code": ""}
@@ -4538,6 +4540,7 @@ def test_photo_authenticity_image_results_are_serialized_deterministically():
 
 def test_photo_authenticity_cli_defaults_enforce_and_allows_explicit_off_before_runtime(monkeypatch):
     monkeypatch.delenv("PHOTO_AUTHENTICITY_MODE", raising=False)
+    monkeypatch.delenv("PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED", raising=False)
     args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
     assert args.photo_authenticity_mode == "enforce"
     assert args.photo_authenticity_artifact_dir is None

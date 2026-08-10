@@ -198,6 +198,46 @@ function sanitizedDryRun(config) {
   };
 }
 
+function envQuote(value) {
+  return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function hardenTokenEnvFile(filePath) {
+  if (process.platform !== "win32") {
+    fs.chmodSync(filePath, 0o600);
+    return;
+  }
+  const account = process.env.USERDOMAIN && process.env.USERNAME
+    ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
+    : process.env.USERNAME;
+  if (!account) {
+    fs.rmSync(filePath, { force: true });
+    throw new Error("Cannot restrict token env ACL without current Windows user.");
+  }
+  const result = spawnSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${account}:F`], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    fs.rmSync(filePath, { force: true });
+    throw new Error("Failed to restrict token env ACL.");
+  }
+}
+
+function saveTokenEnv(filePath, token) {
+  if (!filePath) return;
+  const resolved = path.resolve(filePath);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  const body = [
+    `GUOBU_AUTH_TOKEN=${envQuote(token)}`,
+    `MACHINE_APPROVAL_AUTH_TOKEN=${envQuote(token)}`,
+    "",
+  ].join("\n");
+  fs.writeFileSync(resolved, body, "utf8");
+  hardenTokenEnvFile(resolved);
+  console.log(`后台登录态已写入：${resolved}`);
+}
+
 function firstDefined(...values) {
   for (const value of values) {
     if (value !== undefined && value !== null) return value;
@@ -500,54 +540,12 @@ async function getTokenFromFreshTarget(port) {
   }
 }
 
-function collectTokenCandidates() {
-  const roots = [
-    path.join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "User Data"),
-    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "Edge", "User Data"),
-  ];
-  const candidates = new Set();
-  for (const root of roots) {
-    if (!root || !fs.existsSync(root)) continue;
-    const profiles = fs
-      .readdirSync(root, { withFileTypes: true })
-      .filter((item) => item.isDirectory() && (item.name === "Default" || /^Profile \d+$/i.test(item.name)))
-      .map((item) => item.name);
-    for (const profile of profiles) {
-      const leveldb = path.join(root, profile, "Local Storage", "leveldb");
-      if (!fs.existsSync(leveldb)) continue;
-      for (const file of fs.readdirSync(leveldb)) {
-        if (!/\.(log|ldb)$/i.test(file)) continue;
-        try {
-          const buffer = fs.readFileSync(path.join(leveldb, file));
-          for (const encoding of ["latin1", "utf8", "utf16le"]) {
-            const content = buffer.toString(encoding);
-            for (const match of content.matchAll(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g)) {
-              candidates.add(match[0]);
-            }
-            for (const match of content.matchAll(/\b[a-f0-9]{32}\b/gi)) candidates.add(match[0]);
-            for (const match of content.matchAll(/\b[a-f0-9]{40,64}\b/gi)) candidates.add(match[0]);
-            let index = 0;
-            while ((index = content.indexOf("https://approval.jhddsz.com", index)) >= 0) {
-              const segment = content.slice(index, index + 2500);
-              for (const match of segment.matchAll(/([a-f0-9]{32})/gi)) candidates.add(match[1]);
-              index += 10;
-            }
-          }
-        } catch {
-          // Locked LevelDB files are common while the browser is open.
-        }
-      }
-    }
-  }
-  return [...candidates].sort((a, b) => b.length - a.length);
-}
-
 async function tokenCandidatesFromBrowser(config) {
   try {
     return [await getTokenFromFreshTarget(config.port)];
   } catch (error) {
-    console.log(`CDP 未能直接读取登录态，改用本机 Edge/Chrome 已登录缓存候选：${error.message}`);
-    return collectTokenCandidates();
+    console.log(`CDP token read failed: ${error.message}`);
+    return [];
   }
 }
 
@@ -623,6 +621,9 @@ async function main() {
   console.log("正在校验后台 API 总数...");
   const { token, probeJson } = await findUsableToken(config);
   console.log(`API 返回总数：${probeJson.total}`);
+  if (cli["save-token-env"]) {
+    saveTokenEnv(cli["save-token-env"], token);
+  }
   if (config.expectTotal > 0 && Number(probeJson.total) !== Number(config.expectTotal)) {
     throw new Error(`总数不一致：你说当前是 ${config.expectTotal} 单，但 API 返回 ${probeJson.total} 单。为避免采错，已停止。`);
   }
