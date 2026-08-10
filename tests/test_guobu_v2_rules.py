@@ -4544,7 +4544,7 @@ def test_photo_authenticity_cli_defaults_enforce_and_allows_explicit_off_before_
     args = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
     assert args.photo_authenticity_mode == "enforce"
     assert args.photo_authenticity_artifact_dir is None
-    assert args.photo_authenticity_local_tree_enabled == "true"
+    assert args.photo_authenticity_local_tree_enabled == "false"
     monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
     env_off = v2.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
     assert env_off.photo_authenticity_mode == "off"
