@@ -78,10 +78,10 @@ def compliance_pass():
     }
 
 
-def test_cli_defaults_to_sn_v1_and_keeps_v2_as_explicit_opt_in(monkeypatch):
+def test_cli_defaults_to_sn_v2(monkeypatch):
     monkeypatch.delenv("SN_POLICY_VERSION", raising=False)
     args = mainline.parse_cli_args(["--tasks-dir", "tasks", "--out-dir", "out"])
-    assert args.sn_policy_version == "v1"
+    assert args.sn_policy_version == "v2"
 
     explicit_v2 = mainline.parse_cli_args(
         ["--tasks-dir", "tasks", "--out-dir", "out", "--sn-policy-version", "v2"]

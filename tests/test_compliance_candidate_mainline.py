@@ -83,6 +83,53 @@ def _phone_task() -> dict:
     }
 
 
+def _sn_model_response(stage: str):
+    if stage == "hybrid_sn_v2":
+        return (
+            {
+                "schema_version": "guobu_sn_evidence_v2",
+                "sn_readable": True,
+                "screen_identity_state": "SCREEN_SN_CLEAR",
+                "sn_candidates": [
+                    {
+                        "image_id": "img_003",
+                        "source": "DEVICE_SCREEN",
+                        "field_type": "SN",
+                        "label_text": "SN",
+                        "raw_text": "ABC123",
+                        "raw_context": "SN: ABC123",
+                        "normalized_text": "ABC123",
+                        "label_binding": "EXPLICIT",
+                        "readable": True,
+                        "complete": True,
+                        "confidence": 0.99,
+                        "visual_ambiguity_notes": [],
+                    }
+                ],
+                "identity_evidence": [],
+                "confidence": 0.99,
+            },
+            "sn v2 raw",
+            0.1,
+            {"total_tokens": 10},
+            False,
+        )
+    if stage == "hybrid_sn":
+        return (
+            {
+                "sn_match": True,
+                "observed_sn": "ABC123",
+                "normalized_observed_sn": "ABC123",
+                "confidence": 0.99,
+            },
+            "sn raw",
+            0.1,
+            {"total_tokens": 10},
+            False,
+        )
+    raise AssertionError(f"unexpected model stage: {stage}")
+
+
 def test_compliance_ruleset_defaults_to_candidate_and_legacy_is_explicit(monkeypatch):
     monkeypatch.delenv("COMPLIANCE_RULESET", raising=False)
     assert v2.resolve_compliance_ruleset() == "candidate"
@@ -605,19 +652,8 @@ def test_hybrid_defaults_to_candidate_and_maps_complete_response(monkeypatch):
     def fake_call(*args, stage, **kwargs):
         prompt = args[3]
         calls.append((stage, prompt, kwargs))
-        if stage == "hybrid_sn":
-            return (
-                {
-                    "sn_match": True,
-                    "observed_sn": "ABC123",
-                    "normalized_observed_sn": "ABC123",
-                    "confidence": 0.99,
-                },
-                "sn raw",
-                0.1,
-                {"total_tokens": 10},
-                False,
-            )
+        if stage in {"hybrid_sn", "hybrid_sn_v2"}:
+            return _sn_model_response(stage)
         return (
             _candidate_phone_response(),
             "candidate raw",
@@ -655,14 +691,8 @@ def test_hybrid_candidate_missing_field_is_manual_not_service_failure(monkeypatc
     response.pop("activation_evidence_type")
 
     def fake_call(*_args, stage, **_kwargs):
-        if stage == "hybrid_sn":
-            return (
-                {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-                "sn raw",
-                0.1,
-                {},
-                False,
-            )
+        if stage in {"hybrid_sn", "hybrid_sn_v2"}:
+            return _sn_model_response(stage)
         return response, "malformed candidate raw", 0.2, {}, False
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
@@ -686,14 +716,8 @@ def test_hybrid_candidate_duplicate_reason_survives_legacy_postprocess(monkeypat
     response["duplicate_image_evidence"] = True
 
     def fake_call(*_args, stage, **_kwargs):
-        if stage == "hybrid_sn":
-            return (
-                {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-                "sn raw",
-                0.1,
-                {},
-                False,
-            )
+        if stage in {"hybrid_sn", "hybrid_sn_v2"}:
+            return _sn_model_response(stage)
         return response, "duplicate raw", 0.2, {}, False
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
@@ -715,14 +739,8 @@ def test_hybrid_candidate_activation_reason_survives_legacy_postprocess(monkeypa
     response["activation_evidence_type"] = "SCREEN_ON_NO_IDENTITY"
 
     def fake_call(*_args, stage, **_kwargs):
-        if stage == "hybrid_sn":
-            return (
-                {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-                "sn raw",
-                0.1,
-                {},
-                False,
-            )
+        if stage in {"hybrid_sn", "hybrid_sn_v2"}:
+            return _sn_model_response(stage)
         return response, "activation invalid raw", 0.2, {}, False
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
@@ -743,14 +761,8 @@ def test_hybrid_explicit_legacy_uses_old_prompt_and_result_contract(monkeypatch)
     def fake_call(*args, stage, **_kwargs):
         prompt = args[3]
         prompts.append((stage, prompt))
-        if stage == "hybrid_sn":
-            return (
-                {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-                "sn raw",
-                0.1,
-                {},
-                False,
-            )
+        if stage in {"hybrid_sn", "hybrid_sn_v2"}:
+            return _sn_model_response(stage)
         return _legacy_phone_response(), "legacy raw", 0.2, {}, False
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
@@ -775,14 +787,7 @@ def test_hybrid_candidate_unknown_product_type_is_local_manual(monkeypatch):
 
     def fake_call(*_args, stage, **_kwargs):
         calls.append(stage)
-        assert stage == "hybrid_sn"
-        return (
-            {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-            "sn raw",
-            0.1,
-            {"total_tokens": 11},
-            False,
-        )
+        return _sn_model_response(stage)
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
 
@@ -795,7 +800,7 @@ def test_hybrid_candidate_unknown_product_type_is_local_manual(monkeypatch):
     assert result["model_calls"] == 1
     assert result["observed_sn"] == "ABC123"
     assert result["sn_match"] is True
-    assert calls == ["hybrid_sn"]
+    assert calls == ["hybrid_sn_v2"]
 
 
 def test_hybrid_candidate_missing_unboxing_group_is_local_manual(monkeypatch):
@@ -807,14 +812,7 @@ def test_hybrid_candidate_missing_unboxing_group_is_local_manual(monkeypatch):
 
     def fake_call(*_args, stage, **_kwargs):
         calls.append(stage)
-        assert stage == "hybrid_sn"
-        return (
-            {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-            "sn raw",
-            0.1,
-            {},
-            False,
-        )
+        return _sn_model_response(stage)
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
 
@@ -826,7 +824,7 @@ def test_hybrid_candidate_missing_unboxing_group_is_local_manual(monkeypatch):
     assert result["manual_reason_code"] == "MODEL_UNCERTAIN"
     assert result["model_calls"] == 1
     assert result["observed_sn"] == "ABC123"
-    assert calls == ["hybrid_sn"]
+    assert calls == ["hybrid_sn_v2"]
 
 
 def test_hybrid_candidate_unusable_required_image_is_local_manual_after_sn(
@@ -842,14 +840,7 @@ def test_hybrid_candidate_unusable_required_image_is_local_manual_after_sn(
 
     def fake_call(*_args, stage, **_kwargs):
         calls.append(stage)
-        assert stage == "hybrid_sn"
-        return (
-            {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-            "sn raw",
-            0.1,
-            {},
-            False,
-        )
+        return _sn_model_response(stage)
 
     monkeypatch.setattr(v2, "call_model_with_retry", fake_call)
 
@@ -861,7 +852,7 @@ def test_hybrid_candidate_unusable_required_image_is_local_manual_after_sn(
     assert result["manual_reason_code"] == "MODEL_UNCERTAIN"
     assert "商品照片组" in result["compliance_input_error"]
     assert result["observed_sn"] == "ABC123"
-    assert calls == ["hybrid_sn"]
+    assert calls == ["hybrid_sn_v2"]
 
 
 def test_hybrid_candidate_sends_group_and_image_id_labels(monkeypatch):
@@ -870,14 +861,8 @@ def test_hybrid_candidate_sends_group_and_image_id_labels(monkeypatch):
     captured_images = []
 
     def fake_call(*args, stage, **_kwargs):
-        if stage == "hybrid_sn":
-            return (
-                {"sn_match": True, "observed_sn": "ABC123", "confidence": 0.99},
-                "sn raw",
-                0.1,
-                {},
-                False,
-            )
+        if stage in {"hybrid_sn", "hybrid_sn_v2"}:
+            return _sn_model_response(stage)
         captured_images.extend(args[5])
         return _candidate_phone_response(), "candidate raw", 0.2, {}, False
 

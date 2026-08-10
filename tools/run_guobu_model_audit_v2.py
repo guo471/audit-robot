@@ -69,7 +69,7 @@ def resolve_compliance_ruleset(value: Any = None) -> str:
 
 
 def resolve_sn_policy_version(value: Any = None) -> str:
-    selected = str(value if value is not None else os.environ.get("SN_POLICY_VERSION", "v1")).strip().lower()
+    selected = str(value if value is not None else os.environ.get("SN_POLICY_VERSION", "v2")).strip().lower()
     if selected not in {"v1", "v2"}:
         raise ValueError("SN_POLICY_VERSION must be v1 or v2")
     return selected
@@ -4435,8 +4435,8 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--sn-policy-version",
         choices=["v1", "v2"],
-        default=os.environ.get("SN_POLICY_VERSION", "v1"),
-        help="hybrid模式SN策略；默认v1，v2仅用于显式对比测试",
+        default=os.environ.get("SN_POLICY_VERSION", "v2"),
+        help="hybrid模式SN策略；默认v2，设为v1可一键回退旧SN规则",
     )
     parser.add_argument(
         "--sn-barcode-mode",
