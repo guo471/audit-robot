@@ -10,6 +10,7 @@ from tools.guobu_sn_policy_v2 import (
     build_model_payload,
     build_sn_prompt,
     canonical_sn,
+    canonical_system_sn,
     classify_sn_category,
     decide_sn as decide_sn_policy,
 )
@@ -149,6 +150,35 @@ def test_label_prefix_stripping_does_not_correct_similar_characters():
     )
     assert result["manual_required"] is True
     assert result["manual_reason_code"] == "SN_MISMATCH"
+
+
+def test_system_sn_canonicalization_preserves_zero_and_letter_o():
+    assert canonical_system_sn("3B164BOORNP00000") == "3B164BOORNP00000"
+    assert canonical_system_sn("3B164B00RNP00000") == "3B164B00RNP00000"
+
+
+def test_system_sn_letter_o_is_not_rewritten_to_match_model_zero():
+    result = decide_sn(
+        {"product_type": "\u624b\u673a", "system_sn": "3B164BOORNP00000"},
+        evidence(candidate("DEVICE_SCREEN", "3B164B00RNP00000"), state="SCREEN_SN_CLEAR"),
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["normalized_system_sn"] == "3B164BOORNP00000"
+    assert result["normalized_observed_sn"] == "3B164B00RNP00000"
+
+
+def test_model_side_letter_o_does_not_match_system_zero_by_default():
+    result = decide_sn(
+        {"product_type": "\u624b\u673a", "system_sn": "3B164B00RNP00000"},
+        evidence(candidate("DEVICE_SCREEN", "3B164BOORNP00000"), state="SCREEN_SN_CLEAR"),
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["normalized_system_sn"] == "3B164B00RNP00000"
+    assert result["normalized_observed_sn"] == "3B164BOORNP00000"
 
 
 def test_canonical_sn_preserves_slash_as_real_character():

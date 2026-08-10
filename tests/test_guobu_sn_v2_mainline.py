@@ -136,6 +136,30 @@ def test_hybrid_v2_sn_mismatch_stops_before_compliance(monkeypatch):
     assert result["strategy"] == "hybrid_sn_v2_manual"
 
 
+def test_hybrid_v2_system_sn_letter_o_is_not_rewritten_to_match_model_zero(monkeypatch):
+    monkeypatch.setenv("PHOTO_AUTHENTICITY_MODE", "off")
+    calls = []
+    order = task()
+    order["fields"]["system_sn"] = "3B164BOORNP00000"
+
+    def fake_call(_base, _key, _model, _prompt, _payload, _images, *, stage, **_kwargs):
+        calls.append(stage)
+        if stage != "hybrid_sn_v2":
+            raise AssertionError("compliance must not run after V2 SN mismatch")
+        return sn_evidence("3B164B00RNP00000"), "sn-v2", 0.1, {"total_tokens": 10}, False
+
+    monkeypatch.setattr(mainline, "call_model_with_retry", fake_call)
+
+    result = mainline.audit_task_hybrid(
+        "https://unused", "key", "model", order, sn_policy_version="v2",
+    )
+
+    assert calls == ["hybrid_sn_v2"]
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["sn_match"] is False
+    assert result["strategy"] == "hybrid_sn_v2_manual"
+
+
 def test_batch_wrapper_defaults_to_sn_v1_and_forwards_the_switch():
     source = (PROJECT_ROOT / "tools" / "run_guobu_audit_batch.ps1").read_text(encoding="utf-8-sig")
     assert '[ValidateSet("v1", "v2")][string]$SnPolicyVersion = "v1"' in source

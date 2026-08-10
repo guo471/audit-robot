@@ -25,12 +25,14 @@ def test_barcode_allows_only_leading_s_prefix():
     assert result["match_type"] == "leading_s_prefix"
 
 
-def test_barcode_normalizes_model_o_to_zero_before_comparison():
+def test_barcode_does_not_normalize_o_to_zero_before_comparison():
     result = barcode_second_check({"system_sn": "ABC056"}, [decoded("ABCO56")])
 
-    assert result["matched"] is True
-    assert result["match_type"] == "exact"
-    assert result["matched_text"] == "ABCO56"
+    assert result["matched"] is False
+
+    reverse = barcode_second_check({"system_sn": "ABCO56"}, [decoded("ABC056")])
+
+    assert reverse["matched"] is False
 
 
 def test_barcode_does_not_normalize_other_visual_or_extra_characters():

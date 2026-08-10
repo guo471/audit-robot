@@ -79,6 +79,10 @@ def canonical_sn(value: Any) -> str:
     return re.sub(r"[^0-9A-Z/]", "", str(value or "").upper())
 
 
+def canonical_system_sn(value: Any) -> str:
+    return canonical_sn(value)
+
+
 _SN_LABEL_PREFIX_RE = re.compile(
     r"^\s*(?:LENOVO\s*S\s*/\s*N|LENOVO\s*SN|\u8054\u60f3\s*SN|S\s*/\s*N|SN(?:\s*\u7801)?|SERIAL(?:\s*(?:NO\.?|NUMBER))?|\u5e8f\u5217\u53f7|\u4ea7\u54c1\u5e8f\u5217\u53f7)\s*[:\uff1a#._/\-\s]+\s*",
     re.IGNORECASE,
@@ -364,7 +368,7 @@ def _base_decision(fields: dict[str, Any], category: SnCategory) -> dict[str, An
         "manual_reason_code": "MODEL_UNCERTAIN",
         "manual_reason": "SN证据无法确认",
         "system_sn": str(fields.get("system_sn") or ""),
-        "normalized_system_sn": canonical_sn(fields.get("system_sn")),
+        "normalized_system_sn": canonical_system_sn(fields.get("system_sn")),
         "observed_sn": "",
         "normalized_observed_sn": "",
         "selected_source": "",
@@ -409,7 +413,7 @@ def _has_same_priority_conflict(candidates: list[dict[str, Any]]) -> bool:
 
 
 def _leading_s_exception_applies(fields: dict[str, Any], candidate: dict[str, Any], all_usable: list[dict[str, Any]]) -> bool:
-    system = canonical_sn(fields.get("system_sn"))
+    system = canonical_system_sn(fields.get("system_sn"))
     observed = canonical_candidate_sn(candidate)
     if _candidate_source(candidate) != "DEVICE_SCREEN":
         return False
@@ -434,7 +438,7 @@ def _package_prefix_rescue_candidate(
         return None
     if _candidate_source(candidate) != "DEVICE_SCREEN":
         return None
-    system = canonical_sn(fields.get("system_sn"))
+    system = canonical_system_sn(fields.get("system_sn"))
     observed = canonical_candidate_sn(candidate)
     missing = len(system) - len(observed)
     if not observed or observed == system or not system.startswith(observed):
@@ -464,7 +468,7 @@ def _compare_candidates(
     *,
     all_usable: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    system = canonical_sn(fields.get("system_sn"))
+    system = canonical_system_sn(fields.get("system_sn"))
     if not candidates:
         return _manual(fields, category, "SN_NOT_FOUND", "未读取到有效SN")
     if _has_same_priority_conflict(candidates):
@@ -543,7 +547,7 @@ def decide_sn(
     category = classify_sn_category(values, effective_category=effective_category)
     if category is SnCategory.UNSUPPORTED:
         return _manual(values, category, "MODEL_UNCERTAIN", "该商品品类暂未配置SN自动审核规则")
-    if not canonical_sn(values.get("system_sn")):
+    if not canonical_system_sn(values.get("system_sn")):
         return _manual(values, category, "SYSTEM_SN_MISSING", "系统SN缺失")
 
     schema_error = _schema_error(evidence, category, allowed_image_ids)
@@ -609,6 +613,7 @@ __all__ = [
     "build_model_payload",
     "build_sn_prompt",
     "canonical_sn",
+    "canonical_system_sn",
     "classify_sn_category",
     "decide_sn",
 ]

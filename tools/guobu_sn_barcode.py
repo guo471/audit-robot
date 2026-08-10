@@ -28,7 +28,7 @@ def _barcode_token(value: Any) -> str:
 
 
 def comparable_barcode_sn(value: Any) -> str:
-    return trim_barcode_text(value).upper().replace("O", "0")
+    return trim_barcode_text(value).upper()
 
 
 def barcode_reject_reason(decoded: dict[str, Any], fields: dict[str, Any]) -> str:
