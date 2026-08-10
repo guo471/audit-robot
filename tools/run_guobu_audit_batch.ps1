@@ -8,6 +8,7 @@ param(
   [string]$RunName = "",
   [ValidateSet("qwen3.7-plus")][string]$Model = "qwen3.7-plus",
   [ValidateSet("fast", "hybrid", "v2", "sn_only")][string]$Mode = "hybrid",
+  [ValidateSet("", "candidate", "legacy")][string]$ComplianceRuleset = "",
   [ValidateSet("v1", "v2")][string]$SnPolicyVersion = "v2",
   [ValidateSet("off", "shadow", "enforce")][string]$SnBarcodeMode = "enforce",
   [ValidateSet("", "off", "shadow", "enforce")][string]$PhotoAuthenticityMode = "",
@@ -49,6 +50,18 @@ if ([string]::IsNullOrWhiteSpace($RunName)) {
   $RunName = "guobu_audit_" + (Get-Date -Format "yyyyMMdd_HHmmss")
 }
 $RunName = $RunName -replace '[^A-Za-z0-9_-]', '_'
+
+if ([string]::IsNullOrWhiteSpace($ComplianceRuleset)) {
+  $ComplianceRuleset = if ([string]::IsNullOrWhiteSpace($env:COMPLIANCE_RULESET)) {
+    "candidate"
+  } else {
+    $env:COMPLIANCE_RULESET
+  }
+}
+$ComplianceRuleset = $ComplianceRuleset.Trim().ToLowerInvariant()
+if ($ComplianceRuleset -notin @("candidate", "legacy")) {
+  throw "ComplianceRuleset must be candidate or legacy"
+}
 
 $projectPath = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $modelScript = Join-Path $projectPath "tools\run_guobu_model_audit_v2.py"
@@ -208,7 +221,7 @@ $photoAuthenticityLocalTreeConfirmationEnabled = if ($photoAuthenticityNewRuleEn
 if ($Workers -lt 1) { throw "Workers must be at least 1" }
 
 if ([string]::IsNullOrWhiteSpace($PythonExe)) {
-  $PythonExe = Join-Path $projectPath ".venv-photo-auth\Scripts\python.exe"
+  $PythonExe = "C:\Users\guoru\AppData\Local\Programs\Python\Python314\python.exe"
 }
 $pythonCandidate = if ([System.IO.Path]::IsPathRooted($PythonExe)) {
   $PythonExe
@@ -292,6 +305,9 @@ $runtimePaths = [ordered]@{
   "modules/image_role.py" = Join-Path $projectPath "modules\image_role.py"
   "modules/ocr_engine.py" = Join-Path $projectPath "modules\ocr_engine.py"
 }
+if ($ComplianceRuleset -eq "candidate") {
+  $runtimePaths["tools/compliance_candidate_rules.py"] = Join-Path $projectPath "tools\compliance_candidate_rules.py"
+}
 if ($photoAuthenticityLocalTreeEnabled -eq "true") {
   $runtimePaths["tools/non_real_local_features.py"] = Join-Path $projectPath "tools\non_real_local_features.py"
   $runtimePaths["tools/black_edge_shadow_detector.py"] = Join-Path $projectPath "tools\black_edge_shadow_detector.py"
@@ -343,6 +359,7 @@ function New-RunManifest {
     run_name = $RunName
     model = $Model
     mode = $Mode
+    compliance_ruleset = $ComplianceRuleset
     sn_policy_version = $SnPolicyVersion
     sn_barcode_mode = $SnBarcodeMode
     workers = $Workers
@@ -377,6 +394,7 @@ $plan = [ordered]@{
   runName = $RunName
   model = $Model
   mode = $Mode
+  complianceRuleset = $ComplianceRuleset
   snPolicyVersion = $SnPolicyVersion
   snBarcodeMode = $SnBarcodeMode
   workers = $Workers
@@ -506,6 +524,7 @@ function Invoke-AuditRun {
     "--cache-dir", $CacheDir,
     "--model", $Model,
     "--mode", $Mode,
+    "--compliance-ruleset", $ComplianceRuleset,
     "--sn-policy-version", $SnPolicyVersion,
     "--sn-barcode-mode", $SnBarcodeMode,
     "--workers", [string]$Workers,

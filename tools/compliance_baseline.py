@@ -472,7 +472,7 @@ def _candidate_model_result(
         record["订单品类/商品类型"],
         raw_model_result,
         unboxing_image_ids=tuple(
-            str(image.get("image_id") or "").strip()
+            image.get("image_id")
             for image in record["拆封/安装照片"]
         ),
     )

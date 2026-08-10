@@ -7,6 +7,7 @@ from tools import run_guobu_model_audit_v2 as v2
 @pytest.fixture(autouse=True)
 def _keep_legacy_sn_tests_on_v1(monkeypatch):
     monkeypatch.setenv("SN_POLICY_VERSION", "v1")
+    monkeypatch.setenv("COMPLIANCE_RULESET", "legacy")
 
 
 def test_authenticity_prompt_forbids_cross_image_evidence_and_model_final_verdict():

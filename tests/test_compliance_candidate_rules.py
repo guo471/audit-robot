@@ -539,6 +539,86 @@ def test_home_per_image_packaged_evidence_removes_model_unboxing_overreach():
     ]
 
 
+def test_home_packaged_evidence_drops_extra_non_unboxing_image_id():
+    response = _complete_candidate_response("home_appliance")
+    response["unboxing_photo_ok"] = False
+    response["manual_reason_codes"] = ["UNBOXING_PHOTO_INVALID"]
+    response["unboxing_image_evidence"].append(
+        {
+            "image_id": "img_003",
+            "product_visible": False,
+            "package_visible": True,
+            "home_or_installation_scene_visible": False,
+        }
+    )
+
+    validation = _validate_home(response)
+
+    assert validation["manual_required"] is False
+    assert validation["manual_reason_codes"] == []
+    assert validation["structure_anomaly"] is False
+    assert validation["effective_unboxing_photo_ok"] is True
+    assert validation["local_corrections"] == [
+        "DROP_NON_UNBOXING_IMAGE_EVIDENCE_IDS",
+        "REMOVE_UNBOXING_PHOTO_INVALID_PER_IMAGE_PACKAGED_EVIDENCE",
+    ]
+
+
+def test_home_unpacked_installation_drops_extra_non_unboxing_image_id():
+    response = _complete_candidate_response("home_appliance")
+    response["unboxing_photo_ok"] = False
+    response["manual_reason_codes"] = ["UNBOXING_PHOTO_INVALID"]
+    response["unboxing_image_evidence"] = [
+        {
+            "image_id": "img_002",
+            "product_visible": True,
+            "package_visible": False,
+            "home_or_installation_scene_visible": True,
+        },
+        {
+            "image_id": "img_003",
+            "product_visible": False,
+            "package_visible": False,
+            "home_or_installation_scene_visible": False,
+        },
+    ]
+
+    validation = _validate_home(response)
+
+    assert validation["manual_required"] is False
+    assert validation["structure_anomaly"] is False
+    assert validation["effective_unboxing_photo_ok"] is True
+    assert validation["local_corrections"] == [
+        "DROP_NON_UNBOXING_IMAGE_EVIDENCE_IDS",
+        "REMOVE_UNBOXING_PHOTO_INVALID_PER_IMAGE_UNPACKAGED_HOME_EVIDENCE",
+    ]
+
+
+def test_home_extra_image_id_does_not_hide_missing_expected_unboxing_image():
+    response = _complete_candidate_response("home_appliance")
+    response["unboxing_image_evidence"] = [
+        {
+            "image_id": "img_002",
+            "product_visible": True,
+            "package_visible": True,
+            "home_or_installation_scene_visible": False,
+        },
+        {
+            "image_id": "img_003",
+            "product_visible": False,
+            "package_visible": True,
+            "home_or_installation_scene_visible": False,
+        },
+    ]
+
+    validation = _validate_home(response, "img_002", "img_004")
+
+    assert validation["manual_required"] is True
+    assert validation["manual_reason_codes"] == ["MODEL_UNCERTAIN"]
+    assert validation["structure_anomaly"] is True
+    assert "unboxing_image_evidence.image_id" in validation["invalid_model_fields"]
+
+
 def test_home_per_image_packaged_evidence_removes_only_unboxing_reason():
     response = _complete_candidate_response("home_appliance")
     response.update(
@@ -650,6 +730,23 @@ def test_home_per_image_evidence_requires_every_unboxing_image_exactly_once():
     assert validation["manual_reason_codes"] == ["MODEL_UNCERTAIN"]
     assert validation["structure_anomaly"] is True
     assert "unboxing_image_evidence.image_id" in validation["invalid_model_fields"]
+
+
+def test_home_expected_unboxing_image_id_type_error_fails_closed():
+    response = _complete_candidate_response("home_appliance")
+    response["unboxing_image_evidence"][0]["image_id"] = "2"
+
+    validation = candidate.validate_candidate_response(
+        "home_appliance",
+        "[A02] 电冰箱",
+        response,
+        unboxing_image_ids=(2,),
+    )
+
+    assert validation["manual_required"] is True
+    assert validation["manual_reason_codes"] == ["MODEL_UNCERTAIN"]
+    assert validation["structure_anomaly"] is True
+    assert "$input.unboxing_image_ids" in validation["invalid_model_fields"]
 
 
 def test_xiaodu_fixed_base_device_declared_as_tablet_keeps_product_mismatch():

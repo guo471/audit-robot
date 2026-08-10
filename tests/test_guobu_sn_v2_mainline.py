@@ -2,10 +2,17 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from tools import run_guobu_model_audit_v2 as mainline
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _keep_legacy_compliance_contract(monkeypatch):
+    monkeypatch.setenv("COMPLIANCE_RULESET", "legacy")
 
 
 def task():

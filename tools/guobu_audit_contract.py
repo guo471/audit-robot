@@ -11,6 +11,8 @@ REMOTE_DISCONNECTED_RE = re.compile(r"(?<![A-Za-z])RemoteDisconnected(?![A-Za-z]
 MANIFEST_COMPATIBILITY_FIELDS = (
     "model",
     "mode",
+    "compliance_ruleset",
+    "sn_policy_version",
     "workers",
     "targeted_sn_review",
     "sn_char_review_mode",
@@ -18,6 +20,7 @@ MANIFEST_COMPATIBILITY_FIELDS = (
     "photo_auth_edge_mapping_mode",
     "digital_activation_evidence_mode",
     "photo_authenticity_mode",
+    "photo_authenticity_local_tree_enabled",
     "order_timeout_seconds",
     "git_commit",
     "python_path",

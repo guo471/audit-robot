@@ -89,7 +89,8 @@ def make_stub_project(tmp_path, output_order_ids):
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
                  "guobu_audit_contract.py", "photo_authenticity_mainline.py",
                  "guobu_sn_policy_v2.py", "guobu_sn_barcode.py",
-                 "black_edge_shadow_detector.py"):
+                 "black_edge_shadow_detector.py",
+                 "compliance_candidate_rules.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     (tools / "run_guobu_model_audit_v2.py").write_text(
         "import argparse,json\nfrom pathlib import Path\np=argparse.ArgumentParser();"
@@ -377,7 +378,6 @@ def test_business_generator_is_the_only_report_contract():
     text = wrapper_text()
     dense = compact(text)
     assert '$businessgenerator=join-path$projectpath"tools\\guobu_audit_report.py"' in dense
-    assert "legacy" not in dense
     assert "merge_guobu_audit_results.py" not in dense
     assert not (PROJECT_ROOT / "tools/merge_guobu_audit_results.py").exists()
     assert '"--first-jsonl",$firstjsonl' in dense
@@ -526,6 +526,7 @@ from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('--tasks-dir'); p.add_argument('--out-dir'); p.add_argument('--cache-dir')
 p.add_argument('--model'); p.add_argument('--mode'); p.add_argument('--workers')
+p.add_argument('--compliance-ruleset')
 p.add_argument('--sn-char-review-mode')
 p.add_argument('--sn-label-auth-review-mode')
 p.add_argument('--sn-barcode-mode')
@@ -608,7 +609,8 @@ def test_runtime_hash_drift_is_rejected_before_network_retry(tmp_path):
     copy_required_runtime_modules(project)
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
                  "guobu_audit_contract.py", "photo_authenticity_mainline.py",
-                 "guobu_sn_policy_v2.py", "guobu_sn_barcode.py"):
+                 "guobu_sn_policy_v2.py", "guobu_sn_barcode.py",
+                 "compliance_candidate_rules.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     (tasks / "one.json").write_text(
         json.dumps({"channel_order_no": "order-1"}), encoding="utf-8")
@@ -620,6 +622,7 @@ from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('--tasks-dir'); p.add_argument('--out-dir'); p.add_argument('--cache-dir')
 p.add_argument('--model'); p.add_argument('--mode'); p.add_argument('--workers')
+p.add_argument('--compliance-ruleset')
 p.add_argument('--sn-char-review-mode')
 p.add_argument('--sn-label-auth-review-mode')
 p.add_argument('--sn-barcode-mode')
@@ -685,7 +688,8 @@ def test_stale_retry_task_directory_rejects_run_name_before_audit(tmp_path):
     copy_required_runtime_modules(project)
     for name in ("run_guobu_audit_batch.ps1", "select_guobu_tasks.py",
                  "guobu_audit_contract.py", "photo_authenticity_mainline.py",
-                 "guobu_sn_policy_v2.py", "guobu_sn_barcode.py"):
+                 "guobu_sn_policy_v2.py", "guobu_sn_barcode.py",
+                 "compliance_candidate_rules.py"):
         (tools / name).write_bytes((PROJECT_ROOT / "tools" / name).read_bytes())
     tasks.mkdir()
     (tasks / "one.json").write_text(
@@ -698,6 +702,7 @@ from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('--tasks-dir'); p.add_argument('--out-dir'); p.add_argument('--cache-dir')
 p.add_argument('--model'); p.add_argument('--mode'); p.add_argument('--workers')
+p.add_argument('--compliance-ruleset')
 p.add_argument('--sn-char-review-mode')
 p.add_argument('--sn-label-auth-review-mode')
 p.add_argument('--sn-barcode-mode')

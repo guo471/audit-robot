@@ -280,26 +280,45 @@ _HOME_UNBOXING_EVIDENCE_FIELDS = {
 
 def _validate_home_unboxing_evidence(
     value: Any,
-    expected_image_ids: tuple[str, ...],
+    expected_image_ids: tuple[Any, ...],
     missing_fields: list[str],
     invalid_fields: list[str],
+    local_corrections: list[str],
 ) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
 
+    expected_input_valid = bool(expected_image_ids) and all(
+        isinstance(image_id, str) and bool(image_id.strip())
+        for image_id in expected_image_ids
+    )
+    normalized_expected_image_ids = (
+        tuple(image_id.strip() for image_id in expected_image_ids)
+        if expected_input_valid
+        else ()
+    )
     if (
-        not expected_image_ids
-        or any(not image_id for image_id in expected_image_ids)
-        or len(set(expected_image_ids)) != len(expected_image_ids)
+        not expected_input_valid
+        or len(set(normalized_expected_image_ids))
+        != len(normalized_expected_image_ids)
     ):
         _append_once(invalid_fields, "$input.unboxing_image_ids")
 
+    expected_image_id_set = set(normalized_expected_image_ids)
     validated: list[dict[str, Any]] = []
     seen_ids: list[str] = []
+    dropped_extra_ids = False
+    missing_count_before = len(missing_fields)
+    invalid_count_before = len(invalid_fields)
     for index, item in enumerate(value):
         item_path = f"unboxing_image_evidence[{index}]"
         if not isinstance(item, dict):
             _append_once(invalid_fields, item_path)
+            continue
+        raw_image_id = item.get("image_id")
+        image_id = raw_image_id.strip() if isinstance(raw_image_id, str) else ""
+        if image_id and expected_image_id_set and image_id not in expected_image_id_set:
+            dropped_extra_ids = True
             continue
         item_valid = True
         for field, expected_type in _HOME_UNBOXING_EVIDENCE_FIELDS.items():
@@ -312,7 +331,6 @@ def _validate_home_unboxing_evidence(
             if not isinstance(field_value, expected_type):
                 _append_once(invalid_fields, field_path)
                 item_valid = False
-        image_id = str(item.get("image_id") or "").strip()
         if image_id:
             seen_ids.append(image_id)
         if item_valid:
@@ -327,12 +345,21 @@ def _validate_home_unboxing_evidence(
                 }
             )
 
-    if (
-        len(seen_ids) != len(set(seen_ids))
-        or len(seen_ids) != len(expected_image_ids)
-        or set(seen_ids) != set(expected_image_ids)
-    ):
+    coverage_valid = (
+        expected_input_valid
+        and len(seen_ids) == len(set(seen_ids))
+        and len(seen_ids) == len(normalized_expected_image_ids)
+        and set(seen_ids) == expected_image_id_set
+    )
+    if not coverage_valid:
         _append_once(invalid_fields, "unboxing_image_evidence.image_id")
+    if (
+        dropped_extra_ids
+        and coverage_valid
+        and len(missing_fields) == missing_count_before
+        and len(invalid_fields) == invalid_count_before
+    ):
+        local_corrections.append("DROP_NON_UNBOXING_IMAGE_EVIDENCE_IDS")
     return validated
 
 
@@ -368,7 +395,7 @@ def validate_candidate_response(
     product_type: str,
     response: Any,
     *,
-    unboxing_image_ids: tuple[str, ...] | list[str] | None = None,
+    unboxing_image_ids: tuple[Any, ...] | list[Any] | None = None,
 ) -> dict[str, Any]:
     normalized = _normalized_category(category)
     if not isinstance(response, dict):
@@ -408,13 +435,15 @@ def validate_candidate_response(
         if not valid_type:
             _append_once(invalid_fields, field)
 
+    local_corrections: list[str] = []
     home_unboxing_evidence: list[dict[str, Any]] = []
     if normalized == "home_appliance" and "unboxing_image_evidence" in response:
         home_unboxing_evidence = _validate_home_unboxing_evidence(
             response["unboxing_image_evidence"],
-            tuple(str(image_id or "").strip() for image_id in (unboxing_image_ids or ())),
+            tuple(unboxing_image_ids or ()),
             missing_fields,
             invalid_fields,
+            local_corrections,
         )
 
     reason_codes = response.get("manual_reason_codes")
@@ -443,7 +472,6 @@ def validate_candidate_response(
     structure_anomaly = bool(missing_fields or invalid_fields)
     effective_codes = list(reason_codes)
     effective_unboxing_photo_ok = response.get("unboxing_photo_ok")
-    local_corrections: list[str] = []
     package_visible: bool | str = ""
     whole_product_visible: bool | str = ""
     product_and_package_same_image: bool | str = ""
