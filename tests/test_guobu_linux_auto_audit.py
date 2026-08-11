@@ -2081,6 +2081,7 @@ def test_linux_start_script_sets_utf8_and_production_policy_switches():
     assert "PYTHONIOENCODING=utf-8" in script
     assert "SN_POLICY_VERSION=v2" in script
     assert "SN_BARCODE_MODE=enforce" in script
+    assert "SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE=true" in script
     assert "DIGITAL_ACTIVATION_EVIDENCE_MODE=on" in script
     assert "PHOTO_AUTHENTICITY_MODE=enforce" in script
     assert "PHOTO_AUTHENTICITY_NEW_RULE_ENABLED=true" in script
