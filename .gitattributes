@@ -1,2 +1,4 @@
 photo_authenticity/prompts/non_real_photo_auditor_v4.txt text eol=lf
 tools/start_guobu_linux_auto_audit.sh text eol=lf
+deploy/linux/*.sh text eol=lf
+deploy/linux/systemd/*.service text eol=lf
