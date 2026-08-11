@@ -29,6 +29,9 @@ from tools.auto_audit_dashboard_server import HTML, load_status
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SN_MISMATCH_REFUSE = "激活照片中SN码/序列码与系统显示不一致，请参照示例图上传符合活动要求的照片"
+ADDRESS_TOO_COARSE_REFUSE = "收货地址不符合要求，请按照要求补充相关信息后再提交"
+MODEL_UNCERTAIN_REFUSE = "图片信息无法确认，请参照示例图上传符合活动要求的照片"
 
 
 class FakeCollector:
@@ -571,7 +574,7 @@ def test_runner_processes_order_and_maps_refuse_message(tmp_path: Path):
     assert collector.fetch_calls == 1
     assert auditor.calls
     assert callback_client.calls[0]["status"] == 2
-    assert callback_client.calls[0]["refuseMessage"] == "SN不一致"
+    assert callback_client.calls[0]["refuseMessage"] == SN_MISMATCH_REFUSE
     assert "raw model reason" not in callback_client.calls[0]["refuseMessage"]
     assert summary["feedback_done_count"] == 1
 
@@ -630,8 +633,8 @@ def test_runner_summary_order_result_uses_final_reason_not_compliance_observatio
     assert row["final_result"] == "不通过"
     assert row["new_final_result"] == "不通过"
     assert row["final_reason_code"] == "SN_MISMATCH"
-    assert row["final_reason"] == "SN不一致"
-    assert row["reason_code_cn"] == "SN不一致"
+    assert row["final_reason"] == SN_MISMATCH_REFUSE
+    assert row["reason_code_cn"] == SN_MISMATCH_REFUSE
     assert row["system_sn"] == "SN-2101"
     assert row["model_sn"] == ""
     assert row["sn_barcode_result"] == ""
@@ -819,7 +822,7 @@ def test_runner_records_barcode_miss_and_manual_callback_in_sqlite(tmp_path: Pat
     summary = runner.run_once()
 
     assert callback_client.calls[0]["status"] == 2
-    assert callback_client.calls[0]["refuseMessage"] == "SN不一致"
+    assert callback_client.calls[0]["refuseMessage"] == SN_MISMATCH_REFUSE
     result = summary["order_results"][0]
     assert result["new_final_result"] == "不通过"
     assert result["model_sn"] == "WRONG-2202"
@@ -1050,7 +1053,7 @@ def test_refuse_message_uses_standard_code_mapping_before_raw_cn():
     )
 
     assert request["status"] == 2
-    assert request["refuseMessage"] == "SN不一致"
+    assert request["refuseMessage"] == SN_MISMATCH_REFUSE
 
 
 def test_refuse_message_maps_address_reason_to_utf8_chinese_text():
@@ -1064,8 +1067,61 @@ def test_refuse_message_maps_address_reason_to_utf8_chinese_text():
     )
 
     assert request["status"] == 2
-    assert request["refuseMessage"] == "收货地址不符合要求"
+    assert request["refuseMessage"] == ADDRESS_TOO_COARSE_REFUSE
     assert "瀹" not in request["refuseMessage"]
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("ADDRESS_TOO_COARSE", ADDRESS_TOO_COARSE_REFUSE),
+        ("PRODUCT_TYPE_MISMATCH", "商品/拆封/激活照片与商品/拆封/激活照片显示商品不一致，请参照示例图上传符合活动要求的照片"),
+        ("PRODUCT_PHOTO_INVALID", "商品照片不符合要求，请参照示例图上传符合活动要求的照片"),
+        ("UNBOXING_PHOTO_INVALID", "拆封/安装照片不符合要求，请参照示例图上传符合活动要求的照片"),
+        ("ACTIVATION_PHOTO_INVALID", "激活照片不符合要求，请参照示例图上传符合活动要求的照片"),
+        ("DUPLICATE_IMAGE_EVIDENCE", "照片不能重复上传，请参照示例图上传符合活动要求的照片"),
+        ("IMAGE_STRONG_RISK", "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片"),
+        ("NON_REAL_PHOTO_REVIEW", "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片"),
+        ("NON_REAL_PHOTO_STRONG_RISK", "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片"),
+        ("NON_REAL_PHOTO_FFT_RESCUE", "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片"),
+        ("SN_MISMATCH", SN_MISMATCH_REFUSE),
+        ("SN_NOT_FOUND", "激活照片未体现激活码，请参照示例图上传符合活动要求的照片"),
+        ("SN_TRUNCATED_OBSCURED", "激活照片模糊完全无法识别激活码，请参照示例图上传符合活动要求的照片"),
+        ("SYSTEM_SN_MISSING", "系统SN缺失，请按照要求补充相关信息后再提交"),
+        ("IMAGE_MISSING", "图片缺失，请按照要求补充相关信息后再提交"),
+        ("FIELD_MISSING", "订单信息缺失，请按照要求补充相关信息后再提交"),
+        ("PRODUCT_TYPE_MISSING", "商品类型信息缺失，请按照要求补充相关信息后再提交"),
+        ("INVOICE_ORANGE_WARNING", "发票已红冲，请核实后重新上传"),
+        ("MODEL_UNCERTAIN", MODEL_UNCERTAIN_REFUSE),
+        ("PHOTO_AUTHENTICITY_SERVICE_FAILURE", "审核服务异常，模型超时"),
+        ("ARTIFACT_LOAD_FAILURE", "审核服务异常，模型超时"),
+        ("FFT_FAILURE", "审核服务异常，模型超时"),
+    ],
+)
+def test_refuse_message_uses_approved_business_copy_by_reason_code(code, expected):
+    request = build_machine_approval_request(
+        2004,
+        {
+            "manual_flag": "是",
+            "manual_reason_code": code,
+            "manual_reason_cn": "raw model text should not be sent to backend",
+        },
+    )
+
+    assert request == {"applyId": 2004, "status": 2, "refuseMessage": expected}
+
+
+def test_unknown_refuse_message_uses_approved_uncertain_fallback():
+    request = build_machine_approval_request(
+        2005,
+        {
+            "manual_flag": "是",
+            "manual_reason_code": "UNKNOWN_REASON",
+            "manual_reason_cn": "raw model text should not be sent to backend",
+        },
+    )
+
+    assert request == {"applyId": 2005, "status": 2, "refuseMessage": MODEL_UNCERTAIN_REFUSE}
 
 
 def test_runner_recovers_previous_month_new_order_before_fetching_new(tmp_path: Path):
@@ -1139,7 +1195,7 @@ def test_runner_recovers_audit_done_by_feedback_without_rerunning_model(tmp_path
     assert summary["recovered_count"] == 1
     assert summary["processed_count"] == 0
     assert auditor.calls == []
-    assert callback_client.calls[0] == {"applyId": 9901, "status": 2, "refuseMessage": "SN不一致"}
+    assert callback_client.calls[0] == {"applyId": 9901, "status": 2, "refuseMessage": SN_MISMATCH_REFUSE}
 
 
 def test_runner_resumes_callback_retry_count_without_exceeding_three_attempts(tmp_path: Path):
@@ -1151,7 +1207,7 @@ def test_runner_resumes_callback_retry_count_without_exceeding_three_attempts(tm
         "FEEDBACK_RETRY_PENDING",
         now=now,
         audit_result={"manual_flag": "是", "manual_reason_code": "SN_MISMATCH"},
-        callback_request={"applyId": 9911, "status": 2, "refuseMessage": "SN不一致"},
+        callback_request={"applyId": 9911, "status": 2, "refuseMessage": SN_MISMATCH_REFUSE},
         retry_count=2,
     )
     callback_client = FakeCallbackClient([RuntimeError("third failure")])
@@ -1614,7 +1670,7 @@ def test_dashboard_reads_barcode_result_from_raw_sn_barcode_result(tmp_path: Pat
                 }
             },
         },
-        callback_request={"applyId": 2301, "status": 2, "refuseMessage": "SN不一致"},
+        callback_request={"applyId": 2301, "status": 2, "refuseMessage": SN_MISMATCH_REFUSE},
         callback_response={"ok": True, "http_status": 200, "body": {"status": 200}},
     )
 
@@ -1643,7 +1699,7 @@ def test_dashboard_exposes_final_result_and_reason_per_order(tmp_path: Path):
             "system_sn": "SN-2302",
             "observed_sn": "WRONG-2302",
         },
-        callback_request={"applyId": 2302, "status": 2, "refuseMessage": "SN不一致"},
+        callback_request={"applyId": 2302, "status": 2, "refuseMessage": SN_MISMATCH_REFUSE},
         callback_response={"ok": True, "http_status": 200, "body": {"status": 200}},
     )
 
@@ -1651,8 +1707,8 @@ def test_dashboard_exposes_final_result_and_reason_per_order(tmp_path: Path):
     row = dashboard["rows"][0]
 
     assert row["final_result"] == "不通过"
-    assert row["final_reason"] == "SN不一致"
-    assert row["reason_cn"] == "SN不一致"
+    assert row["final_reason"] == SN_MISMATCH_REFUSE
+    assert row["reason_cn"] == SN_MISMATCH_REFUSE
 
 
 def test_runner_persists_loop_summary_for_dashboard(tmp_path: Path):

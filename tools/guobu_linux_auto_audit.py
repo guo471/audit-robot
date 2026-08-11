@@ -31,7 +31,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REASON_CN = "图片信息无法确认"
+DEFAULT_REASON_CN = "图片信息无法确认，请参照示例图上传符合活动要求的照片"
 DONE_STATUSES = {"FEEDBACK_DONE"}
 FINAL_STATUSES = {"FEEDBACK_DONE", "MANUAL_FEEDBACK_REQUIRED"}
 REQUIRED_STARTUP_ENV = (
@@ -45,28 +45,28 @@ REQUIRED_STARTUP_MODULES = ("zxingcpp", "cv2", "joblib", "sklearn", "numpy", "PI
 MIN_STARTUP_PYTHON = (3, 11)
 
 REASON_CN_BY_CODE = {
-    "ADDRESS_TOO_COARSE": "收货地址不符合要求",
-    "PRODUCT_TYPE_MISMATCH": "商品类型不一致",
-    "PRODUCT_PHOTO_INVALID": "商品照片不符合要求",
-    "UNBOXING_PHOTO_INVALID": "拆封/安装照片不符合要求",
-    "ACTIVATION_PHOTO_INVALID": "激活照片不符合要求",
-    "DUPLICATE_IMAGE_EVIDENCE": "存在重复图片，不符合要求",
-    "IMAGE_STRONG_RISK": "图片疑似非实拍",
-    "NON_REAL_PHOTO_REVIEW": "图片疑似非实拍",
-    "NON_REAL_PHOTO_STRONG_RISK": "图片疑似非实拍",
-    "NON_REAL_PHOTO_FFT_RESCUE": "图片疑似非实拍",
-    "SN_MISMATCH": "SN不一致",
-    "SN_NOT_FOUND": "SN无法识别",
-    "SN_TRUNCATED_OBSCURED": "SN不完整，无法识别",
-    "SYSTEM_SN_MISSING": "系统SN缺失",
-    "IMAGE_MISSING": "图片缺失",
-    "FIELD_MISSING": "订单信息缺失",
-    "PRODUCT_TYPE_MISSING": "商品类型信息缺失",
-    "INVOICE_ORANGE_WARNING": "发票疑似已红冲",
+    "ADDRESS_TOO_COARSE": "收货地址不符合要求，请按照要求补充相关信息后再提交",
+    "PRODUCT_TYPE_MISMATCH": "商品/拆封/激活照片与商品/拆封/激活照片显示商品不一致，请参照示例图上传符合活动要求的照片",
+    "PRODUCT_PHOTO_INVALID": "商品照片不符合要求，请参照示例图上传符合活动要求的照片",
+    "UNBOXING_PHOTO_INVALID": "拆封/安装照片不符合要求，请参照示例图上传符合活动要求的照片",
+    "ACTIVATION_PHOTO_INVALID": "激活照片不符合要求，请参照示例图上传符合活动要求的照片",
+    "DUPLICATE_IMAGE_EVIDENCE": "照片不能重复上传，请参照示例图上传符合活动要求的照片",
+    "IMAGE_STRONG_RISK": "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片",
+    "NON_REAL_PHOTO_REVIEW": "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片",
+    "NON_REAL_PHOTO_STRONG_RISK": "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片",
+    "NON_REAL_PHOTO_FFT_RESCUE": "商品/拆封/激活照片非实拍图，请参照示例图上传符合活动要求的照片",
+    "SN_MISMATCH": "激活照片中SN码/序列码与系统显示不一致，请参照示例图上传符合活动要求的照片",
+    "SN_NOT_FOUND": "激活照片未体现激活码，请参照示例图上传符合活动要求的照片",
+    "SN_TRUNCATED_OBSCURED": "激活照片模糊完全无法识别激活码，请参照示例图上传符合活动要求的照片",
+    "SYSTEM_SN_MISSING": "系统SN缺失，请按照要求补充相关信息后再提交",
+    "IMAGE_MISSING": "图片缺失，请按照要求补充相关信息后再提交",
+    "FIELD_MISSING": "订单信息缺失，请按照要求补充相关信息后再提交",
+    "PRODUCT_TYPE_MISSING": "商品类型信息缺失，请按照要求补充相关信息后再提交",
+    "INVOICE_ORANGE_WARNING": "发票已红冲，请核实后重新上传",
     "MODEL_UNCERTAIN": DEFAULT_REASON_CN,
-    "PHOTO_AUTHENTICITY_SERVICE_FAILURE": "审核服务异常",
-    "ARTIFACT_LOAD_FAILURE": "审核服务异常",
-    "FFT_FAILURE": "审核服务异常",
+    "PHOTO_AUTHENTICITY_SERVICE_FAILURE": "审核服务异常，模型超时",
+    "ARTIFACT_LOAD_FAILURE": "审核服务异常，模型超时",
+    "FFT_FAILURE": "审核服务异常，模型超时",
 }
 
 
