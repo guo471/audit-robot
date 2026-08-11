@@ -2096,6 +2096,9 @@ def test_linux_start_script_sets_utf8_and_production_policy_switches():
     assert "GUOBU_EXIT_NONZERO_ON_ERRORS" in script
     assert "--exit-nonzero-on-errors" in script
     assert "--preflight-only" in script
+    assert "deploy/linux/lib/common.sh" in script
+    assert "load_env_file" in script
+    assert 'source "${ENV_FILE}"' not in script
 
 
 def test_startup_preflight_reports_all_missing_runtime_inputs_without_secret_values():

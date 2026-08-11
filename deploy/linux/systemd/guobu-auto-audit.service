@@ -2,15 +2,22 @@
 Description=Guobu Auto Audit Loop
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=3
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
+User=auditrobot
+Group=auditrobot
 WorkingDirectory=/opt/audit_robot
+ExecStartPre=/bin/bash /opt/audit_robot/deploy/linux/preflight.sh
 ExecStart=/bin/bash /opt/audit_robot/tools/start_guobu_linux_auto_audit.sh
 Restart=always
 RestartSec=10
 Environment=GUOBU_AUTO_AUDIT_ENV_FILE=/opt/audit_robot/.env
 Environment=PYTHON_BIN=/opt/audit_robot/.venv/bin/python
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

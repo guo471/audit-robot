@@ -1,0 +1,4 @@
+cd /opt/audit_robot
+GUOBU_AUTO_AUDIT_ENV_FILE=/opt/audit_robot/.env \
+GUOBU_EXIT_NONZERO_ON_ERRORS=true \
+bash tools/start_guobu_linux_auto_audit.sh --once

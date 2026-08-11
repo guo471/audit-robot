@@ -1,8 +1,10 @@
 # 国补审核主线 Linux 生产部署说明
 
+先读 `deploy/linux/00_README_FIRST.md`。本文件用于解释细节和验收口径。
+
 ## 交付内容
 
-本包是国补审核主线生产包。部署人员需要配置 `.env` 后运行启动脚本，不需要修改业务代码。
+本包是国补审核主线生产包。部署人员配置 `.env` 后运行脚本，不需要修改业务代码。
 
 当前生产口径：
 
@@ -25,21 +27,38 @@
 - Node.js：18 及以上
 - 网络：服务器必须能访问后台接口、图片 CDN、模型接口
 
-## 安装依赖
-
-在服务器上执行：
+## 傻瓜式命令顺序
 
 ```bash
 cd /opt/audit_robot
-bash deploy/linux/install_dependencies.sh
+bash deploy/linux/install.sh
+bash deploy/linux/configure_env.sh
+bash deploy/linux/preflight.sh
+bash deploy/linux/run_once.sh
 ```
 
-如果服务器没有 sudo 权限，请让运维先安装系统依赖，再执行脚本里的 Python 虚拟环境部分。
+安装脚本会创建默认运行用户 `auditrobot`，并创建 `/var/lib/audit_robot/state` 和 `/tmp/audit_robot_guobu`。
 
-## 配置环境变量
+如果使用 systemd 常驻：
 
 ```bash
-cd /opt/audit_robot
+bash deploy/linux/install_systemd.sh
+bash deploy/linux/start.sh
+```
+
+如果使用 XXL-JOB，把 `deploy/linux/xxl_job_command.txt` 内容配置到调度器。
+
+## 配置文件
+
+交互配置：
+
+```bash
+bash deploy/linux/configure_env.sh
+```
+
+手工配置：
+
+```bash
 cp deploy/linux/.env.example .env
 chmod 600 .env
 vi .env
@@ -52,36 +71,42 @@ vi .env
 - `GUOBU_AUTH_TOKEN`：后台 Authorization
 - `MACHINE_APPROVAL_AUTH_TOKEN`：后台 Authorization，可与 `GUOBU_AUTH_TOKEN` 相同
 
+如果 Authorization 带空格，例如 `Bearer xxxxxx`，手工编辑时必须加单引号：
+
+```bash
+GUOBU_AUTH_TOKEN='Bearer xxxxxx'
+```
+
 真实 `.env` 不得进入 Git、日志、报告或工单。
 
 ## 启动前验证
 
-只做预检，不抓单、不审核、不回显：
-
 ```bash
-cd /opt/audit_robot
-bash deploy/linux/validate_deployment.sh
+bash deploy/linux/preflight.sh
 ```
 
-预检通过后，再跑一轮：
+预检只检查环境，不抓单、不审核、不回显。输出里密钥和 token 只能显示 `set`，不得出现真实值。
+
+预检还会检查：
+
+- 包目录没有 `.env`、SQLite、日志、缓存、Git 元数据等禁入项
+- `.env` 权限是 `600` 或 `400`
+- Node.js 版本不低于 18
+- 状态目录和临时目录可写
+
+## 单轮验证
 
 ```bash
-cd /opt/audit_robot
-GUOBU_AUTO_AUDIT_ENV_FILE=/opt/audit_robot/.env bash tools/start_guobu_linux_auto_audit.sh --once
+bash deploy/linux/run_once.sh
 ```
 
-空转时允许 `fetched_count=0`、`processed_count=0`，并且必须返回成功。
+空转验收：后台没有待审核订单时，允许 `fetched_count=0`、`processed_count=0`，进程必须成功结束。
 
-## XXL-JOB 单轮模式
+故障验收：接口失败或回显最终失败不能伪装成空转，必须进入输出 `errors` 或失败计数。
 
-推荐生产使用 XXL-JOB 每 10 分钟调一次单轮模式：
+## XXL-JOB 对接
 
-```bash
-cd /opt/audit_robot
-GUOBU_AUTO_AUDIT_ENV_FILE=/opt/audit_robot/.env \
-GUOBU_EXIT_NONZERO_ON_ERRORS=true \
-bash tools/start_guobu_linux_auto_audit.sh --once
-```
+命令文件：`deploy/linux/xxl_job_command.txt`
 
 调度建议：
 
@@ -90,16 +115,36 @@ bash tools/start_guobu_linux_auto_audit.sh --once
 - 调度重试：0 或 1 次
 - 超时：大于单轮真实审核最大耗时
 
-## systemd 常驻模式
+## systemd 常驻
 
-如不用 XXL-JOB，可使用 `deploy/linux/systemd/guobu-auto-audit.service`：
+安装：
 
 ```bash
-sudo cp deploy/linux/systemd/guobu-auto-audit.service /etc/systemd/system/guobu-auto-audit.service
-sudo systemctl daemon-reload
-sudo systemctl enable guobu-auto-audit
-sudo systemctl start guobu-auto-audit
-sudo journalctl -u guobu-auto-audit -f
+bash deploy/linux/install_systemd.sh
+```
+
+启动：
+
+```bash
+bash deploy/linux/start.sh
+```
+
+状态：
+
+```bash
+bash deploy/linux/status.sh
+```
+
+日志：
+
+```bash
+bash deploy/linux/logs.sh
+```
+
+停止：
+
+```bash
+bash deploy/linux/stop.sh
 ```
 
 ## 状态库
@@ -164,34 +209,25 @@ FEEDBACK_RETRY_PENDING -> MANUAL_FEEDBACK_REQUIRED
 
 上线第一轮必须确认 `examinePage` 只返回真正待机审订单；当前主线请求发送 `status=0` 和 `machineExamineStatus=0`，返回订单侧只接受 `machineExamineStatus` 为空、`null` 或空字符串的订单继续审核。
 
-## 回滚
+## 紧急停止与回滚
 
-紧急回滚优先停调度：
-
-```bash
-sudo systemctl stop guobu-auto-audit
-```
-
-或在 XXL-JOB 中停用任务。
-
-若只关闭图片真实性：
+紧急停止：
 
 ```bash
-PHOTO_AUTHENTICITY_MODE=off
+bash deploy/linux/emergency_stop.sh
 ```
 
-若只关闭条码救回：
+如果使用 XXL-JOB，还必须在 XXL-JOB 控制台停用任务。
 
-```bash
-SN_BARCODE_MODE=off
-```
-
-生产入口脚本默认会固定生产口径；如果需要回滚开关，必须由负责人确认后修改启动脚本或使用受控发布包，不建议部署人员临时改业务代码。
+本包不提供“修改 `.env` 自动切 off”的业务回滚，因为生产启动脚本会固定 enforce 口径，这是为了防止部署环境误改导致主线漂移。业务规则回滚必须使用负责人确认后的回滚包或专门脚本。
 
 ## 验收标准
 
 - 包内没有 `.env`、密钥、token、SQLite 状态库、日志、缓存、样本库、旧压缩包、`.git`、`.worktrees`。
-- `bash deploy/linux/validate_deployment.sh` 通过。
+- `.env` 权限是 `600`。
+- `bash deploy/linux/preflight.sh` 通过。
+- systemd 使用非 root 用户运行。
+- `bash deploy/linux/run_once.sh` 空转不报错。
 - 连续 3 轮空转不报错。
 - 放入 1-3 单待机审订单后，能抓取、审核、回显。
 - 不通过订单的 `refuseMessage` 是 UTF-8 中文，不乱码。

@@ -12,10 +12,14 @@ export PYTHONIOENCODING=utf-8
 
 ENV_FILE="${GUOBU_AUTO_AUDIT_ENV_FILE:-${PROJECT_ROOT}/.env}"
 if [[ -f "${ENV_FILE}" ]]; then
-  set -a
+  COMMON_FILE="${PROJECT_ROOT}/deploy/linux/lib/common.sh"
+  if [[ ! -f "${COMMON_FILE}" ]]; then
+    echo "Missing safe env loader: ${COMMON_FILE}" >&2
+    exit 2
+  fi
   # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-  set +a
+  source "${COMMON_FILE}"
+  load_env_file
 fi
 
 export SN_POLICY_VERSION=v2
