@@ -15,6 +15,7 @@ ExecStart=/bin/bash /opt/audit_robot/tools/start_guobu_linux_auto_audit.sh
 Restart=always
 RestartSec=10
 Environment=GUOBU_AUTO_AUDIT_ENV_FILE=/opt/audit_robot/.env
+Environment=GUOBU_RUN_USER=auditrobot
 Environment=PYTHON_BIN=/opt/audit_robot/.venv/bin/python
 NoNewPrivileges=true
 PrivateTmp=true

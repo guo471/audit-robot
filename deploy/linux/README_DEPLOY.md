@@ -39,6 +39,8 @@ bash deploy/linux/run_once.sh
 
 安装脚本会创建默认运行用户 `auditrobot`，并创建 `/var/lib/audit_robot/state` 和 `/tmp/audit_robot_guobu`。
 
+run_once.sh 只用于部署验收，执行一轮后退出。tools/start_guobu_linux_auto_audit.sh 默认是循环模式，只有传入 `--once` 才执行一轮后退出。
+
 如果使用 systemd 常驻：
 
 ```bash
@@ -47,6 +49,8 @@ bash deploy/linux/start.sh
 ```
 
 如果使用 XXL-JOB，把 `deploy/linux/xxl_job_command.txt` 内容配置到调度器。
+
+XXL-JOB 和 systemd 只能二选一，不能同时开启。
 
 ## 配置文件
 
@@ -102,11 +106,15 @@ bash deploy/linux/run_once.sh
 
 空转验收：后台没有待审核订单时，允许 `fetched_count=0`、`processed_count=0`，进程必须成功结束。
 
+run_once.sh 只用于部署验收，执行一轮后退出；不要把它当成生产常驻进程。
+
 故障验收：接口失败或回显最终失败不能伪装成空转，必须进入输出 `errors` 或失败计数。
 
 ## XXL-JOB 对接
 
 命令文件：`deploy/linux/xxl_job_command.txt`
+
+XXL-JOB 命令也是单轮执行，由调度器每 10 分钟拉起一次。调度器负责循环，脚本本身跑完一轮就退出。
 
 调度建议：
 
@@ -116,6 +124,8 @@ bash deploy/linux/run_once.sh
 - 超时：大于单轮真实审核最大耗时
 
 ## systemd 常驻
+
+systemd/start.sh 是常驻循环模式，适合不使用 XXL-JOB 的服务器。
 
 安装：
 

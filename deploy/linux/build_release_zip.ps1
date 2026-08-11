@@ -1,10 +1,16 @@
 param(
-  [string]$OutputDir = ([Environment]::GetFolderPath('Desktop'))
+  [string]$OutputDir = ([Environment]::GetFolderPath('Desktop')),
+  [switch]$AllowDirty
 )
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
+
+$dirty = (git status --porcelain | Out-String).Trim()
+if ($dirty -and -not $AllowDirty) {
+  throw "worktree is dirty; commit or clean changes before building production package, or pass -AllowDirty only for local validation"
+}
 
 $head = (git rev-parse HEAD).Trim()
 $short = (git rev-parse --short HEAD).Trim()
@@ -15,26 +21,100 @@ $packageDir = Join-Path $OutputDir $packageName
 $appDir = Join-Path $packageDir 'audit_robot'
 New-Item -ItemType Directory -Path $appDir -Force | Out-Null
 
-$tracked = git -c core.quotepath=false ls-files
-$include = @()
-foreach ($p in $tracked) {
-  if ($p -cmatch '[^\x00-\x7F]') { continue }
-  if ($p -match '^(tests|\.superpowers)/') { continue }
-  if ($p -match '^(data|outputs|logs|temp|reports)/') { continue }
-  if ($p -match '^(photo_authenticity/data|photo_authenticity/reports)/') { continue }
-  if ($p -match '\.(sqlite|db|log|pyc|bundle|zip)$') { continue }
-  if ($p -eq '.gitignore') { continue }
-  if ($p -match '^(docs/superpowers|docs/.*handoff|docs/.*memory)') { continue }
-  $include += $p
-}
-if ($include.Count -lt 50) { throw "include list too small: $($include.Count)" }
+$runtimeInclude = @(
+  'requirements.txt',
+  'config.py',
+  'photo_authenticity/requirements-runtime.txt',
+  'deploy/linux/.env.example',
+  'deploy/linux/00_README_FIRST.md',
+  'deploy/linux/README_DEPLOY.md',
+  'deploy/linux/PRODUCTION_ACCEPTANCE_CHECKLIST.md',
+  'deploy/linux/configure_env.sh',
+  'deploy/linux/emergency_stop.sh',
+  'deploy/linux/install.sh',
+  'deploy/linux/install_dependencies.sh',
+  'deploy/linux/install_systemd.sh',
+  'deploy/linux/logs.sh',
+  'deploy/linux/preflight.sh',
+  'deploy/linux/run_once.sh',
+  'deploy/linux/start.sh',
+  'deploy/linux/status.sh',
+  'deploy/linux/stop.sh',
+  'deploy/linux/validate_deployment.sh',
+  'deploy/linux/xxl_job_command.txt',
+  'deploy/linux/build_release_zip.ps1',
+  'deploy/linux/lib/common.sh',
+  'deploy/linux/systemd/guobu-auto-audit.service',
+  'modules',
+  'modules/__init__.py',
+  'modules/category_classifier.py',
+  'prompts/digital_activation_evidence_review.txt',
+  'prompts/photo_auth_edge_mapping_review.txt',
+  'prompts/sn_label_authenticity_review.txt',
+  'prompts/sn_similar_char_review.txt',
+  'prompts/sn_similar_char_review_v2.txt',
+  'tools/auto_audit_dashboard_server.py',
+  'tools/black_edge_shadow_detector.py',
+  'tools/guobu_linux_auto_audit.py',
+  'tools/guobu_machine_approval_feedback.js',
+  'tools/guobu_one_click_collect.js',
+  'tools/guobu_sn_barcode.py',
+  'tools/guobu_sn_policy_v2.py',
+  'tools/non_real_local_features.py',
+  'tools/photo_authenticity_mainline.py',
+  'tools/run_guobu_model_audit_v2.py',
+  'tools/start_guobu_auto_audit.ps1',
+  'tools/start_guobu_linux_auto_audit.sh',
+  'photo_authenticity/prompts/non_real_photo_auditor_v4.txt',
+  'photo_authenticity/models/releases/non-real-photo-v2',
+  'photo_authenticity/models/releases/non-real-local-tree-v1/tree.json'
+)
 
-$tarPath = Join-Path $packageDir 'source.tar'
-& git archive --format=tar --output=$tarPath HEAD -- @include
-if ($LASTEXITCODE -ne 0) { throw "git archive failed with $LASTEXITCODE" }
-& tar -xf $tarPath -C $appDir
-if ($LASTEXITCODE -ne 0) { throw "tar extract failed with $LASTEXITCODE" }
-Remove-Item -LiteralPath $tarPath
+function Test-AllowedPackageFile {
+  param([string]$RelativePath)
+  $normalized = $RelativePath.Replace('\', '/')
+  $blockedMetaDirs = @('.git', ('.work' + 'trees'), '.venv', 'node_modules', '__pycache__', '.pytest_cache')
+  foreach ($blocked in $blockedMetaDirs) {
+    if ($normalized -like "*/$blocked/*" -or $normalized -like "$blocked/*") { return $false }
+  }
+  if ($normalized -match '(^|/)\.env$') { return $false }
+  if ($normalized -match '\.(sqlite|db|log|pyc|bundle|zip|tar)$') { return $false }
+  return $true
+}
+
+function Add-RuntimePath {
+  param([string]$RelativePath)
+  $source = Join-Path $root $RelativePath
+  if (-not (Test-Path -LiteralPath $source)) {
+    throw "runtime path missing: $RelativePath"
+  }
+  $sourceItem = Get-Item -LiteralPath $source
+  if ($sourceItem.PSIsContainer) {
+    Get-ChildItem -Recurse -File -LiteralPath $source | ForEach-Object {
+      $relative = $_.FullName.Substring($root.Length + 1).Replace('\', '/')
+      if (-not (Test-AllowedPackageFile $relative)) { return }
+      Copy-RuntimeFile $relative
+    }
+  } else {
+    $relative = $sourceItem.FullName.Substring($root.Length + 1).Replace('\', '/')
+    if (Test-AllowedPackageFile $relative) {
+      Copy-RuntimeFile $relative
+    }
+  }
+}
+
+function Copy-RuntimeFile {
+  param([string]$RelativePath)
+  $source = Join-Path $root $RelativePath
+  $target = Join-Path $appDir $RelativePath
+  $targetParent = Split-Path -Parent $target
+  New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+  Copy-Item -LiteralPath $source -Destination $target -Force
+}
+
+foreach ($path in $runtimeInclude) {
+  Add-RuntimePath $path
+}
 
 $created = Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz'
 $version = @(
@@ -75,14 +155,23 @@ $handoff = @(
   'bash deploy/linux/preflight.sh',
   'bash deploy/linux/run_once.sh',
   '',
-  'Note: the package must not contain real .env, secrets, tokens, SQLite state, runtime logs, sample libraries, caches, or Git metadata.'
+  'Mode selection:',
+  'run_once.sh is only for one-loop acceptance.',
+  'XXL-JOB runs one loop per scheduler trigger.',
+  'systemd/start.sh is the long-running loop mode.',
+  'Use XXL-JOB or systemd, not both.',
+  '',
+  'Checklist:',
+  'audit_robot/deploy/linux/PRODUCTION_ACCEPTANCE_CHECKLIST.md',
+  '',
+  'Note: the package must not contain real .env, secrets, tokens, SQLite state, runtime logs, caches, or Git metadata.'
 ) -join "`n"
 [System.IO.File]::WriteAllText((Join-Path $packageDir 'DEPLOYMENT_HANDOFF.md'), $handoff, [System.Text.UTF8Encoding]::new($false))
 
 $manifest = Get-ChildItem -Recurse -File -LiteralPath $appDir | ForEach-Object {
   $_.FullName.Substring($appDir.Length + 1).Replace('\','/')
 } | Sort-Object
-if ($manifest.Count -lt 50) { throw "manifest too small: $($manifest.Count)" }
+if ($manifest.Count -lt 35) { throw "manifest too small: $($manifest.Count)" }
 [System.IO.File]::WriteAllLines((Join-Path $packageDir 'PACKAGE_CONTENTS.txt'), $manifest, [System.Text.UTF8Encoding]::new($false))
 
 $zipPath = Join-Path $OutputDir ($packageName + '.zip')

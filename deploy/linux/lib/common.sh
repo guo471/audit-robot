@@ -117,6 +117,30 @@ run_sudo() {
   fi
 }
 
+run_as_runtime_user() {
+  local user="${GUOBU_RUN_USER:-${RUN_USER}}"
+  if [[ "$(id -un)" == "${user}" ]]; then
+    "$@"
+  elif [[ "${EUID:-$(id -u)}" -eq 0 ]] && command -v runuser >/dev/null 2>&1; then
+    runuser -u "${user}" -- env \
+      GUOBU_AUTO_AUDIT_ENV_FILE="${ENV_FILE}" \
+      PYTHON_BIN="${PYTHON_BIN:-}" \
+      "$@"
+  elif [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    sudo -u "${user}" env \
+      GUOBU_AUTO_AUDIT_ENV_FILE="${ENV_FILE}" \
+      PYTHON_BIN="${PYTHON_BIN:-}" \
+      "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -u "${user}" env \
+      GUOBU_AUTO_AUDIT_ENV_FILE="${ENV_FILE}" \
+      PYTHON_BIN="${PYTHON_BIN:-}" \
+      "$@"
+  else
+    fail "Must run as ${user}, or run with sudo so the script can switch user safely."
+  fi
+}
+
 ensure_run_user() {
   local user="${1:-${RUN_USER}}"
   if id "${user}" >/dev/null 2>&1; then
@@ -129,6 +153,50 @@ ensure_run_user() {
   else
     fail "Cannot create runtime user ${user}; useradd/adduser is missing."
   fi
+}
+
+ensure_env_readable_by_run_user() {
+  require_env_file
+  local user="${GUOBU_RUN_USER:-${RUN_USER}}"
+  ensure_run_user "${user}"
+  if [[ "$(id -un)" == "${user}" ]]; then
+    assert_env_permissions
+    return
+  fi
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]] || command -v sudo >/dev/null 2>&1; then
+    run_sudo chown "${user}:${user}" "${ENV_FILE}"
+    run_sudo chmod 600 "${ENV_FILE}"
+  else
+    fail "Env file must be readable by ${user}. Run: sudo chown ${user}:${user} ${ENV_FILE} && sudo chmod 600 ${ENV_FILE}"
+  fi
+}
+
+assert_runtime_dirs_writable_by_run_user() {
+  local user="${GUOBU_RUN_USER:-${RUN_USER}}"
+  local state_dir="${GUOBU_AUDIT_STATE_DIR:-/var/lib/audit_robot/state}"
+  local temp_dir="${GUOBU_AUDIT_TEMP_DIR:-/tmp/audit_robot_guobu}"
+  local needs_fix=false
+  ensure_run_user "${user}"
+  if ! run_as_runtime_user test -d "${state_dir}" >/dev/null 2>&1; then
+    needs_fix=true
+  elif ! run_as_runtime_user test -w "${state_dir}" >/dev/null 2>&1; then
+    needs_fix=true
+  fi
+  if ! run_as_runtime_user test -d "${temp_dir}" >/dev/null 2>&1; then
+    needs_fix=true
+  elif ! run_as_runtime_user test -w "${temp_dir}" >/dev/null 2>&1; then
+    needs_fix=true
+  fi
+  if [[ "${needs_fix}" == "true" ]]; then
+    if [[ "$(id -un)" == "${user}" ]]; then
+      fail "Runtime dirs are not ready for ${user}. Run bash deploy/linux/install.sh as root or sudo-capable user first."
+    fi
+    run_sudo mkdir -p "${state_dir}" "${temp_dir}"
+    run_sudo chown -R "${user}:${user}" "${state_dir}" "${temp_dir}"
+    run_sudo chmod 750 "${state_dir}" "${temp_dir}"
+  fi
+  run_as_runtime_user test -w "${state_dir}" || fail "State dir is not writable by ${user}: ${state_dir}"
+  run_as_runtime_user test -w "${temp_dir}" || fail "Temp dir is not writable by ${user}: ${temp_dir}"
 }
 
 shell_quote() {

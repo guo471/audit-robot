@@ -7,6 +7,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 cd "${PROJECT_ROOT}"
 require_env_file
+ensure_env_readable_by_run_user
 
 print_step "Run one audit loop"
-GUOBU_AUTO_AUDIT_ENV_FILE="${ENV_FILE}" bash tools/start_guobu_linux_auto_audit.sh --once
+run_as_runtime_user bash tools/start_guobu_linux_auto_audit.sh --once

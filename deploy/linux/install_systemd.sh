@@ -39,6 +39,7 @@ ExecStart=/bin/bash ${PROJECT_ROOT}/tools/start_guobu_linux_auto_audit.sh
 Restart=always
 RestartSec=10
 Environment=GUOBU_AUTO_AUDIT_ENV_FILE=${ENV_FILE}
+Environment=GUOBU_RUN_USER=${runtime_user}
 Environment=PYTHON_BIN=${python_bin}
 NoNewPrivileges=true
 PrivateTmp=true

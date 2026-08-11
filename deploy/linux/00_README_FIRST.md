@@ -68,6 +68,8 @@ bash deploy/linux/preflight.sh
 bash deploy/linux/run_once.sh
 ```
 
+run_once.sh 只用于部署验收，执行一轮后退出。它不是生产常驻进程。
+
 空转也算成功：没有待审核订单时，`fetched_count=0`、`processed_count=0`，不能报错。
 
 ## 第 6A 步：接入 XXL-JOB
@@ -81,12 +83,18 @@ bash deploy/linux/run_once.sh
 - 禁止并发重叠
 - 调度重试 0 或 1 次
 
+XXL-JOB 命令也是单轮执行，由调度器每 10 分钟拉起一次。
+
 ## 第 6B 步：不用 XXL-JOB 时安装 systemd
 
 ```bash
 bash deploy/linux/install_systemd.sh
 bash deploy/linux/start.sh
 ```
+
+systemd/start.sh 是常驻循环模式。tools/start_guobu_linux_auto_audit.sh 默认是循环模式，只有传入 `--once` 才执行一轮后退出。
+
+XXL-JOB 和 systemd 只能二选一，不能同时开启。
 
 查看状态：
 

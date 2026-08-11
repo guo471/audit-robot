@@ -2297,3 +2297,116 @@ def test_machine_approval_feedback_script_is_merged_into_mainline():
     assert "MACHINE_APPROVAL_AUTH_TOKEN" in source
     assert "confirm-apply-id" in source
     assert "confirm-prod-write" in source
+
+
+def test_linux_deployment_docs_disambiguate_one_shot_and_loop_modes():
+    readme_first = (PROJECT_ROOT / "deploy" / "linux" / "00_README_FIRST.md").read_text(encoding="utf-8")
+    deploy_readme = (PROJECT_ROOT / "deploy" / "linux" / "README_DEPLOY.md").read_text(encoding="utf-8")
+    run_once = (PROJECT_ROOT / "deploy" / "linux" / "run_once.sh").read_text(encoding="utf-8")
+    xxl_job = (PROJECT_ROOT / "deploy" / "linux" / "xxl_job_command.txt").read_text(encoding="utf-8")
+    systemd_unit = (PROJECT_ROOT / "deploy" / "linux" / "systemd" / "guobu-auto-audit.service").read_text(encoding="utf-8")
+    linux_launcher = (PROJECT_ROOT / "tools" / "start_guobu_linux_auto_audit.sh").read_text(encoding="utf-8")
+
+    combined_docs = readme_first + "\n" + deploy_readme
+    assert "run_once.sh 只用于部署验收，执行一轮后退出" in combined_docs
+    assert "XXL-JOB 命令也是单轮执行，由调度器每 10 分钟拉起一次" in combined_docs
+    assert "systemd/start.sh 是常驻循环模式" in combined_docs
+    assert "XXL-JOB 和 systemd 只能二选一，不能同时开启" in combined_docs
+    assert "tools/start_guobu_linux_auto_audit.sh 默认是循环模式" in combined_docs
+    assert "--once" in run_once
+    assert "--once" in xxl_job
+    assert "--once" not in systemd_unit
+    assert '[[ "${1:-}" == "--once" ]]' in linux_launcher
+
+
+def test_linux_preflight_and_run_once_execute_as_runtime_user_for_state_permissions():
+    common = (PROJECT_ROOT / "deploy" / "linux" / "lib" / "common.sh").read_text(encoding="utf-8")
+    preflight = (PROJECT_ROOT / "deploy" / "linux" / "preflight.sh").read_text(encoding="utf-8")
+    run_once = (PROJECT_ROOT / "deploy" / "linux" / "run_once.sh").read_text(encoding="utf-8")
+    install = (PROJECT_ROOT / "deploy" / "linux" / "install.sh").read_text(encoding="utf-8")
+
+    assert "run_as_runtime_user()" in common
+    assert "ensure_env_readable_by_run_user()" in common
+    assert "assert_runtime_dirs_writable_by_run_user()" in common
+    assert "needs_fix=false" in common
+    assert "Runtime dirs are not ready" in common
+    assert "run_as_runtime_user bash tools/start_guobu_linux_auto_audit.sh --preflight-only" in preflight
+    assert "run_as_runtime_user bash tools/start_guobu_linux_auto_audit.sh --once" in run_once
+    assert "ensure_env_readable_by_run_user" in preflight
+    assert "ensure_env_readable_by_run_user" in run_once
+    assert "load_env_file" not in run_once
+    assert "assert_runtime_dirs_writable_by_run_user" in preflight
+    assert "chown -R \"${RUN_USER}:${RUN_USER}\" /var/lib/audit_robot /tmp/audit_robot_guobu" in install
+
+
+def test_linux_release_builder_is_runtime_allowlist_not_experiment_dump():
+    builder = (PROJECT_ROOT / "deploy" / "linux" / "build_release_zip.ps1").read_text(encoding="utf-8")
+
+    assert "$runtimeInclude" in builder
+    assert "Add-RuntimePath" in builder
+    assert "[switch]$AllowDirty" in builder
+    assert "worktree is dirty" in builder
+    assert "git ls-files" not in builder
+    for required in [
+        "config.py",
+        "deploy/linux/00_README_FIRST.md",
+        "deploy/linux/README_DEPLOY.md",
+        "deploy/linux/PRODUCTION_ACCEPTANCE_CHECKLIST.md",
+        "'modules'",
+        "tools/guobu_linux_auto_audit.py",
+        "tools/start_guobu_linux_auto_audit.sh",
+        "tools/run_guobu_model_audit_v2.py",
+        "tools/guobu_machine_approval_feedback.js",
+        "photo_authenticity/prompts/non_real_photo_auditor_v4.txt",
+        "photo_authenticity/models/releases/non-real-photo-v2",
+    ]:
+        assert required in builder
+    for forbidden in [
+        "tests/",
+        "training.py",
+        "benchmark.py",
+        "onnx_export.py",
+        "research-results.md",
+        "sample",
+        ".worktrees",
+    ]:
+        assert forbidden not in builder
+
+
+def test_linux_production_acceptance_checklist_exists_and_covers_hard_gates():
+    checklist_path = PROJECT_ROOT / "deploy" / "linux" / "PRODUCTION_ACCEPTANCE_CHECKLIST.md"
+    assert checklist_path.exists()
+    checklist = checklist_path.read_text(encoding="utf-8")
+
+    assert checklist.count("- [ ]") >= 20
+    for required in [
+        "SHA256",
+        ".env 权限",
+        "auditrobot",
+        "/var/lib/audit_robot/state",
+        "preflight.sh",
+        "run_once.sh",
+        "XXL-JOB",
+        "systemd",
+        "只能二选一",
+        "连续 3 轮空转",
+        "1-3 单灰度订单",
+        "refuseMessage",
+        "UTF-8 中文",
+        "SN 不一致",
+        "条码",
+        "PHOTO_AUTHENTICITY_LOCAL_TREE_ENABLED=false",
+        "SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE=true",
+        "emergency_stop.sh",
+        "验收人",
+        "日期",
+    ]:
+        assert required in checklist
+
+
+def test_linux_systemd_service_exports_runtime_user_for_non_default_user_paths():
+    installer = (PROJECT_ROOT / "deploy" / "linux" / "install_systemd.sh").read_text(encoding="utf-8")
+    static_unit = (PROJECT_ROOT / "deploy" / "linux" / "systemd" / "guobu-auto-audit.service").read_text(encoding="utf-8")
+
+    assert "Environment=GUOBU_RUN_USER=${runtime_user}" in installer
+    assert "Environment=GUOBU_RUN_USER=auditrobot" in static_unit
