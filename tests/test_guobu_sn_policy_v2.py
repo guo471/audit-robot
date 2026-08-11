@@ -152,6 +152,98 @@ def test_label_prefix_stripping_does_not_correct_similar_characters():
     assert result["manual_reason_code"] == "SN_MISMATCH"
 
 
+@pytest.mark.parametrize(
+    ("system_sn", "auxiliary_code", "matching_candidate"),
+    [
+        ("511320Q1170AA101070058", "D71-001Q1170-25A10-170058", "511-320Q1170AA10-1070058"),
+        ("511310A2247B7071241628", "D71-004A2247-26707-441628", "511-310A2247-B707-1241628"),
+        ("511-310A1849-B517-1170008", "D71-002A1849-26517-270008", "511-310A1849-B517-1170008"),
+    ],
+)
+def test_home_appliance_exact_system_sn_rescues_d71_auxiliary_code_conflict(
+    monkeypatch, system_sn, auxiliary_code, matching_candidate
+):
+    monkeypatch.setenv("SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE", "true")
+
+    result = decide_sn(
+        {"product_type": "电冰箱", "cate_code_name": "电冰箱", "system_sn": system_sn},
+        evidence(
+            candidate("DEVICE_BODY", auxiliary_code),
+            candidate("DEVICE_BODY", matching_candidate),
+            state="NO_SCREEN_IDENTITY",
+        ),
+    )
+
+    assert result["manual_required"] is False
+    assert result["sn_match"] is True
+    assert result["normalized_observed_sn"] == canonical_system_sn(system_sn)
+    assert result["sn_conflict_resolution"] == "home_appliance_exact_system_sn_d71_auxiliary_code"
+
+
+def test_home_appliance_exact_system_sn_conflict_rescue_is_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE", raising=False)
+
+    result = decide_sn(
+        {"product_type": "电冰箱", "cate_code_name": "电冰箱", "system_sn": "511320Q1170AA101070058"},
+        evidence(
+            candidate("DEVICE_BODY", "D71-001Q1170-25A10-170058"),
+            candidate("DEVICE_BODY", "511-320Q1170AA10-1070058"),
+            state="NO_SCREEN_IDENTITY",
+        ),
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "MODEL_UNCERTAIN"
+
+
+@pytest.mark.parametrize("product_type", ["手机", "平板电脑", "智能手表", "电脑"])
+def test_home_appliance_conflict_rescue_does_not_apply_to_digital_categories(monkeypatch, product_type):
+    monkeypatch.setenv("SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE", "true")
+
+    result = decide_sn(
+        {"product_type": product_type, "system_sn": "511320Q1170AA101070058"},
+        evidence(
+            candidate("DEVICE_BODY", "D71-001Q1170-25A10-170058"),
+            candidate("DEVICE_BODY", "511-320Q1170AA10-1070058"),
+            state="NO_SCREEN_IDENTITY",
+        ),
+    )
+
+    assert result["manual_required"] is True
+
+
+def test_home_appliance_conflict_rescue_keeps_real_second_sn_blocked(monkeypatch):
+    monkeypatch.setenv("SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE", "true")
+
+    result = decide_sn(
+        {"product_type": "电冰箱", "cate_code_name": "电冰箱", "system_sn": "511320Q1170AA101070058"},
+        evidence(
+            candidate("DEVICE_BODY", "611320Q1170AA101070058"),
+            candidate("DEVICE_BODY", "511-320Q1170AA10-1070058"),
+            state="NO_SCREEN_IDENTITY",
+        ),
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "MODEL_UNCERTAIN"
+
+
+def test_home_appliance_conflict_rescue_does_not_treat_o_zero_as_exact(monkeypatch):
+    monkeypatch.setenv("SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE", "true")
+
+    result = decide_sn(
+        {"product_type": "电冰箱", "cate_code_name": "电冰箱", "system_sn": "3B164B00RNP00000"},
+        evidence(
+            candidate("DEVICE_BODY", "D71-001Q1170-25A10-170058"),
+            candidate("DEVICE_BODY", "3B164BOORNP00000"),
+            state="NO_SCREEN_IDENTITY",
+        ),
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "MODEL_UNCERTAIN"
+
+
 def test_system_sn_canonicalization_preserves_zero_and_letter_o():
     assert canonical_system_sn("3B164BOORNP00000") == "3B164BOORNP00000"
     assert canonical_system_sn("3B164B00RNP00000") == "3B164B00RNP00000"

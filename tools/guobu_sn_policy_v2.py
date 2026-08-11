@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import os
 import re
 from enum import Enum
 from typing import Any, Iterable
@@ -412,6 +413,47 @@ def _has_same_priority_conflict(candidates: list[dict[str, Any]]) -> bool:
     return len({canonical_candidate_sn(candidate) for candidate in candidates}) >= 2
 
 
+def _env_enabled(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_d71_home_appliance_auxiliary_code(candidate: dict[str, Any], *, system: str) -> bool:
+    value = canonical_candidate_sn(candidate)
+    if not value or value == system:
+        return False
+    if _candidate_source(candidate) not in HOME_SOURCES:
+        return False
+    raw = str(candidate.get("raw_text") or "")
+    return (
+        value.startswith("D71")
+        and raw.count("-") >= 3
+        and 18 <= len(value) <= 26
+    )
+
+
+def _home_appliance_exact_match_conflict_rescue_candidate(
+    fields: dict[str, Any],
+    category: SnCategory,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if category is not SnCategory.HOME_APPLIANCE:
+        return None
+    if not _env_enabled("SN_HOME_APPLIANCE_EXACT_MATCH_CONFLICT_RESCUE"):
+        return None
+    system = canonical_system_sn(fields.get("system_sn"))
+    if not system:
+        return None
+    exact_matches = [candidate for candidate in candidates if canonical_candidate_sn(candidate) == system]
+    if len(exact_matches) != 1:
+        return None
+    for candidate in candidates:
+        if candidate is exact_matches[0]:
+            continue
+        if not _is_d71_home_appliance_auxiliary_code(candidate, system=system):
+            return None
+    return exact_matches[0]
+
+
 def _leading_s_exception_applies(fields: dict[str, Any], candidate: dict[str, Any], all_usable: list[dict[str, Any]]) -> bool:
     system = canonical_system_sn(fields.get("system_sn"))
     observed = canonical_candidate_sn(candidate)
@@ -472,6 +514,11 @@ def _compare_candidates(
     if not candidates:
         return _manual(fields, category, "SN_NOT_FOUND", "未读取到有效SN")
     if _has_same_priority_conflict(candidates):
+        rescue = _home_appliance_exact_match_conflict_rescue_candidate(fields, category, candidates)
+        if rescue is not None:
+            decision = _pass(fields, category, rescue)
+            decision["sn_conflict_resolution"] = "home_appliance_exact_system_sn_d71_auxiliary_code"
+            return decision
         return _manual(fields, category, "MODEL_UNCERTAIN", "同优先级SN候选冲突", candidates[0])
     candidate = candidates[0]
     observed = canonical_candidate_sn(candidate)
