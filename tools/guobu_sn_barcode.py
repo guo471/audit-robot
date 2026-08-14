@@ -86,6 +86,40 @@ def barcode_second_check(fields: dict[str, Any], decoded_items: list[dict[str, A
     return result
 
 
+def barcode_decoded_values(barcode_result: dict[str, Any] | None) -> list[str]:
+    if not isinstance(barcode_result, dict):
+        return []
+    values: list[str] = []
+    for item in barcode_result.get("decoded") or []:
+        if not isinstance(item, dict):
+            continue
+        text = trim_barcode_text(item.get("text") or item.get("raw_text") or item.get("value") or "")
+        if text:
+            values.append(text)
+    return values
+
+
+def barcode_observability_fields(
+    barcode_result: dict[str, Any] | None,
+    *,
+    barcode_mode: str,
+    final_decision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    attempted = isinstance(barcode_result, dict)
+    matched = bool(barcode_result.get("matched")) if attempted else False
+    final_manual = bool((final_decision or {}).get("manual_required"))
+    return {
+        "barcode_mode": str(barcode_mode or "off"),
+        "barcode_attempted": attempted,
+        "barcode_matched": matched,
+        "barcode_match_type": str((barcode_result or {}).get("match_type") or "") if attempted else "",
+        "barcode_values": barcode_decoded_values(barcode_result),
+        "barcode_error": str((barcode_result or {}).get("error") or "") if attempted else "",
+        "barcode_reject_reasons": list((barcode_result or {}).get("reject_reasons") or []) if attempted else [],
+        "barcode_rescued": bool(attempted and matched and final_decision is not None and not final_manual),
+    }
+
+
 def barcode_rescue_decision(
     fields: dict[str, Any],
     decision: dict[str, Any],
@@ -120,6 +154,8 @@ def apply_barcode_second_check(
     if mode not in {"shadow", "enforce"}:
         return decision, None
     if decision.get("manual_reason_code") != "SN_MISMATCH":
+        return decision, None
+    if decision.get("identity_code_mismatch"):
         return decision, None
 
     scanner = barcode_scanner or scan_activation_barcodes
@@ -220,6 +256,8 @@ def scan_activation_barcodes(_task: dict[str, Any], activation_images: list[dict
 __all__ = [
     "BarcodeScanner",
     "apply_barcode_second_check",
+    "barcode_decoded_values",
+    "barcode_observability_fields",
     "barcode_region_scales",
     "barcode_rescue_decision",
     "barcode_reject_reason",

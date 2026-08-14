@@ -172,6 +172,8 @@ def _apply_barcode_second_check(
         return decision, None
     if decision.get("manual_reason_code") != "SN_MISMATCH":
         return decision, None
+    if decision.get("identity_code_mismatch"):
+        return decision, None
 
     scanner = barcode_scanner or _scan_activation_barcodes
     decoded_items = scanner(task, activation_images)

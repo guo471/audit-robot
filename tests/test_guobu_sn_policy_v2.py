@@ -549,6 +549,130 @@ def test_identity_fields_are_never_rescued_as_sn(field_type):
     assert result["sn_match"] is False
 
 
+def test_explicit_imei1_mismatch_blocks_after_sn_match():
+    result = decide_sn(
+        {"product_type": "phone", "system_sn": "ABC123", "imei1": "111111111111111"},
+        evidence(
+            candidate("DEVICE_SCREEN", "ABC123"),
+            state="SCREEN_SN_CLEAR",
+            identities=[identity("IMEI1", "999999999999999")],
+        ),
+        effective_category="ordinary_3c",
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["identity_code_mismatch"] is True
+    assert result["sn_match"] is False
+
+
+def test_explicit_imei1_mismatch_blocks_even_when_sn_already_mismatched():
+    result = decide_sn(
+        {"product_type": "phone", "system_sn": "ABC123", "imei1": "111111111111111"},
+        evidence(
+            candidate("DEVICE_SCREEN", "XYZ999"),
+            state="SCREEN_SN_CLEAR",
+            identities=[identity("IMEI1", "999999999999999")],
+        ),
+        effective_category="ordinary_3c",
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["identity_code_mismatch"] is True
+    assert result["sn_match"] is False
+
+
+def test_generic_imei_does_not_guess_imei1_or_imei2_slot():
+    result = decide_sn(
+        {
+            "product_type": "phone",
+            "system_sn": "ABC123",
+            "imei1": "111111111111111",
+            "imei2": "222222222222222",
+        },
+        evidence(
+            candidate("DEVICE_SCREEN", "ABC123"),
+            state="SCREEN_SN_CLEAR",
+            identities=[identity("IMEI", "999999999999999")],
+        ),
+        effective_category="ordinary_3c",
+    )
+
+    assert result["manual_required"] is False
+    assert result["sn_match"] is True
+
+
+@pytest.mark.parametrize("field_type,label_text", [("IMEI-1", ""), ("imei_1", ""), ("IMEI1", "I M E I 1")])
+def test_explicit_imei1_label_variants_are_checked(field_type, label_text):
+    identity_item = identity(field_type, "999999999999999")
+    if label_text:
+        identity_item["label_text"] = label_text
+    result = decide_sn(
+        {"product_type": "phone", "system_sn": "ABC123", "imei1": "111111111111111"},
+        evidence(
+            candidate("DEVICE_SCREEN", "ABC123"),
+            state="SCREEN_SN_CLEAR",
+            identities=[identity_item],
+        ),
+        effective_category="ordinary_3c",
+    )
+
+    assert result["manual_required"] is True
+    assert result["identity_code_mismatch"] is True
+
+
+@pytest.mark.parametrize(
+    "raw_text,complete",
+    [("99999999999999", True), ("999999999999999", False)],
+)
+def test_incomplete_or_non_15_digit_imei1_is_not_used_for_mismatch_gate(raw_text, complete):
+    result = decide_sn(
+        {"product_type": "phone", "system_sn": "ABC123", "imei1": "111111111111111"},
+        evidence(
+            candidate("DEVICE_SCREEN", "ABC123"),
+            state="SCREEN_SN_CLEAR",
+            identities=[identity("IMEI1", raw_text) | {"complete": complete}],
+        ),
+        effective_category="ordinary_3c",
+    )
+
+    assert result["manual_required"] is False
+    assert result["sn_match"] is True
+
+
+def test_incomplete_system_imei1_is_not_used_for_mismatch_gate():
+    result = decide_sn(
+        {"product_type": "phone", "system_sn": "ABC123", "imei1": "11111111111111"},
+        evidence(
+            candidate("DEVICE_SCREEN", "ABC123"),
+            state="SCREEN_SN_CLEAR",
+            identities=[identity("IMEI1", "999999999999999")],
+        ),
+        effective_category="ordinary_3c",
+    )
+
+    assert result["manual_required"] is False
+    assert result["sn_match"] is True
+
+
+def test_explicit_2_code_mismatch_blocks_after_sn_match():
+    result = decide_sn(
+        {"product_type": "phone", "system_sn": "ABC123", "2_code": "222222222222222"},
+        evidence(
+            candidate("DEVICE_SCREEN", "ABC123"),
+            state="SCREEN_SN_CLEAR",
+            identities=[identity("2码", "999999999999999")],
+        ),
+        effective_category="ordinary_3c",
+    )
+
+    assert result["manual_required"] is True
+    assert result["manual_reason_code"] == "SN_MISMATCH"
+    assert result["identity_code_mismatch"] is True
+    assert result["sn_match"] is False
+
+
 def test_phone_identity_only_package_match_does_not_require_identity_evidence():
     result = decide_sn(
         {"product_type": "手机", "system_sn": "J699HC5726"},

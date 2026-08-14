@@ -296,6 +296,74 @@ def test_barcode_does_not_clean_slash_to_match_system_sn():
     assert result["_raw"]["barcode_result"]["matched"] is False
 
 
+def test_barcode_is_not_called_for_identity_code_mismatch():
+    evidence = screen_evidence("SECRET-SN-123")
+    evidence["identity_evidence"] = [
+        {
+            "image_id": "img_003",
+            "source": "DEVICE_SCREEN",
+            "field_type": "IMEI1",
+            "label_text": "IMEI1",
+            "raw_text": "999999999999999",
+            "readable": True,
+            "complete": True,
+        }
+    ]
+    order = task(system_sn="SECRET-SN-123")
+    order["fields"]["imei1"] = "111111111111111"
+
+    def fail_barcode_scanner(*_args, **_kwargs):
+        raise AssertionError("barcode scanner must not run for identity mismatch")
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        order,
+        model_caller=lambda *_args, **_kwargs: (evidence, "{}", 0.1, {}, False),
+        barcode_scanner=fail_barcode_scanner,
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_reason_code"] == "SN_MISMATCH"
+    assert result["row"]["sn_match"] is False
+    assert "barcode_result" not in result["_raw"]
+
+
+def test_sn_mismatch_with_identity_mismatch_is_not_rescued_by_barcode():
+    evidence = screen_evidence("WRONG-SN-999")
+    evidence["identity_evidence"] = [
+        {
+            "image_id": "img_003",
+            "source": "DEVICE_SCREEN",
+            "field_type": "IMEI1",
+            "label_text": "IMEI1",
+            "raw_text": "999999999999999",
+            "readable": True,
+            "complete": True,
+        }
+    ]
+    order = task(system_sn="SECRET-SN-123")
+    order["fields"]["imei1"] = "111111111111111"
+
+    def fail_barcode_scanner(*_args, **_kwargs):
+        raise AssertionError("barcode scanner must not run for identity mismatch")
+
+    result = audit_task_sn_v2(
+        "https://unused",
+        "key",
+        "model",
+        order,
+        model_caller=lambda *_args, **_kwargs: (evidence, "{}", 0.1, {}, False),
+        barcode_scanner=fail_barcode_scanner,
+        barcode_mode="enforce",
+    )
+
+    assert result["row"]["manual_reason_code"] == "SN_MISMATCH"
+    assert result["row"]["sn_match"] is False
+    assert "barcode_result" not in result["_raw"]
+
+
 @pytest.mark.parametrize(
     "decoded",
     [

@@ -343,6 +343,114 @@ def _valid_identities(evidence: dict[str, Any]) -> list[dict[str, Any]]:
     return valid
 
 
+def _system_identity_value(fields: dict[str, Any], key: str) -> str:
+    aliases = {
+        "IMEI1": ("imei1", "imei_1", "1_code", "code1", "one_code", "\u0031\u7801"),
+        "IMEI2": ("imei2", "imei_2", "2_code", "code2", "two_code", "\u0032\u7801"),
+    }
+    for alias in aliases.get(key, ()):
+        value = canonical_sn(fields.get(alias))
+        if value:
+            return value
+    return ""
+
+
+_IDENTITY_LABEL_PREFIX_RE = re.compile(
+    r"^\s*(?:IMEI\s*[/_-]\s*MEID|IMEI\s*(?:1|2)?|MEID|EID|[12]\s*\u7801)\s*[:\uff1a._/\-\s]*",
+    re.IGNORECASE,
+)
+
+
+def _canonical_identity_value(value: Any) -> str:
+    text = str(value or "").strip()
+    previous = None
+    while previous != text:
+        previous = text
+        text = _IDENTITY_LABEL_PREFIX_RE.sub("", text, count=1).strip()
+    return canonical_sn(text)
+
+
+def _identity_slot_is_explicit(item: dict[str, Any], field_type: str) -> bool:
+    evidence_text = " ".join(
+        str(item.get(key) or "").strip()
+        for key in ("field_type", "raw_text", "label_text", "raw_context", "context")
+        if str(item.get(key) or "").strip()
+    )
+    if not evidence_text:
+        return False
+    compact_text = re.sub(r"[\s/_-]+", "", evidence_text.upper())
+    labels = {
+        re.sub(r"[\s/_-]+", "", match.group(1).upper())
+        for match in re.finditer(r"(I\s*M\s*E\s*I\s*(?:1|2)|[12]\s*\u7801)", evidence_text, re.IGNORECASE)
+    }
+    if "IMEI1" in compact_text:
+        labels.add("IMEI1")
+    if "IMEI2" in compact_text:
+        labels.add("IMEI2")
+    if field_type == "IMEI1":
+        return bool(labels & {"IMEI1", "\u0031\u7801"})
+    if field_type == "IMEI2":
+        return bool(labels & {"IMEI2", "\u0032\u7801"})
+    return False
+
+
+def _identity_gate_mismatches(fields: dict[str, Any], evidence: dict[str, Any]) -> list[str]:
+    observed_by_type: dict[str, list[tuple[str, str]]] = {"IMEI1": [], "IMEI2": []}
+    for item in _identity_entries(evidence):
+        field_type = _identity_type(item.get("field_type"))
+        if field_type not in observed_by_type:
+            continue
+        if _candidate_source(item) != "DEVICE_SCREEN" or not _is_true(item.get("readable")):
+            continue
+        if "complete" in item and not _is_true(item.get("complete")):
+            continue
+        if not _identity_slot_is_explicit(item, field_type):
+            continue
+        observed = _canonical_identity_value(item.get("raw_text"))
+        if not re.fullmatch(r"[0-9]{15}", observed):
+            continue
+        if observed:
+            observed_by_type[field_type].append((observed, str(item.get("raw_text") or "")))
+
+    mismatches: list[str] = []
+    for field_type, label in (("IMEI1", "\u0031\u7801"), ("IMEI2", "\u0032\u7801")):
+        system = _system_identity_value(fields, field_type)
+        observed_items = observed_by_type[field_type]
+        if not system or not observed_items:
+            continue
+        if not re.fullmatch(r"[0-9]{15}", system):
+            continue
+        observed_values = {observed for observed, _raw in observed_items}
+        if observed_values == {system}:
+            continue
+        raw_values = " / ".join(raw for _observed, raw in observed_items if raw)
+        mismatches.append(f"\u7cfb\u7edf{label}\u4e0e\u7167\u7247{label}\u4e0d\u4e00\u81f4\uff08\u7cfb\u7edf\uff1a{system}\uff0c\u7167\u7247\uff1a{raw_values}\uff09")
+    return mismatches
+
+
+def _apply_identity_gate(
+    fields: dict[str, Any],
+    category: SnCategory,
+    evidence: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    if category not in {SnCategory.PHONE, SnCategory.TABLET, SnCategory.WATCH, SnCategory.COMPUTER}:
+        return decision
+    mismatches = _identity_gate_mismatches(fields, evidence)
+    if not mismatches:
+        return decision
+    blocked = dict(decision)
+    blocked["manual_required"] = True
+    blocked["manual_reason_code"] = "SN_MISMATCH"
+    existing_reason = str(blocked.get("manual_reason") or "").strip()
+    identity_reason = "\uff1b".join(mismatches)
+    blocked["manual_reason"] = "\uff1b".join(part for part in (existing_reason, identity_reason) if part)
+    blocked["manual_reason_codes"] = ["SN_MISMATCH"]
+    blocked["identity_code_mismatch"] = True
+    blocked["sn_match"] = False
+    return blocked
+
+
 def _screen_state(value: Any) -> str:
     state = str(value or "").strip().upper()
     return LEGACY_STATE_MAP.get(state, state)
@@ -606,6 +714,9 @@ def decide_sn(
     state = _derived_screen_state(evidence, category)
     all_usable = _candidates(evidence, ALL_SN_SOURCES, usable=True)
 
+    def finalize(decision: dict[str, Any]) -> dict[str, Any]:
+        return _apply_identity_gate(values, category, evidence, decision)
+
     if state == SCREEN_SN_CONFLICT:
         return _manual(values, category, "MODEL_UNCERTAIN", "屏幕出现多个不同SN")
 
@@ -615,7 +726,7 @@ def decide_sn(
             home_sources |= {"DEVICE_SCREEN"}
         usable = _candidates(evidence, home_sources, usable=True)
         if usable:
-            return _compare_candidates(values, category, usable, all_usable=all_usable)
+            return finalize(_compare_candidates(values, category, usable, all_usable=all_usable))
         if _candidates(evidence, home_sources, usable=False):
             return _manual(values, category, "MODEL_UNCERTAIN", "SN证据存在但不完整或不清楚")
         return _manual(values, category, "SN_NOT_FOUND", "未读取到有效SN")
@@ -624,7 +735,7 @@ def decide_sn(
     if state == SCREEN_SN_CLEAR:
         if not screen:
             return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN状态与候选不一致")
-        return _compare_candidates(values, category, screen, all_usable=all_usable)
+        return finalize(_compare_candidates(values, category, screen, all_usable=all_usable))
 
     package = _candidates(evidence, PACKAGE_SOURCES, usable=True)
     explicit_screen = _candidates(evidence, {"DEVICE_SCREEN"}, usable=False)
@@ -635,16 +746,16 @@ def decide_sn(
         and not screen
         and model_state in {SCREEN_SN_CLEAR, SCREEN_SN_UNCLEAR, PHONE_IDENTITY_ONLY}
     ):
-        return _compare_candidates(values, category, package, all_usable=all_usable)
+        return finalize(_compare_candidates(values, category, package, all_usable=all_usable))
 
     if category is SnCategory.PHONE and (state == PHONE_IDENTITY_ONLY or model_state == PHONE_IDENTITY_ONLY):
         if package:
-            return _compare_candidates(values, category, package, all_usable=all_usable)
+            return finalize(_compare_candidates(values, category, package, all_usable=all_usable))
         return _manual(values, category, "SN_NOT_FOUND", "手机屏幕只有身份字段，未读取到包装SN")
 
     if state == SCREEN_SN_UNCLEAR:
         if package:
-            return _compare_candidates(values, category, package, all_usable=all_usable)
+            return finalize(_compare_candidates(values, category, package, all_usable=all_usable))
         if explicit_screen:
             return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN证据存在但不完整或不清楚", explicit_screen[0])
         return _manual(values, category, "MODEL_UNCERTAIN", "屏幕SN状态与候选不一致")

@@ -49,7 +49,11 @@ from tools.guobu_sn_policy_v2 import (
     classify_sn_category as classify_sn_v2_category,
     decide_sn as decide_sn_v2,
 )
-from tools.guobu_sn_barcode import BarcodeScanner, apply_barcode_second_check
+from tools.guobu_sn_barcode import (
+    BarcodeScanner,
+    apply_barcode_second_check,
+    barcode_observability_fields,
+)
 
 
 COMPLIANCE_RULESETS = {"candidate", "legacy"}
@@ -906,6 +910,17 @@ CSV_COLUMNS = [
     ("photo_authenticity_incremental_available", "真实性增量是否可计算"),
     ("sn_char_review_mode", "SN相似字符复核模式"),
     ("sn_barcode_mode", "SN条码二次确认模式"),
+    ("model_sn", "模型SN"),
+    ("new_final_result", "最终结论"),
+    ("reason_code_cn", "中文原因"),
+    ("barcode_mode", "SN条码实际模式"),
+    ("barcode_attempted", "SN条码是否触发"),
+    ("barcode_matched", "SN条码是否匹配"),
+    ("barcode_match_type", "SN条码匹配类型"),
+    ("barcode_values", "SN条码扫描结果"),
+    ("barcode_error", "SN条码扫描异常"),
+    ("barcode_reject_reasons", "SN条码拒绝原因"),
+    ("barcode_rescued", "SN条码是否救回"),
     ("sn_label_auth_review_mode", "SN标签真实性插件模式"),
     ("digital_activation_evidence_mode", "普通3C激活证据插件模式"),
     ("compliance_ruleset", "合规规则集"),
@@ -3940,10 +3955,12 @@ def audit_task_hybrid(
             },
             effective_category=precheck["effective_category"],
         )
+        model_sn_before_barcode = str(sn_decision.get("observed_sn") or "")
         barcode_activation_images = precheck["activation_images"]
         if (
             active_sn_barcode_mode in {"shadow", "enforce"}
             and sn_decision.get("manual_reason_code") == "SN_MISMATCH"
+            and not sn_decision.get("identity_code_mismatch")
             and cache_dir is not None
         ):
             barcode_activation_images = _prepare_barcode_activation_images(
@@ -3959,6 +3976,7 @@ def audit_task_hybrid(
         )
         normalized_sn = _normalize_sn_v2_result(sn_result, sn_decision)
     else:
+        model_sn_before_barcode = ""
         sn_payload = build_sn_payload(task, fields, precheck["activation_images"])
         sn_result, sn_raw, sn_elapsed, sn_usage, sn_cached = call_model_with_retry(
             base_url,
@@ -3981,6 +3999,16 @@ def audit_task_hybrid(
 
     def attach_sn_barcode_result(row: dict[str, Any]) -> dict[str, Any]:
         row["sn_barcode_mode"] = active_sn_barcode_mode
+        row["model_sn"] = model_sn_before_barcode or str(row.get("observed_sn") or "")
+        row["new_final_result"] = "不通过" if str(row.get("manual_flag") or "") == "是" else "通过"
+        row["reason_code_cn"] = str(row.get("manual_reason_cn") or "")
+        row.update(
+            barcode_observability_fields(
+                sn_barcode_result,
+                barcode_mode=active_sn_barcode_mode,
+                final_decision=normalized_sn,
+            )
+        )
         if sn_barcode_result is not None:
             row.setdefault("_raw", {})["sn_barcode_result"] = sn_barcode_result
         return row
@@ -4002,7 +4030,7 @@ def audit_task_hybrid(
             row["model_calls"] = model_calls
             row["total_tokens"] = total_tokens
             row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-            return finalize_photo_authenticity_report_fields(row, authenticity_config)
+            return finalize_photo_authenticity_report_fields(attach_sn_barcode_result(row), authenticity_config)
         review_payload = dict(sn_payload)
         review_payload["previous_decision"] = normalized_sn
         review_result, review_raw, review_elapsed, review_usage, review_cached = call_model_with_retry(
@@ -4044,7 +4072,7 @@ def audit_task_hybrid(
                 "review_usage": review_usage,
                 "review_cached": review_cached,
             }
-            return finalize_photo_authenticity_report_fields(row, authenticity_config)
+            return finalize_photo_authenticity_report_fields(attach_sn_barcode_result(row), authenticity_config)
 
     if active_sn_policy == "v1" and allow_targeted_review and _needs_targeted_sn_review(fields, normalized_sn):
         if _order_budget_exhausted(started):
@@ -4054,7 +4082,7 @@ def audit_task_hybrid(
             row["model_calls"] = model_calls
             row["total_tokens"] = total_tokens
             row["_raw"] = {"sn_raw": sn_raw, "sn_usage": sn_usage, "sn_cached": sn_cached}
-            return finalize_photo_authenticity_report_fields(row, authenticity_config)
+            return finalize_photo_authenticity_report_fields(attach_sn_barcode_result(row), authenticity_config)
         target_payload = build_targeted_sn_payload(task, fields, precheck["activation_images"], normalized_sn)
         target_result, target_raw, target_elapsed, target_usage, target_cached = call_model_with_retry(
             base_url,
@@ -4096,7 +4124,7 @@ def audit_task_hybrid(
                 "target_review_usage": target_usage,
                 "target_review_cached": target_cached,
             }
-            return finalize_photo_authenticity_report_fields(row, authenticity_config)
+            return finalize_photo_authenticity_report_fields(attach_sn_barcode_result(row), authenticity_config)
 
     if not as_bool(normalized_sn.get("sn_match")):
         code = normalized_sn.get("manual_reason_code") or ("SN_MISMATCH" if normalized_sn.get("observed_sn") else "SN_NOT_FOUND")
@@ -4146,7 +4174,7 @@ def audit_task_hybrid(
                 "sn_cached": sn_cached,
             }
             return finalize_photo_authenticity_report_fields(
-                row, authenticity_config
+                attach_sn_barcode_result(row), authenticity_config
             )
 
     compliance_payload = {
