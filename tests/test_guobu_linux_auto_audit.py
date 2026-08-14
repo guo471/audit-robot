@@ -1972,6 +1972,59 @@ def test_build_audit_task_accepts_production_detail_fields_and_json_photo_string
     assert len(image_ids) == len(set(image_ids))
 
 
+def test_build_audit_task_preserves_top_level_identity_codes():
+    task = build_audit_task(
+        {"id": 204108, "jlPayOrder": "test-order-prod-108"},
+        {
+            "sn": "SN-204108",
+            "imei1": "111111111111111",
+            "imei2": "222222222222222",
+            "cateCodeName": "手机",
+            "goodsPhoto": [{"url": "https://example.invalid/goods.jpg"}],
+            "unsealingPhoto": [{"url": "https://example.invalid/unbox.jpg"}],
+            "activatePhoto": [{"url": "https://example.invalid/sn.jpg"}],
+        },
+    )
+
+    assert task["fields"]["imei1"] == "111111111111111"
+    assert task["fields"]["imei2"] == "222222222222222"
+
+
+def test_build_audit_task_preserves_identity_code_aliases_from_order_and_detail():
+    task = build_audit_task(
+        {"id": 204109, "jlPayOrder": "test-order-prod-109", "imei_1": "111111111111111"},
+        {
+            "sn": "SN-204109",
+            "twoCode": "222222222222222",
+            "cateCodeName": "手机",
+            "goodsPhoto": [{"url": "https://example.invalid/goods.jpg"}],
+            "unsealingPhoto": [{"url": "https://example.invalid/unbox.jpg"}],
+            "activatePhoto": [{"url": "https://example.invalid/sn.jpg"}],
+        },
+    )
+
+    assert task["fields"]["imei1"] == "111111111111111"
+    assert task["fields"]["imei2"] == "222222222222222"
+
+
+def test_build_audit_task_merges_identity_codes_into_prebuilt_detail_task():
+    task = build_audit_task(
+        {"id": 204110, "jlPayOrder": "test-order-prod-110", "oneCode": "111111111111111"},
+        {
+            "fields": {"system_sn": "SN-204110", "product_type": "手机"},
+            "image_groups": {
+                "商品照片": [{"source_url": "https://example.invalid/goods.jpg"}],
+                "拆封照片": [{"source_url": "https://example.invalid/unbox.jpg"}],
+                "SN码采集 / 激活照片": [{"source_url": "https://example.invalid/sn.jpg"}],
+            },
+            "2_code": "222222222222222",
+        },
+    )
+
+    assert task["fields"]["imei1"] == "111111111111111"
+    assert task["fields"]["imei2"] == "222222222222222"
+
+
 def test_build_audit_task_extracts_url_from_malformed_photo_text_without_truncating_s():
     task = build_audit_task(
         {"id": 204107, "jlPayOrder": "test-order-prod-107"},

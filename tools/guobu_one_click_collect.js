@@ -26,6 +26,10 @@ const AUDIT_FIELD_WHITELIST = [
   "flow_status",
   "source_flow_status",
 ];
+const IDENTITY_FIELD_ALIASES = {
+  imei1: ["imei1", "imei_1", "1_code", "code1", "one_code", "oneCode", "\u0031\u7801"],
+  imei2: ["imei2", "imei_2", "2_code", "code2", "two_code", "twoCode", "\u0032\u7801"],
+};
 const IMAGE_GROUP_WHITELIST = ["商品照片", "拆封照片", "SN码采集/激活照片"];
 const IMAGE_GROUP_ALIASES = {
   商品照片: ["商品照片"],
@@ -249,6 +253,11 @@ function valueAt(task, key) {
   return firstDefined(task?.fields?.[key], task?.[key], task?.source?.[key]);
 }
 
+function fieldValueAt(task, key) {
+  const aliases = IDENTITY_FIELD_ALIASES[key] || [key];
+  return firstDefined(...aliases.map((alias) => valueAt(task, alias)));
+}
+
 function compactObject(value) {
   const result = {};
   for (const [key, item] of Object.entries(value)) {
@@ -279,7 +288,7 @@ function sanitizeImageGroups(imageGroups = {}) {
 function sanitizeTask(task) {
   const fields = {};
   for (const key of AUDIT_FIELD_WHITELIST) {
-    const value = valueAt(task, key);
+    const value = fieldValueAt(task, key);
     if (value !== undefined && value !== null) fields[key] = value;
   }
   const source = {};

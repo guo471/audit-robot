@@ -202,6 +202,48 @@ def test_shadow_compare_reports_missing_required_fields_without_crashing(tmp_pat
     assert report["tasksWithMissingRequired"][0]["task_id"] == "order-missing"
 
 
+def test_shadow_compare_normalizes_identity_code_aliases(tmp_path):
+    tasks_dir = tmp_path / "tasks"
+    report_path = tmp_path / "shadow_report.json"
+    tasks_dir.mkdir()
+    (tasks_dir / "order-identity-alias.json").write_text(
+        json.dumps(
+            {
+                "task_id": "order-identity-alias",
+                "channel_order_no": "JL20260814001",
+                "product_type": "phone",
+                "system_sn": "SN123",
+                "imei_1": "111111111111111",
+                "twoCode": "222222222222222",
+                "image_groups": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    output = subprocess.check_output(
+        [
+            "node",
+            str(SCRIPT),
+            "--shadow-compare-tasks-dir",
+            str(tasks_dir),
+            "--shadow-report-path",
+            str(report_path),
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        encoding="utf-8",
+    )
+    result = json.loads(output)
+    sanitized = json.loads(
+        (Path(result["sanitizedTasksDir"]) / "order-identity-alias.json").read_text(encoding="utf-8")
+    )
+
+    assert sanitized["fields"]["imei1"] == "111111111111111"
+    assert sanitized["fields"]["imei2"] == "222222222222222"
+
+
 def test_shadow_compare_normalizes_sn_photo_group_alias_with_spaces(tmp_path):
     tasks_dir = tmp_path / "tasks"
     report_path = tmp_path / "shadow_report.json"

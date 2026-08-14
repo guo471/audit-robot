@@ -1392,10 +1392,37 @@ def _set_field_if_value(fields: dict[str, Any], key: str, value: Any) -> None:
         fields.setdefault(key, value)
 
 
+IDENTITY_CODE_FIELD_ALIASES = (
+    ("imei1", "imei1"),
+    ("imei_1", "imei1"),
+    ("1_code", "imei1"),
+    ("code1", "imei1"),
+    ("one_code", "imei1"),
+    ("oneCode", "imei1"),
+    ("\u0031\u7801", "imei1"),
+    ("imei2", "imei2"),
+    ("imei_2", "imei2"),
+    ("2_code", "imei2"),
+    ("code2", "imei2"),
+    ("two_code", "imei2"),
+    ("twoCode", "imei2"),
+    ("\u0032\u7801", "imei2"),
+)
+
+
+def _copy_identity_code_fields(fields: dict[str, Any], *sources: Mapping[str, Any]) -> None:
+    for source in sources:
+        for source_key, target_key in IDENTITY_CODE_FIELD_ALIASES:
+            _set_field_if_value(fields, target_key, source.get(source_key))
+
+
 def build_audit_task(order: Mapping[str, Any], detail: Mapping[str, Any] | None = None) -> dict[str, Any]:
     detail = dict(detail or {})
     if detail.get("fields") and detail.get("image_groups"):
         task = dict(detail)
+        fields = dict(task.get("fields") or {})
+        _copy_identity_code_fields(fields, order, detail)
+        task["fields"] = fields
         task["apply_id"] = canonical_apply_id(detail) or canonical_apply_id(order)
         task["channel_order_no"] = canonical_channel_order_no(detail) or canonical_channel_order_no(order)
         return task
@@ -1408,6 +1435,7 @@ def build_audit_task(order: Mapping[str, Any], detail: Mapping[str, Any] | None 
         ("sn", "system_sn"),
         ("systemSn", "system_sn"),
         ("system_sn", "system_sn"),
+        *IDENTITY_CODE_FIELD_ALIASES,
         ("categoryName", "category_name"),
         ("category_name", "category_name"),
         ("goodsName", "product_name"),
