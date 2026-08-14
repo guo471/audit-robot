@@ -6,7 +6,7 @@
 
 - [ ] 记录生产 ZIP 文件名：________________
 - [ ] 记录 SHA256：________________
-- [ ] 校验 `SHA256.txt` 与实际 ZIP SHA256 一致。
+- [ ] 校验同目录 `.SHA256.txt` 或负责人提供的 SHA256 与实际 ZIP SHA256 一致。
 - [ ] 解压后存在 `audit_robot/deploy/linux/00_README_FIRST.md`。
 - [ ] 解压后存在 `audit_robot/deploy/linux/README_DEPLOY.md`。
 - [ ] 解压后存在 `audit_robot/deploy/linux/PRODUCTION_ACCEPTANCE_CHECKLIST.md`。

@@ -177,12 +177,15 @@ if ($manifest.Count -lt 35) { throw "manifest too small: $($manifest.Count)" }
 $zipPath = Join-Path $OutputDir ($packageName + '.zip')
 Compress-Archive -LiteralPath $appDir, (Join-Path $packageDir 'DEPLOYMENT_HANDOFF.md'), (Join-Path $packageDir 'PACKAGE_CONTENTS.txt') -DestinationPath $zipPath -Force
 $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath
-[System.IO.File]::WriteAllText((Join-Path $packageDir 'SHA256.txt'), "SHA256  $($hash.Hash)  $([System.IO.Path]::GetFileName($zipPath))`n", [System.Text.UTF8Encoding]::new($false))
+$hashLine = "SHA256  $($hash.Hash)  $([System.IO.Path]::GetFileName($zipPath))`n"
+[System.IO.File]::WriteAllText((Join-Path $packageDir 'SHA256.txt'), $hashLine, [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText((Join-Path $OutputDir ($packageName + '.SHA256.txt')), $hashLine, [System.Text.UTF8Encoding]::new($false))
 
 [PSCustomObject]@{
   PackageDir = $packageDir
   ZipPath = $zipPath
   Sha256 = $hash.Hash
+  Sha256File = (Join-Path $OutputDir ($packageName + '.SHA256.txt'))
   FileCount = $manifest.Count
   Commit = $head
 } | ConvertTo-Json -Depth 3
